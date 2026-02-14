@@ -1,0 +1,16 @@
+# Fair Feeder V13 Dataset Configuration
+# YOLOv11 format — 5 detection classes for cat feeding behaviour monitoring
+
+path: .
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 5
+
+names:
+  0: Dan
+  1: Sanbo
+  2: Dan_hand
+  3: Bowl
+  4: Kibble

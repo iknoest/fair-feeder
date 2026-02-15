@@ -26,7 +26,7 @@ CLASS_COLORS = {
     4: (255, 0, 255),    # Kibble — Magenta
 }
 
-THUMB_W, THUMB_H = 320, 240
+THUMB_W, THUMB_H = 320, 180
 GRID_COLS = 4
 
 

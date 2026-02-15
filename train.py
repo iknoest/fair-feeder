@@ -34,7 +34,7 @@ def main():
     parser.add_argument("--weights", default="yolo11s.pt", help="Pretrained model (default: yolo11s.pt)")
     parser.add_argument("--epochs", type=int, default=100, help="Training epochs (default: 100)")
     parser.add_argument("--batch", type=int, default=8, help="Batch size (default: 8)")
-    parser.add_argument("--imgsz", type=int, default=1280, help="Image size (default: 1280)")
+    parser.add_argument("--imgsz", type=int, nargs="+", default=[1280, 720], help="Image size as W H (default: 1280 720)")
     parser.add_argument("--device", default=None, help="Device override (e.g. 0, cpu)")
     parser.add_argument("--project", default="runs/fair-feeder", help="Output project directory")
     parser.add_argument("--name", default="v13", help="Experiment name")

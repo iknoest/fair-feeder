@@ -41,7 +41,7 @@ kibble, and send structured feeding reports via Telegram.
 ### Non-functional requirements
 - Runs on Google Colab (free T4 GPU) — no dedicated server needed
 - Inference speed: < 50ms per frame at 1280px on T4
-- Video files up to 50 MB can be sent via Telegram; larger ones fall back to Drive path
+- Video files compressed with ffmpeg before Telegram upload; > 50 MB after compression falls back to Drive path
 - Secrets must never be hardcoded in committed code (Infisical for API keys)
 
 ---
@@ -128,6 +128,17 @@ fair-feeder/
 - [x] Orphaned snapshot cleanup in summarize()
 - [x] Production acceptance criteria documented in notebook
 - [x] Live monitoring with MediaPipe (main.py)
+- [x] Tapo credentials loaded from Infisical (config.py)
+- [x] Early exit when bowl is empty (no cats + kibble = 0) for 5s
+- [x] Telegram message redesigned: UX-focused, mobile-friendly, short separators
+- [x] Timeline chart sent to Telegram after each video
+- [x] Timestamps in summary show time-only (date shown only if different from video start)
+- [x] Each video sends its own Telegram message immediately after processing
+- [x] Large videos compressed with ffmpeg before Telegram upload
+- [x] Compensation calculation: how many extra kibble Dan needs if Sanbo stole food
+- [x] Smart alerts: Sanbo arrived early, Dan ate nothing, Sanbo out-ate Dan, etc.
+- [x] Kibble share % bar (Unicode blocks) in Telegram summary
+- [x] Model versioning via MODELS.md
 
 ### In progress
 - [ ] Testing model on more real-world videos (owner ran 2 so far)
@@ -136,8 +147,7 @@ fair-feeder/
 ### Planned next (prioritized)
 1. Run 5–10 more test videos across different scenarios (IR, motion blur, two cats)
 2. Evaluate if model needs retraining with more examples
-3. Move Tapo camera credentials out of config.py into Infisical
-4. Automate video-to-analysis pipeline (currently manual notebook runs)
+3. Automate video-to-analysis pipeline (currently manual notebook runs)
 
 ---
 
@@ -150,8 +160,9 @@ fair-feeder/
   Mitigated with rolling median (window=3), but not eliminated.
 - **Dan_hand detection requires Dan body in frame** — if the hand enters
   frame before the cat body, it won't be detected until both are visible.
-- **Telegram video limit is 50 MB** — longer videos exceed this and only
-  a Drive path is sent instead.
+- **Telegram video limit is 50 MB** — larger videos are compressed with
+  ffmpeg (H.264, crf=28, 720p) before upload. If still > 50 MB after
+  compression, a Drive path is sent as fallback.
 - **FeedingTracker stores frame copies in memory** for kibble-dispensed
   snapshots, which increases RAM usage during long videos.
 
@@ -184,12 +195,15 @@ fair-feeder/
 | 8 | `model.val()` gave wrong metrics (0.000 for some classes) | Roboflow exported polygon annotations; YOLO dropped them during val | Added polygon→bbox conversion before validation | bfaeddc |
 | 9 | Per-class AP50 showed wrong class names | YOLO sorts classes alphabetically; index 0 ≠ class 0 | Used `model.names` dict for correct index mapping | fc9078f |
 | 10 | `imgsz=1280` warning about stride-32 | Passing tuple instead of int | Changed to single int `imgsz=1280` | f8ede5d |
+| 11 | Telegram message too wide — long `━` separators stretched bubble | Fixed-width characters forced full-width bubble on mobile | Replaced with short `── Section ──` style headers | f9fe9d5+ |
+| 12 | Timestamps in summary showed full date+time for every event | No date deduplication | `_fmt_time()`: strip date if same as video start date | f9fe9d5+ |
+| 13 | Video > 50 MB silently fell back to Drive path with no inline playback | Bot API limit; no compression step | Added ffmpeg H.264 compression (crf=28, 720p) before upload | f9fe9d5+ |
+| 14 | All videos sent to Telegram only after all processing finished | `video_summaries` collected first, then sent in cell 15 | Moved send call into cell 14's per-video loop | f9fe9d5+ |
+| 15 | Tapo credentials hardcoded in config.py | Fallback default values in source | `config.py` now loads from Infisical; falls back to env vars | f9fe9d5 |
 
 ### Unresolved
 - **Detection model quality** — only 2 test videos run so far; need 5–10 across
   all 8 scenarios before declaring production-ready
-- **Tapo camera password hardcoded** in `config.py` line 21 as fallback default —
-  should be moved to Infisical or `.env`
 
 ---
 
@@ -208,6 +222,11 @@ fair-feeder/
 | Dan_hand requires Dan body co-detection | Hand can't exist without the cat; eliminates stray false positives | Confidence-only threshold (too many FPs); larger bounding box check (misses edge cases) |
 | Copy-paste augmentation at 30% | Fixes kibble class imbalance without distorting real distribution | Oversampling (less diverse); higher rate (introduced artifacts) |
 | `rect=True` for training and inference | Preserves 16:9 aspect ratio of Tapo footage; prevents letterbox distortion | Square padding (distorts cat proportions; worse mAP) |
+| Early exit on empty bowl (no cats + kibble=0 for 5s) | Long videos with inactive periods waste GPU and analysis time | Never exit early (wastes time); exit on no-cat-detected (too aggressive) |
+| ffmpeg compression (crf=28, 720p) for Telegram | Most feeding videos fit under 50 MB after compression; inline playback maintained | Send as document (no compression but no inline playback); skip large videos |
+| Per-video Telegram send inside processing loop | User gets result for each video immediately; no waiting for all videos to finish | Batch send at end (user waits longer; retry harder) |
+| `_fmt_time()` strips date when same as video start | Redundant dates clutter mobile Telegram bubble; date is already in header | Always show full timestamp (repetitive); never show date (breaks overnight reads) |
+| Compensation = `sanbo_kibble_eaten` | Most actionable metric for owner — directly answers "how much extra does Dan need?" | Show percentage only (less actionable) |
 
 ---
 
@@ -226,7 +245,6 @@ fair-feeder/
 
 ### Still open (nice-to-have)
 - Scheduling implementation details (cron, Cloud Functions, etc.)
-- Performance optimization for videos > 50 MB (current Telegram limit)
 
 ---
 

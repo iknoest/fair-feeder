@@ -213,19 +213,20 @@ fair-feeder/
 
 ## 8. PENDING / NEEDS CLARIFICATION
 
-- **Infisical secret names for Telegram** — currently using `TelegramBotToken` and
-  `TelegramChatId`. Confirm these match what you created in Infisical, or tell me the
-  actual names.
-- **Tapo camera credentials** — `config.py` line 21 has a hardcoded password as a
-  fallback. Should this be moved to Infisical too? (Currently only used by `main.py`
-  which runs locally, not in Colab.)
-- **Automated scheduling** — do you want video processing to run automatically
-  (e.g., on a schedule, triggered by new files in Drive), or is manual notebook
-  execution sufficient for now?
-- **Additional cats** — if a third cat is ever introduced, the model and tracker
-  would need retraining and code changes. Is this a concern?
-- **Model versioning** — the trained model is stored on Google Drive. Should we
-  version it more formally (e.g., tag in git, MLflow)?
+### Resolved ✓
+- **Infisical secret names for Telegram** — `TelegramBotToken` and `TelegramChatId` confirmed.
+- **Tapo camera credentials** — `TAPO_IP`, `TAPO_USER`, `TAPO_PASS` moved to Infisical with
+  fallback to env vars for local use (main.py). Updated `config.py` to load from Infisical
+  when available.
+- **Automated scheduling** — Owner wants automatic video processing pipeline; smoketest runs
+  manually in notebook. Next phase: schedule Drive uploads or integrate trigger system.
+- **Additional cats** — Not expected; no need for multi-cat architecture redesign.
+- **Model versioning** — Will use lightweight `MODELS.md` file (git-tracked) to log each
+  trained model: name, mAP50, date, Colab commit, Drive path, notes.
+
+### Still open (nice-to-have)
+- Scheduling implementation details (cron, Cloud Functions, etc.)
+- Performance optimization for videos > 50 MB (current Telegram limit)
 
 ---
 

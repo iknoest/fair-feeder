@@ -55,12 +55,13 @@ kibble, and send structured feeding reports via Telegram.
 | Training | Google Colab / Kaggle (T4 GPU) | Free GPU, no local hardware needed |
 | Dataset | Roboflow (ir-kibble v13) | Managed labelling + versioning + export |
 | OCR | EasyOCR | Reads Tapo's burned-in timestamp from video frames |
-| Camera | Tapo C210 (RTSP) | IR night vision, 2K resolution, affordable |
-| Live detection | MediaPipe EfficientDet Lite2 | Local real-time cat detection (main.py) |
+| Camera | Tapo C210 (RTSP + ONVIF) | IR night vision, 2K resolution, affordable |
+| Motion recording | ONVIF PullPoint events | Camera-side motion detection triggers recording |
+| Live detection | MediaPipe EfficientDet Lite2 | Local real-time cat detection (main.py, motion_recorder.py) |
 | Cat identification | Custom histogram analysis | Distinguishes Dan (tuxedo/dark) from Sanbo (calico/orange) |
 | Secret management | Infisical SDK | Stores Roboflow key, Telegram credentials |
 | Notifications | Telegram Bot API | Sends summaries, photos, video to owner's phone |
-| Storage | Google Drive | Persistent storage for models, videos, outputs |
+| Storage | Google Drive (mounted as H:\) | Persistent storage for models, videos, outputs |
 | Experiment tracking | Weights & Biases | Training metrics, loss curves, checkpoints |
 
 ### Project structure
@@ -74,6 +75,9 @@ fair-feeder/
 ├── polygon_to_bbox.py         # Convert polygon annotations → YOLO bbox
 ├── verify_labels.py           # Visual label verification grid
 ├── tapo_check.py              # RTSP connection tester
+├── check_onvif.py             # ONVIF + RTSP connectivity diagnostic
+├── motion_recorder.py         # Motion-triggered recording (ONVIF → RTSP → .mp4)
+├── README_GIT_PULL.md         # Setup guide for credentials after git pull
 ├── test_env.py                # Environment validation
 ├── data.yaml                  # YOLO dataset config (5 classes)
 ├── requirements.txt           # Core dependencies
@@ -92,8 +96,9 @@ fair-feeder/
 - `ultralytics` — YOLOv11 training & inference
 - `roboflow` — dataset download
 - `easyocr` — timestamp OCR
-- `opencv-python` — video/image processing
-- `mediapipe` — real-time detection (main.py)
+- `opencv-python` — video/image processing, RTSP frame reading, recording
+- `mediapipe` — real-time detection (main.py, motion_recorder.py cat filter)
+- `onvif-zeep-async` — ONVIF camera event subscription (motion detection)
 - `infisical-sdk` — secret management
 - `requests` — Telegram Bot API calls
 
@@ -139,6 +144,12 @@ fair-feeder/
 - [x] Smart alerts: Sanbo arrived early, Dan ate nothing, Sanbo out-ate Dan, etc.
 - [x] Kibble share % bar (Unicode blocks) in Telegram summary
 - [x] Model versioning via MODELS.md
+- [x] Motion-triggered recording via ONVIF events (`motion_recorder.py`)
+- [x] ONVIF debounce handling (tolerates Tapo's 1-3s internal event gaps)
+- [x] Duration in recording filename (e.g. `motion_20260223_123456_4m_26s.mp4`)
+- [x] Cat detection filter: auto-deletes no-cat recordings using EfficientDet
+- [x] ONVIF/RTSP diagnostic tool (`check_onvif.py`)
+- [x] Credentials sanitized for Git (placeholders + `README_GIT_PULL.md`)
 
 ### In progress
 - [ ] Testing model on more real-world videos (owner ran 2 so far)
@@ -200,6 +211,9 @@ fair-feeder/
 | 13 | Video > 50 MB silently fell back to Drive path with no inline playback | Bot API limit; no compression step | Added ffmpeg H.264 compression (crf=28, 720p) before upload | f9fe9d5+ |
 | 14 | All videos sent to Telegram only after all processing finished | `video_summaries` collected first, then sent in cell 15 | Moved send call into cell 14's per-video loop | f9fe9d5+ |
 | 15 | Tapo credentials hardcoded in config.py | Fallback default values in source | `config.py` now loads from Infisical; falls back to env vars | f9fe9d5 |
+| 16 | `motion_recorder.py` TypeError on `create_pullpoint_manager` | Missing `subscription_lost_callback` keyword arg | Added the callback parameter | — |
+| 17 | Recording stops and restarts during continuous motion | Tapo ONVIF firmware sends events in bursts with 1-3s gaps (debounce) | Changed stop logic to use `last_motion_time` timer instead of instantaneous flag; only stops after full 5s with no event | — |
+| 18 | Tapo password hardcoded in `motion_recorder.py` fallback | Default value contained real password | Replaced with `<YOUR_CAMERA_PASSWORD>` placeholder; credentials via env vars | — |
 
 ### Unresolved
 - **Detection model quality** — only 2 test videos run so far; need 5–10 across
@@ -227,6 +241,11 @@ fair-feeder/
 | Per-video Telegram send inside processing loop | User gets result for each video immediately; no waiting for all videos to finish | Batch send at end (user waits longer; retry harder) |
 | `_fmt_time()` strips date when same as video start | Redundant dates clutter mobile Telegram bubble; date is already in header | Always show full timestamp (repetitive); never show date (breaks overnight reads) |
 | Compensation = `sanbo_kibble_eaten` | Most actionable metric for owner — directly answers "how much extra does Dan need?" | Show percentage only (less actionable) |
+| ONVIF events for motion over frame-based MOG2 | Offloads processing to camera; no CPU-heavy background subtraction | MOG2 (high CPU on 2K stream); YOLO-based motion (overkill for trigger) |
+| Cat detection filter using EfficientDet (2s interval) | Lightweight, already available locally; avoids saving useless clips (e.g. human walking by) | No filter (fills Drive with junk); YOLO (too heavy for continuous sampling) |
+| Delete all no-cat videos regardless of duration | User wants only cat clips saved; short clips are often false triggers | Keep short clips as safety buffer (user rejected) |
+| `last_motion_time` timer for recording stop | Tapo sends events in bursts with gaps; instantaneous flag causes premature stops | Per-poll `motion_detected` flag (broken by Tapo firmware debounce) |
+| Credentials via env vars with placeholders in source | Git-safe; easy local setup via `$env:TAPO_PASS` | `.env` file (risk of commit); Infisical-only (not available locally) |
 
 ---
 

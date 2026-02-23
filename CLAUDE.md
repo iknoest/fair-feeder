@@ -82,9 +82,12 @@ fair-feeder/
 ├── data.yaml                  # YOLO dataset config (5 classes)
 ├── requirements.txt           # Core dependencies
 ├── fair_feeder_v13.ipynb      # Training notebook (Colab/Kaggle)
-├── smoketest.ipynb            # Inference + feeding analysis notebook
+├── smoketest.ipynb            # Inference + feeding analysis (staged pipeline)
 ├── efficientdet_lite0.tflite  # MediaPipe model (7 MB, lighter)
 ├── efficientdet_lite2.tflite  # MediaPipe model (12 MB, primary)
+├── tasks/
+│   ├── todo.md                # Current task tracking (checkable items)
+│   └── lessons.md             # Self-improvement log (updated after corrections)
 └── vision/
     ├── __init__.py
     ├── detector.py            # MediaPipe object detection wrapper
@@ -150,6 +153,9 @@ fair-feeder/
 - [x] Cat detection filter: auto-deletes no-cat recordings using EfficientDet
 - [x] ONVIF/RTSP diagnostic tool (`check_onvif.py`)
 - [x] Credentials sanitized for Git (placeholders + `README_GIT_PULL.md`)
+- [x] Smoketest pipeline reorganized into 3 stages (YOLO cache → analytics → output)
+- [x] Detection cache stores compressed JPEG frames (~50KB/frame) for instant replay
+- [x] Phase 2 (analytics) re-runnable in <2s without video I/O
 
 ### In progress
 - [ ] Testing model on more real-world videos (owner ran 2 so far)
@@ -246,6 +252,8 @@ fair-feeder/
 | Delete all no-cat videos regardless of duration | User wants only cat clips saved; short clips are often false triggers | Keep short clips as safety buffer (user rejected) |
 | `last_motion_time` timer for recording stop | Tapo sends events in bursts with gaps; instantaneous flag causes premature stops | Per-poll `motion_detected` flag (broken by Tapo firmware debounce) |
 | Credentials via env vars with placeholders in source | Git-safe; easy local setup via `$env:TAPO_PASS` | `.env` file (risk of commit); Infisical-only (not available locally) |
+| JPEG-compressed frames in detection cache | ~50KB/frame vs ~9MB raw; enables Phase 2 replay without video I/O | Raw numpy arrays (too large, ~9MB/frame); no frames in cache (requires slow video seeking) |
+| 3-stage pipeline (cache → analytics → output) | YOLO runs once; analytics re-runnable in <2s for threshold tuning | Monolithic cell (re-runs everything); 2-stage with video seeking (still slow for snapshots) |
 
 ---
 
@@ -267,9 +275,61 @@ fair-feeder/
 
 ---
 
-## 9. CONVENTIONS & RULES FOR AI
+## 9. WORKFLOW ORCHESTRATION
 
-### Coding style
+### 1. Plan Mode Default
+- Enter plan mode for ANY non-trivial task (3+ steps or architectural decisions)
+- If something goes sideways, **STOP and re-plan immediately** — don't keep pushing
+- Use plan mode for verification steps, not just building
+- Write detailed specs upfront to reduce ambiguity
+
+### 2. Self-Improvement Loop
+- After ANY correction from the user: update `tasks/lessons.md` with the pattern
+- Write rules that prevent the same mistake
+- Ruthlessly iterate on these lessons until mistake rate drops
+- Review `tasks/lessons.md` at session start
+
+### 3. Verification Before Done
+- Never mark a task complete without proving it works
+- Diff behavior between main and your changes when relevant
+- Ask yourself: "Would a staff engineer approve this?"
+- Run tests, check logs, demonstrate correctness
+
+### 4. Demand Elegance (Balanced)
+- For non-trivial changes: pause and ask "is there a more elegant way?"
+- If a fix feels hacky: "Knowing everything I know now, implement the elegant solution"
+- Skip this for simple, obvious fixes — don't over-engineer
+- Challenge your own work before presenting it
+
+### 5. Autonomous Bug Fixing
+- When given a bug report: just fix it. Don't ask for hand-holding
+- Point at logs, errors, failing tests — then resolve them
+- Zero context switching required from the user
+
+---
+
+## 10. TASK MANAGEMENT
+
+1. **Plan First**: Write plan to `tasks/todo.md` with checkable items
+2. **Verify Plan**: Check in before starting implementation
+3. **Track Progress**: Mark items complete as you go
+4. **Explain Changes**: High-level summary at each step
+5. **Document Results**: Add review section to `tasks/todo.md`
+6. **Capture Lessons**: Update `tasks/lessons.md` after corrections
+
+---
+
+## 11. CORE PRINCIPLES
+
+- **Simplicity First**: Make every change as simple as possible. Impact minimal code.
+- **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
+- **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
+
+---
+
+## 12. CODING CONVENTIONS
+
+### Style
 - Python, no type annotations unless already present in the file being edited
 - Use existing helper functions (`draw_boxes`, `bbox_iou`, `parse_results`, etc.)
   before creating new ones
@@ -288,6 +348,8 @@ fair-feeder/
 - Load secrets from Infisical — never hardcode API keys or tokens
 - Test regex changes against partial OCR reads (e.g., `"09:51:5"`, `"2026-01-25"`)
 - Clean up orphaned snapshots when filtering episodes in `summarize()`
+- When modifying `.ipynb` files, use a Python script to update the JSON programmatically
+  (cannot edit `.ipynb` directly with editor tools)
 
 ### Never do
 - Never hardcode API keys, tokens, or passwords in committed code
@@ -305,3 +367,42 @@ fair-feeder/
 - Use the actual class names (Dan, Sanbo, Dan_hand, Bowl, Kibble) not generic terms
 - When reporting issues, show the actual output vs expected output
 - For model quality discussions, reference mAP50 and per-class AP50 numbers
+
+---
+
+## 13. SMOKETEST PIPELINE ARCHITECTURE
+
+The `smoketest.ipynb` notebook uses a **3-stage pipeline** for efficient iteration:
+
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
+│  Phase 1    │     │  Phase 2     │     │  Phase 3        │
+│  YOLO +     │────▶│  Analytics   │────▶│  Output +       │
+│  Cache      │     │  (re-run!)   │     │  Telegram       │
+│  (slow)     │     │  (<2s)       │     │  (save & send)  │
+└─────────────┘     └──────────────┘     └─────────────────┘
+```
+
+| Cell | ID | What it does | Speed |
+|------|----|-------------|-------|
+| Phase 1 | `detect-and-cache` | YOLO inference + JPEG frame cache + annotated video | Slow (minutes) |
+| Phase 2 | `analyze-from-cache` | FeedingTracker with tunable params, no video I/O | Fast (<2s) |
+| Phase 3 | `output-and-telegram` | Save summaries, snapshots, timeline; send Telegram | Fast (<5s) |
+| Retry | `discord-notification` | Re-send to Telegram if send failed | Fast |
+
+### Cache format (pickle)
+- `frames[i].detections` — YOLO bounding boxes
+- `frames[i].timestamp` — OCR timestamp string
+- `frames[i].jpeg` — compressed JPEG bytes (~50KB/frame)
+
+### Iteration workflow for tuning
+1. Run Phase 1 once (creates `_detections.pkl` cache)
+2. Change thresholds in the Config cell (e.g. `SANBO_MIN_CONSECUTIVE_FRAMES`)
+3. Re-run Phase 2 only — results appear in ~2 seconds
+4. Repeat until satisfied, then run Phase 3 to save and send
+
+---
+
+## 14. LESSONS LEARNED
+
+See [`tasks/lessons.md`](tasks/lessons.md) — updated after every correction.

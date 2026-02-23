@@ -14,3 +14,4 @@ recordings_temp/
 # OS files
 Thumbs.db
 .DS_Store
+_update_notebook.py

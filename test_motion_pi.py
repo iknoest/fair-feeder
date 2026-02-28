@@ -210,7 +210,6 @@ class RTSPFrameReader:
 
 class RecordingController:
     """Manages start/stop of video recording based on motion events."""
-
     # How often to sample a frame for cat detection (seconds)
     CAT_CHECK_INTERVAL = 2
 
@@ -223,7 +222,6 @@ class RecordingController:
         self.clips_saved = 0
         self.clips_deleted = 0
         self._last_motion_ts = 0
-
 
     def tick(self):
         now = time.time()
@@ -277,7 +275,7 @@ class RecordingController:
             self.cat_seen = True
             best = max(detections, key=lambda d: d['score'])
             elapsed = time.time() - self.recording_start
-            log.info(f'🐱 Cat detected! (conf={best["score"]:.0%}, t={elapsed:.0f}s)')
+            log.info(f'   🐱 Cat detected! (conf={best["score"]:.0%}, t={elapsed:.0f}s)')
 
     def _duration_str(self, seconds):
         m, s = divmod(int(seconds), 60)
@@ -340,7 +338,8 @@ class RecordingController:
         shutil.move(str(final_temp), str(dest))
         self.clips_saved += 1
         size_mb = dest.stat().st_size / (1024 * 1024)
-        log.info(f'✅ Saved: {final_name} ({size_mb:.1f} MB)')
+        cat_status = '🐱' if self.cat_seen else '❓ no cat'
+        log.info(f'✅ Saved: {final_name} ({size_mb:.1f} MB) [{cat_status}]')
 
         # Trigger rclone sync on Pi
         if platform.system() != 'Windows':
@@ -367,6 +366,10 @@ if __name__ == '__main__':
     log.info(f'Max recording: {MAX_RECORDING_SECS}s')
     log.info('')
 
+    reader = RTSPFrameReader(RTSP_URL, buffer_seconds=PRE_BUFFER_SECONDS, fps=VIDEO_FPS)
+    motion = FrameMotionDetector(threshold=MOTION_THRESHOLD)
+    reader.start()
+
     # Initialize cat detector (MediaPipe EfficientDet)
     cat_detector = None
     try:
@@ -375,11 +378,7 @@ if __name__ == '__main__':
                                    min_detection_confidence=0.35)
         log.info('🐱 Cat detector loaded (EfficientDet Lite2)')
     except Exception as e:
-        log.warning(f'Cat detector not available ({e}) — all clips will be kept')
-
-    reader = RTSPFrameReader(RTSP_URL, buffer_seconds=PRE_BUFFER_SECONDS, fps=VIDEO_FPS)
-    motion = FrameMotionDetector(threshold=MOTION_THRESHOLD)
-    reader.start()
+        log.warning(f'⚠️  Cat detector not available ({e}) — all clips will be kept')
 
     # Wait for buffer to fill and MOG2 to warm up
     log.info(f'⏳ Warming up background model ({motion._warmup_needed} frames)...')
@@ -405,6 +404,7 @@ if __name__ == '__main__':
             if time.time() - last_status >= status_interval:
                 state = '🔴 REC' if controller.is_recording else '⏸️  Idle'
                 log.info(f'{state} | Saved: {controller.clips_saved}'
+                         f' | Deleted: {controller.clips_deleted}'
                          f' | Frames: {reader.frames_read}')
                 last_status = time.time()
 
@@ -415,4 +415,4 @@ if __name__ == '__main__':
         log.info('👋 Stopping...')
         if controller.is_recording:
             controller._stop_recording()
-        log.info(f'Total clips saved: {controller.clips_saved}')
+        log.info(f'Total saved: {controller.clips_saved}, deleted: {controller.clips_deleted}')

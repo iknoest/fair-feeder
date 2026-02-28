@@ -213,10 +213,10 @@ class RecordingController:
     # How often to sample a frame for cat detection (seconds)
     CAT_CHECK_INTERVAL = 2
 
-    def __init__(self, reader, motion_detector, cat_detector=None):
+    def __init__(self, reader, motion_detector, active_filter=True):
         self.reader = reader
         self.motion = motion_detector
-        self.cat_detector = cat_detector
+        self.active_filter = active_filter
         self.is_recording = False
         self.writer = None
         self.clips_saved = 0
@@ -249,11 +249,11 @@ class RecordingController:
                 self.writer.write(frame)
                 self.frames_written += 1
 
-                # Periodic cat detection check
-                if self.cat_detector and not self.cat_seen:
+                # Periodic object size detection check
+                if self.active_filter and not self.cat_seen:
                     if now - self._last_cat_check >= self.CAT_CHECK_INTERVAL:
                         self._last_cat_check = now
-                        self._check_for_cat(frame)
+                        self._check_for_large_blob(frame)
 
             elapsed = now - self.recording_start
 
@@ -265,17 +265,34 @@ class RecordingController:
                 log.info(f'⏸️  No motion for {COOLDOWN_SECONDS}s — stopping')
                 self._stop_recording()
 
-    def _check_for_cat(self, frame):
-        """Run cat detection on a downscaled frame."""
+    def _check_for_large_blob(self, frame):
+        """
+        Fallback cat detection: uses OpenCV contours to find large moving blobs.
+        If a blob takes up more than 3% of the downscaled frame, we assume it's a cat.
+        """
+        # We can reuse the MOG2 background subtractor mask if we pass the frame through it
         h, w = frame.shape[:2]
-        scale = 640 / w
-        small = cv2.resize(frame, (640, int(h * scale)))
-        detections = self.cat_detector.detect(small, filter_cats=True)
-        if detections:
-            self.cat_seen = True
-            best = max(detections, key=lambda d: d['score'])
-            elapsed = time.time() - self.recording_start
-            log.info(f'   🐱 Cat detected! (conf={best["score"]:.0%}, t={elapsed:.0f}s)')
+        scale = 320 / w
+        small = cv2.resize(frame, (320, int(h * scale)))
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (21, 21), 0)
+        
+        # Get the foreground mask from our existing motion detector
+        fg_mask = self.motion.bg_sub.apply(blurred, learningRate=0) # learningRate=0 prevents altering the bg model
+
+        # Find contours (blobs)
+        contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contours:
+            # Get the largest contour area
+            largest_area = max(cv2.contourArea(c) for c in contours)
+            total_area = small.shape[0] * small.shape[1]
+            
+            # If the largest moving blob is > 3% of the screen, it's big enough to be a cat
+            if largest_area / total_area > 0.03:
+                self.cat_seen = True
+                elapsed = time.time() - self.recording_start
+                log.info(f'   🐱 Large moving object detected! (Size: {largest_area/total_area:.1%}, t={elapsed:.0f}s)')
 
     def _duration_str(self, seconds):
         m, s = divmod(int(seconds), 60)
@@ -307,9 +324,9 @@ class RecordingController:
         self._last_cat_check = time.time()
         log.info(f'🔴 Recording started: {self._base_name} (pre-buffer: {len(pre_frames)} frames)')
 
-        # Check pre-buffer frames for cat (catches cats already in frame)
-        if self.cat_detector and pre_frames:
-            self._check_for_cat(pre_frames[-1])
+        # Check pre-buffer frames for large blobs (catches cats already in frame)
+        if self.active_filter and pre_frames:
+            self._check_for_large_blob(pre_frames[-1])
 
     def _stop_recording(self):
         if self.writer:
@@ -324,8 +341,8 @@ class RecordingController:
             log.warning('Recording stopped but no file found')
             return
 
-        # Cat detection filter: delete if no cat found in any sampled frame
-        if self.cat_detector and not self.cat_seen:
+        # Object size filter: delete if no large blob found in any sampled frame
+        if self.active_filter and not self.cat_seen:
             self.temp_path.unlink()
             self.clips_deleted += 1
             log.info(f'🗑️  Deleted (no cat, {dur_str}): {final_name}')
@@ -370,15 +387,9 @@ if __name__ == '__main__':
     motion = FrameMotionDetector(threshold=MOTION_THRESHOLD)
     reader.start()
 
-    # Initialize cat detector (MediaPipe EfficientDet)
-    cat_detector = None
-    try:
-        from vision.detector import CatDetector
-        cat_detector = CatDetector(model_path='efficientdet_lite2.tflite',
-                                   min_detection_confidence=0.35)
-        log.info('🐱 Cat detector loaded (EfficientDet Lite2)')
-    except Exception as e:
-        log.warning(f'⚠️  Cat detector not available ({e}) — all clips will be kept')
+    # Fallback to OpenCV contour filtering since TensorFlow Lite / MediaPipe
+    # cannot be installed natively on Raspberry Pi 5 without compilation.
+    log.info('🐱 Cat filter active (using OpenCV contour blob sizing)')
 
     # Wait for buffer to fill and MOG2 to warm up
     log.info(f'⏳ Warming up background model ({motion._warmup_needed} frames)...')
@@ -389,7 +400,7 @@ if __name__ == '__main__':
         time.sleep(1.0 / VIDEO_FPS)
     log.info('✅ Background model ready')
 
-    controller = RecordingController(reader, motion, cat_detector=cat_detector)
+    controller = RecordingController(reader, motion, active_filter=True)
     log.info('')
     log.info('🚀 Monitoring for motion... Press Ctrl+C to stop.')
     log.info('')

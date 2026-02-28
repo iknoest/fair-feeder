@@ -10,6 +10,9 @@
 3. Automate video-to-analysis pipeline (currently manual notebook runs)
 
 ## Recently Completed
+- [x] Raspberry Pi deployment: `systemd` auto-start service (`cat-monitor.service`)
+- [x] Background `rclone bisync` trigger inside `motion_recorder.py` for headless Drive sync
+- [x] OS path detection (Windows vs Pi) for output directories
 - [x] Smoketest pipeline reorganized into 3 stages (YOLO cache → analytics → output)
 - [x] Detection cache stores compressed JPEG frames (~50KB/frame)
 - [x] Motion-triggered recording via ONVIF events (`motion_recorder.py`)

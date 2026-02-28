@@ -156,6 +156,9 @@ fair-feeder/
 - [x] Smoketest pipeline reorganized into 3 stages (YOLO cache → analytics → output)
 - [x] Detection cache stores compressed JPEG frames (~50KB/frame) for instant replay
 - [x] Phase 2 (analytics) re-runnable in <2s without video I/O
+- [x] Raspberry Pi migration: automatic OS path detection for local outputs
+- [x] Google Drive background sync via fire-and-forget `rclone bisync`
+- [x] systemd service (`cat-monitor.service`) to run motion recorder 24/7 on Pi
 
 ### In progress
 - [ ] Testing model on more real-world videos (owner ran 2 so far)
@@ -254,6 +257,8 @@ fair-feeder/
 | Credentials via env vars with placeholders in source | Git-safe; easy local setup via `$env:TAPO_PASS` | `.env` file (risk of commit); Infisical-only (not available locally) |
 | JPEG-compressed frames in detection cache | ~50KB/frame vs ~9MB raw; enables Phase 2 replay without video I/O | Raw numpy arrays (too large, ~9MB/frame); no frames in cache (requires slow video seeking) |
 | 3-stage pipeline (cache → analytics → output) | YOLO runs once; analytics re-runnable in <2s for threshold tuning | Monolithic cell (re-runs everything); 2-stage with video seeking (still slow for snapshots) |
+| Background rclone sync per recording | Fire-and-forget `subprocess.Popen` keeps Python responsive so it doesn't miss the next motion capture | Synchronous Python upload (blocks the loop and drops frames while uploading) |
+| OS platform detection for output paths | Single script runs on both Windows dev environment and Pi seamlessly | Maintaining separate branch or script for Raspberry Pi |
 
 ---
 

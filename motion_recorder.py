@@ -39,8 +39,15 @@ COOLDOWN_SECONDS    = 5
 MAX_RECORDING_SECS  = 150    
 VIDEO_FPS           = 15     
 
+import platform
+
 # Google Drive path
-DRIVE_OUTPUT_DIR = Path(r'H:\My Drive\Fun Project\Cat monitor\TAPO_autoupload')
+if platform.system() == 'Windows':
+    DRIVE_OUTPUT_DIR = Path(r'H:\My Drive\Fun Project\Cat monitor\TAPO_autoupload')
+else:
+    # Raspberry Pi rclone path
+    DRIVE_OUTPUT_DIR = Path('/home/pi5/Pictures/gdrive-randomdice-sync')
+
 LOCAL_TEMP_DIR   = Path('recordings_temp')
 
 # Ensure directories exist
@@ -244,6 +251,17 @@ class RecordingController:
         size_mb = dest.stat().st_size / (1024 * 1024)
         cat_status = '🐱' if self.cat_seen else '❓ no cat'
         print(f'✅ Saved: {final_name} ({size_mb:.1f} MB) [{cat_status}]')
+
+        # Trigger rclone sync if on Raspberry Pi
+        if platform.system() != 'Windows':
+            import subprocess
+            print('🔄 Triggering rclone to Google Drive...')
+            # Run in the background (fire-and-forget) so it doesn't block the next recording
+            subprocess.Popen(
+                ["rclone", "bisync", str(DRIVE_OUTPUT_DIR), "gdrive-randomdice:", "--progress"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
 
 # ── MAIN ───────────────────────────────────────────────────────────
 

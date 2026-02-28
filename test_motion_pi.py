@@ -211,14 +211,19 @@ class RTSPFrameReader:
 class RecordingController:
     """Manages start/stop of video recording based on motion events."""
 
-    def __init__(self, reader, motion_detector):
+    # How often to sample a frame for cat detection (seconds)
+    CAT_CHECK_INTERVAL = 2
+
+    def __init__(self, reader, motion_detector, cat_detector=None):
         self.reader = reader
         self.motion = motion_detector
+        self.cat_detector = cat_detector
         self.is_recording = False
         self.writer = None
         self.clips_saved = 0
         self.clips_deleted = 0
         self._last_motion_ts = 0
+
 
     def tick(self):
         now = time.time()
@@ -246,6 +251,12 @@ class RecordingController:
                 self.writer.write(frame)
                 self.frames_written += 1
 
+                # Periodic cat detection check
+                if self.cat_detector and not self.cat_seen:
+                    if now - self._last_cat_check >= self.CAT_CHECK_INTERVAL:
+                        self._last_cat_check = now
+                        self._check_for_cat(frame)
+
             elapsed = now - self.recording_start
 
             # Stop conditions
@@ -255,6 +266,18 @@ class RecordingController:
             elif seconds_since_motion >= COOLDOWN_SECONDS:
                 log.info(f'⏸️  No motion for {COOLDOWN_SECONDS}s — stopping')
                 self._stop_recording()
+
+    def _check_for_cat(self, frame):
+        """Run cat detection on a downscaled frame."""
+        h, w = frame.shape[:2]
+        scale = 640 / w
+        small = cv2.resize(frame, (640, int(h * scale)))
+        detections = self.cat_detector.detect(small, filter_cats=True)
+        if detections:
+            self.cat_seen = True
+            best = max(detections, key=lambda d: d['score'])
+            elapsed = time.time() - self.recording_start
+            log.info(f'🐱 Cat detected! (conf={best["score"]:.0%}, t={elapsed:.0f}s)')
 
     def _duration_str(self, seconds):
         m, s = divmod(int(seconds), 60)
@@ -282,7 +305,13 @@ class RecordingController:
         self.is_recording = True
         self.recording_start = time.time()
         self.frames_written = len(pre_frames)
+        self.cat_seen = False
+        self._last_cat_check = time.time()
         log.info(f'🔴 Recording started: {self._base_name} (pre-buffer: {len(pre_frames)} frames)')
+
+        # Check pre-buffer frames for cat (catches cats already in frame)
+        if self.cat_detector and pre_frames:
+            self._check_for_cat(pre_frames[-1])
 
     def _stop_recording(self):
         if self.writer:
@@ -295,6 +324,13 @@ class RecordingController:
 
         if not self.temp_path.exists():
             log.warning('Recording stopped but no file found')
+            return
+
+        # Cat detection filter: delete if no cat found in any sampled frame
+        if self.cat_detector and not self.cat_seen:
+            self.temp_path.unlink()
+            self.clips_deleted += 1
+            log.info(f'🗑️  Deleted (no cat, {dur_str}): {final_name}')
             return
 
         # Rename with duration and move to Drive folder
@@ -331,6 +367,16 @@ if __name__ == '__main__':
     log.info(f'Max recording: {MAX_RECORDING_SECS}s')
     log.info('')
 
+    # Initialize cat detector (MediaPipe EfficientDet)
+    cat_detector = None
+    try:
+        from vision.detector import CatDetector
+        cat_detector = CatDetector(model_path='efficientdet_lite2.tflite',
+                                   min_detection_confidence=0.35)
+        log.info('🐱 Cat detector loaded (EfficientDet Lite2)')
+    except Exception as e:
+        log.warning(f'Cat detector not available ({e}) — all clips will be kept')
+
     reader = RTSPFrameReader(RTSP_URL, buffer_seconds=PRE_BUFFER_SECONDS, fps=VIDEO_FPS)
     motion = FrameMotionDetector(threshold=MOTION_THRESHOLD)
     reader.start()
@@ -344,7 +390,7 @@ if __name__ == '__main__':
         time.sleep(1.0 / VIDEO_FPS)
     log.info('✅ Background model ready')
 
-    controller = RecordingController(reader, motion)
+    controller = RecordingController(reader, motion, cat_detector=cat_detector)
     log.info('')
     log.info('🚀 Monitoring for motion... Press Ctrl+C to stop.')
     log.info('')

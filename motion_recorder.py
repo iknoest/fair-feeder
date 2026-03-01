@@ -1,4 +1,54 @@
+"""
+Fair Feeder Motion Recorder with Cat Detection
+===============================================
+
+WHAT IT DOES:
+  1. Connects to Tapo IP camera via RTSP
+  2. Detects motion using MOG2 background subtraction
+  3. Identifies cats using EfficientDet TFLite model
+  4. Records video ONLY when both motion AND cats are detected
+  5. Saves videos to Google Drive (via rclone)
+
+HOW TO RUN FROM TERMINAL:
+=========================
+
+1. SIMPLE TEST (foreground - can see output):
+   cd /home/pi5/Feeder/fair-feeder
+   source .venv/bin/activate
+   python motion_recorder.py
+   
+   Stop with: Ctrl+C
+
+2. 24/7 BACKGROUND MODE (keeps running, even if terminal closes):
+   cd /home/pi5/Feeder/fair-feeder
+   source .venv/bin/activate
+   nohup python motion_recorder.py > motion_recorder.log 2>&1 &
+   
+   Monitor logs with: tail -f motion_recorder.log
+   Stop with: pkill -f motion_recorder.py
+
+3. ONE-LINE VERSION (skip virtual env activation):
+   /home/pi5/Feeder/fair-feeder/.venv/bin/python motion_recorder.py
+
+CONFIGURATION:
+===============
+Edit /home/pi5/Feeder/fair-feeder/config.py to change:
+  - TAPO_IP: Camera IP address (default: 192.168.1.246)
+  - TAPO_USER: Camera username
+  - TAPO_PASS: Camera password
+  - DRIVE_OUTPUT_DIR: Where to save videos
+
+TROUBLESHOOTING:
+=================
+- "No route to host": Camera is offline or IP is wrong
+- "No module named 'cv2'": Virtual environment not activated
+- "RTSP stream could not be opened": Check credentials
+
+For more detailed guide, see: MOTION_RECORDER_GUIDE.ipynb
+"""
+
 import os
+import sys
 import time
 import threading
 import logging
@@ -11,6 +61,14 @@ from collections import deque
 # Suppress verbose logs
 logging.getLogger('zeep').setLevel(logging.CRITICAL)
 logging.getLogger('httpx').setLevel(logging.CRITICAL)
+
+# Configure logging for better debugging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S',
+)
+log = logging.getLogger('motion-recorder')
 
 # ── CONFIGURATION ──────────────────────────────────────────────────
 try:
@@ -29,7 +87,9 @@ except Exception:
 RTSP_PORT  = 554
 RTSP_STREAM = 'stream1' 
 
+# Use TCP transport for more reliable RTSP connection (proven to work on Raspberry Pi)
 RTSP_URL = f'rtsp://{CAMERA_USER}:{CAMERA_PASS}@{CAMERA_IP}:{RTSP_PORT}/{RTSP_STREAM}'
+RTSP_URL_TCP = RTSP_URL + '?rtsp_transport=tcp'
 
 PRE_BUFFER_SECONDS  = 3      
 COOLDOWN_SECONDS    = 5      
@@ -114,12 +174,31 @@ class RTSPFrameReader:
         self._lock = threading.Lock()
 
     def start(self):
-        self.cap = cv2.VideoCapture(self.url)
+        log.info(f'Connecting to RTSP: rtsp://****:****@{CAMERA_IP}:{RTSP_PORT}/{RTSP_STREAM}')
+        
+        # Try with TCP transport first (more reliable on Raspberry Pi)
+        log.info('Attempting TCP transport...')
+        self.cap = cv2.VideoCapture(self.url + '?rtsp_transport=tcp')
+        
+        # Fallback to UDP if TCP fails
+        if not self.cap.isOpened():
+            log.warning('TCP failed, trying UDP...')
+            self.cap = cv2.VideoCapture(self.url)
+        
+        if not self.cap.isOpened():
+            log.error('RTSP stream could not be opened. Check credentials and network.')
+            sys.exit(1)
+        
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        if self.frame_width == 0 or self.frame_height == 0:
+            log.error('RTSP connected but returned 0x0 frame size. Stream may be invalid.')
+            sys.exit(1)
+        
         self.running = True
         threading.Thread(target=self._read_loop, daemon=True).start()
-        print(f"📹 Stream Connected: {self.frame_width}x{self.frame_height}")
+        log.info(f"📹 Stream Connected: {self.frame_width}x{self.frame_height}")
 
     def _read_loop(self):
         while self.running:
@@ -274,15 +353,42 @@ class RecordingController:
 # ── MAIN ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # ──────────────────────────────────────────────────────────────────────
+    # HOW TO RUN THIS SCRIPT:
+    # ──────────────────────────────────────────────────────────────────────
+    # 1. From terminal (with virtual environment activated):
+    #    cd /home/pi5/Feeder/fair-feeder
+    #    source .venv/bin/activate
+    #    python motion_recorder.py
+    #
+    # 2. Or directly in one command:
+    #    /home/pi5/Feeder/fair-feeder/.venv/bin/python motion_recorder.py
+    #
+    # 3. To run in background (keep running even if terminal closes):
+    #    nohup python motion_recorder.py > motion.log 2>&1 &
+    #
+    # 4. To stop the recorder:
+    #    pkill -f motion_recorder.py
+    # ──────────────────────────────────────────────────────────────────────
+    
+    log.info('='*60)
+    log.info('  Fair Feeder — Motion Recorder with Cat Detection')
+    log.info('='*60)
+    
     # Initialize cat detector (MediaPipe EfficientDet)
     cat_detector = None
     try:
         from vision.detector import CatDetector
         cat_detector = CatDetector(model_path='efficientdet_lite2.tflite',
                                    min_detection_confidence=0.35)
-        print('🐱 Cat detector loaded (EfficientDet Lite2)')
+        log.info('🐱 Cat detector loaded (EfficientDet Lite2)')
+    except ImportError as e:
+        log.warning(f'⚠️  ai-edge-litert not found: {e}')
+        log.warning('   Try: pip install ai-edge-litert')
+        log.info('   Falling back to: all clips will be kept (no cat filtering)')
     except Exception as e:
-        print(f'⚠️  Cat detector not available ({e}) — all clips will be kept')
+        log.warning(f'⚠️  Cat detector not available ({e})')
+        log.info('   Falling back to: all clips will be kept (no cat filtering)')
 
     listener = FrameMotionDetector(None, threshold_percent=2.0)
     reader = RTSPFrameReader(RTSP_URL, buffer_seconds=PRE_BUFFER_SECONDS, fps=VIDEO_FPS)
@@ -292,7 +398,9 @@ if __name__ == "__main__":
         listener.start()
         reader.start()
         controller = RecordingController(reader, listener, cat_detector=cat_detector)
-        print('\n🚀 Monitoring... Press Ctrl+C to stop.\n')
+        log.info('')
+        log.info('\ud83d\ude80 Monitoring... Press Ctrl+C to stop.')
+        log.info('')
 
         status_interval = 30
         last_status = time.time()
@@ -301,8 +409,8 @@ if __name__ == "__main__":
             controller.tick()
 
             if time.time() - last_status >= status_interval:
-                state = '🔴 REC' if controller.is_recording else '⏸️  Idle'
-                print(f'[{datetime.now().strftime("%H:%M:%S")}] {state}'
+                state = '\ud83d\udd34 REC' if controller.is_recording else '\u23f8\ufe0f  Idle'
+                log.info(f'[{datetime.now().strftime("%H:%M:%S")}] {state}'
                       f' | Saved: {controller.clips_saved}'
                       f' | Deleted: {controller.clips_deleted}'
                       f' | Frames: {reader.frames_read}')
@@ -310,8 +418,9 @@ if __name__ == "__main__":
 
             time.sleep(1.0 / VIDEO_FPS)
     except KeyboardInterrupt:
-        print('\n👋 Stopping...')
+        log.info('')
+        log.info('\ud83d\udc4b Stopping...')
         if controller.is_recording:
             controller._stop_recording()
-        print(f'Total saved: {controller.clips_saved}, deleted: {controller.clips_deleted}')
+        log.info(f'Total saved: {controller.clips_saved}, deleted: {controller.clips_deleted}')
 

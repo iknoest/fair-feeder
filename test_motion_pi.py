@@ -224,10 +224,13 @@ class RTSPFrameReader:
 
 class RecordingController:
     """Manages start/stop of video recording based on motion events."""
+    # How often to sample a frame for cat detection (seconds)
+    CAT_CHECK_INTERVAL = 2
 
-    def __init__(self, reader, motion_detector):
+    def __init__(self, reader, motion_detector, active_filter=True):
         self.reader = reader
         self.motion = motion_detector
+        self.active_filter = active_filter
         self.is_recording = False
         self.writer = None
         self.clips_saved = 0
@@ -260,6 +263,12 @@ class RecordingController:
                 self.writer.write(frame)
                 self.frames_written += 1
 
+                # Periodic object size detection check
+                if self.active_filter and not self.cat_seen:
+                    if now - self._last_cat_check >= self.CAT_CHECK_INTERVAL:
+                        self._last_cat_check = now
+                        self._check_for_large_blob(frame)
+
             elapsed = now - self.recording_start
 
             # Stop conditions
@@ -269,6 +278,35 @@ class RecordingController:
             elif seconds_since_motion >= COOLDOWN_SECONDS:
                 log.info(f'⏸️  No motion for {COOLDOWN_SECONDS}s — stopping')
                 self._stop_recording()
+
+    def _check_for_large_blob(self, frame):
+        """
+        Fallback cat detection: uses OpenCV contours to find large moving blobs.
+        If a blob takes up more than 3% of the downscaled frame, we assume it's a cat.
+        """
+        # We can reuse the MOG2 background subtractor mask if we pass the frame through it
+        h, w = frame.shape[:2]
+        scale = 320 / w
+        small = cv2.resize(frame, (320, int(h * scale)))
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (21, 21), 0)
+        
+        # Get the foreground mask from our existing motion detector
+        fg_mask = self.motion.bg_sub.apply(blurred, learningRate=0) # learningRate=0 prevents altering the bg model
+
+        # Find contours (blobs)
+        contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contours:
+            # Get the largest contour area
+            largest_area = max(cv2.contourArea(c) for c in contours)
+            total_area = small.shape[0] * small.shape[1]
+            
+            # If the largest moving blob is > 3% of the screen, it's big enough to be a cat
+            if largest_area / total_area > 0.03:
+                self.cat_seen = True
+                elapsed = time.time() - self.recording_start
+                log.info(f'   🐱 Large moving object detected! (Size: {largest_area/total_area:.1%}, t={elapsed:.0f}s)')
 
     def _duration_str(self, seconds):
         m, s = divmod(int(seconds), 60)
@@ -296,7 +334,13 @@ class RecordingController:
         self.is_recording = True
         self.recording_start = time.time()
         self.frames_written = len(pre_frames)
+        self.cat_seen = False
+        self._last_cat_check = time.time()
         log.info(f'🔴 Recording started: {self._base_name} (pre-buffer: {len(pre_frames)} frames)')
+
+        # Check pre-buffer frames for large blobs (catches cats already in frame)
+        if self.active_filter and pre_frames:
+            self._check_for_large_blob(pre_frames[-1])
 
     def _stop_recording(self):
         if self.writer:
@@ -311,6 +355,13 @@ class RecordingController:
             log.warning('Recording stopped but no file found')
             return
 
+        # Object size filter: delete if no large blob found in any sampled frame
+        if self.active_filter and not self.cat_seen:
+            self.temp_path.unlink()
+            self.clips_deleted += 1
+            log.info(f'🗑️  Deleted (no cat, {dur_str}): {final_name}')
+            return
+
         # Rename with duration and move to Drive folder
         final_temp = LOCAL_TEMP_DIR / final_name
         self.temp_path.rename(final_temp)
@@ -318,7 +369,8 @@ class RecordingController:
         shutil.move(str(final_temp), str(dest))
         self.clips_saved += 1
         size_mb = dest.stat().st_size / (1024 * 1024)
-        log.info(f'✅ Saved: {final_name} ({size_mb:.1f} MB)')
+        cat_status = '🐱' if self.cat_seen else '❓ no cat'
+        log.info(f'✅ Saved: {final_name} ({size_mb:.1f} MB) [{cat_status}]')
 
         # Trigger rclone sync on Pi
         if platform.system() != 'Windows':
@@ -349,6 +401,10 @@ if __name__ == '__main__':
     motion = FrameMotionDetector(threshold=MOTION_THRESHOLD)
     reader.start()
 
+    # Fallback to OpenCV contour filtering since TensorFlow Lite / MediaPipe
+    # cannot be installed natively on Raspberry Pi 5 without compilation.
+    log.info('🐱 Cat filter active (using OpenCV contour blob sizing)')
+
     # Wait for buffer to fill and MOG2 to warm up
     log.info(f'⏳ Warming up background model ({motion._warmup_needed} frames)...')
     while motion._warmup_frames < motion._warmup_needed:
@@ -358,7 +414,7 @@ if __name__ == '__main__':
         time.sleep(1.0 / VIDEO_FPS)
     log.info('✅ Background model ready')
 
-    controller = RecordingController(reader, motion)
+    controller = RecordingController(reader, motion, active_filter=True)
     log.info('')
     log.info('🚀 Monitoring for motion... Press Ctrl+C to stop.')
     log.info('')
@@ -373,6 +429,7 @@ if __name__ == '__main__':
             if time.time() - last_status >= status_interval:
                 state = '🔴 REC' if controller.is_recording else '⏸️  Idle'
                 log.info(f'{state} | Saved: {controller.clips_saved}'
+                         f' | Deleted: {controller.clips_deleted}'
                          f' | Frames: {reader.frames_read}')
                 last_status = time.time()
 
@@ -383,4 +440,4 @@ if __name__ == '__main__':
         log.info('👋 Stopping...')
         if controller.is_recording:
             controller._stop_recording()
-        log.info(f'Total clips saved: {controller.clips_saved}')
+        log.info(f'Total saved: {controller.clips_saved}, deleted: {controller.clips_deleted}')

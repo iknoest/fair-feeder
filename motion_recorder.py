@@ -1,13 +1,11 @@
 import os
 import time
-import asyncio
 import threading
 import logging
 import shutil
 import cv2
 from pathlib import Path
 from datetime import datetime
-import datetime as dt
 from collections import deque
 
 # Suppress verbose logs
@@ -28,7 +26,6 @@ except Exception:
     CAMERA_USER = os.getenv('TAPO_USER', '<YOUR_CAMERA_USER>')
     CAMERA_PASS = os.getenv('TAPO_PASS', '<YOUR_CAMERA_PASSWORD>')
 
-ONVIF_PORT = 2020
 RTSP_PORT  = 554
 RTSP_STREAM = 'stream1' 
 
@@ -56,12 +53,17 @@ DRIVE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── CLASSES ────────────────────────────────────────────────────────
 
-class ONVIFMotionListener:
-    def __init__(self, ip, port, user, password):
-        self.ip, self.port, self.user, self.password = ip, port, user, password
+class FrameMotionDetector:
+    """Detects motion from consecutive RTSP frames using background subtraction."""
+    def __init__(self, reader, threshold_percent=2.0, sample_interval=0.5):
+        self.reader = reader
+        self.threshold_percent = threshold_percent  # % of pixels that must change
+        self.sample_interval = sample_interval  # seconds between checks
         self.motion_detected = False
         self.last_motion_time = None
         self.running = False
+        self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(detectShadows=False)
+        self._last_check = 0
 
     def start(self):
         self.running = True
@@ -69,31 +71,37 @@ class ONVIFMotionListener:
         self._thread.start()
 
     def _run_loop(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(self._poll_events())
-
-    async def _poll_events(self):
-        from onvif import ONVIFCamera
-        import onvif
-        wsdl_dir = os.path.join(os.path.dirname(onvif.__file__), 'wsdl')
-        cam = ONVIFCamera(self.ip, self.port, self.user, self.password, wsdl_dir)
-        await cam.update_xaddrs()
-        
-        interval = dt.timedelta(seconds=60)
-        await cam.create_pullpoint_manager(interval, subscription_lost_callback=lambda: print('⚠️ ONVIF subscription lost'))
-        pullpoint = await cam.create_pullpoint_service()
-        pull_req = pullpoint.create_type('PullMessages')
-        pull_req.MessageLimit, pull_req.Timeout = 10, dt.timedelta(seconds=1)
-
+        """Background thread that checks for motion in the frame buffer."""
         while self.running:
-            try:
-                msgs = await pullpoint.PullMessages(pull_req)
-                self.motion_detected = bool(msgs and msgs['NotificationMessage'])
-                if self.motion_detected: self.last_motion_time = datetime.now()
-            except:
-                if self.running: await asyncio.sleep(1)
-        await cam.close()
+            now = time.time()
+            if now - self._last_check >= self.sample_interval:
+                frame = self.reader.get_latest_frame()
+                if frame is not None:
+                    self._check_motion(frame)
+                self._last_check = now
+            time.sleep(0.1)
+
+    def _check_motion(self, frame):
+        """Analyze frame for motion and update motion_detected flag."""
+        try:
+            # Downscale for faster processing
+            small = cv2.resize(frame, (320, 180))
+            
+            # Apply background subtraction
+            fg_mask = self.bg_subtractor.apply(small)
+            
+            # Count non-zero pixels (moving pixels)
+            motion_pixels = cv2.countNonZero(fg_mask)
+            total_pixels = 320 * 180
+            motion_percent = (motion_pixels / total_pixels) * 100
+            
+            # Threshold check
+            self.motion_detected = motion_percent > self.threshold_percent
+            
+            if self.motion_detected:
+                self.last_motion_time = datetime.now()
+        except Exception as e:
+            print(f"⚠️ Motion detection error: {e}")
 
 class RTSPFrameReader:
     def __init__(self, url, buffer_seconds=3, fps=15):
@@ -276,8 +284,9 @@ if __name__ == "__main__":
     except Exception as e:
         print(f'⚠️  Cat detector not available ({e}) — all clips will be kept')
 
-    listener = ONVIFMotionListener(CAMERA_IP, ONVIF_PORT, CAMERA_USER, CAMERA_PASS)
+    listener = FrameMotionDetector(None, threshold_percent=2.0)
     reader = RTSPFrameReader(RTSP_URL, buffer_seconds=PRE_BUFFER_SECONDS, fps=VIDEO_FPS)
+    listener.reader = reader  # Wire the reader into the detector
 
     try:
         listener.start()

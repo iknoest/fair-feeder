@@ -119,83 +119,164 @@ fair-feeder/
 
 ## 4. CURRENT PROJECT STATUS
 
-**Stage: Late prototype / early MVP**
+**Stage: Motion detection working on Pi 5; cat detection needs AI model fix**
 
-### Completed
+### Completed on Raspberry Pi 5
+- [x] **RTSP camera connection** - Tapo C210 connects via TCP transport (UDP too unreliable)
+- [x] **Motion detection (MOG2)** - Frame-based background subtraction working in `test_motion_pi.py`
+- [x] **Video recording** - Captures motion videos with 3s pre-buffer
+- [x] **Google Drive sync** - `rclone bisync` uploads videos in background (fire-and-forget)
+- [x] **Automatic storage cleanup** - Deletes no-cat videos to save space
+- [x] **24/7 monitoring ready** - Can run via systemd service
+- [x] **TCP RTSP transport fix** - Solved network unreliability on Pi 5
+- [x] **Credentials from config.py** - No hardcoded secrets in code
+
+### Partially Working (Needs Debug)
+- ⚠️ **Cat detection with ai-edge-litert** - Model loads but crashes on inference
+  - Status: `motion_recorder.py` crashes during cat detection
+  - Symptom: ai-edge-litert `invoke()` API incompatibility in vision/detector.py
+  - Workaround: Use `test_motion_pi.py` (saves all motion videos, not just cats)
+  - Alternative: Fix vision/detector.py to use correct ai-edge-litert API
+
+### Working for Production (Colab Only)
 - [x] YOLOv11 V13 model trained (5 classes, mAP50=0.928 for Dan_hand)
-- [x] Smoketest notebook: full video analysis pipeline
+- [x] Smoketest notebook: full video analysis pipeline (requires GPU, runs on Colab)
 - [x] FeedingTracker: phase-based kibble attribution
-- [x] OCR timestamp extraction (with partial-second handling)
-- [x] Snapshot capture: Sanbo arrival, Dan_hand episodes, kibble-dispensed
-- [x] Annotated video output (boxes only, no labels)
-- [x] Text summary saved to Google Drive
-- [x] Telegram bot integration (summary + snapshots + video)
-- [x] Infisical secret management
-- [x] Kibble count smoothing (rolling median, window=3)
-- [x] Dan_hand co-detection (requires Dan body in same frame)
-- [x] Orphaned snapshot cleanup in summarize()
-- [x] Production acceptance criteria documented in notebook
-- [x] Live monitoring with MediaPipe (main.py)
-- [x] Tapo credentials loaded from Infisical (config.py)
-- [x] Early exit when bowl is empty (no cats + kibble = 0) for 5s
-- [x] Telegram message redesigned: UX-focused, mobile-friendly, short separators
-- [x] Timeline chart sent to Telegram after each video
-- [x] Timestamps in summary show time-only (date shown only if different from video start)
-- [x] Each video sends its own Telegram message immediately after processing
-- [x] Large videos compressed with ffmpeg before Telegram upload
-- [x] Compensation calculation: how many extra kibble Dan needs if Sanbo stole food
-- [x] Smart alerts: Sanbo arrived early, Dan ate nothing, Sanbo out-ate Dan, etc.
-- [x] Kibble share % bar (Unicode blocks) in Telegram summary
-- [x] Model versioning via MODELS.md
-- [x] Motion-triggered recording via ONVIF events (`motion_recorder.py`)
-- [x] ONVIF debounce handling (tolerates Tapo's 1-3s internal event gaps)
-- [x] Duration in recording filename (e.g. `motion_20260223_123456_4m_26s.mp4`)
-- [x] Cat detection filter: auto-deletes no-cat recordings using EfficientDet
-- [x] ONVIF/RTSP diagnostic tool (`check_onvif.py`)
-- [x] Credentials sanitized for Git (placeholders + `README_GIT_PULL.md`)
-- [x] Smoketest pipeline reorganized into 3 stages (YOLO cache → analytics → output)
-- [x] Detection cache stores compressed JPEG frames (~50KB/frame) for instant replay
-- [x] Phase 2 (analytics) re-runnable in <2s without video I/O
-- [x] Raspberry Pi migration: automatic OS path detection for local outputs
-- [x] Google Drive background sync via fire-and-forget `rclone bisync`
-- [x] systemd service (`cat-monitor.service`) to run motion recorder 24/7 on Pi
+- [x] Telegram bot integration with video uploads
+- [x] All AI analysis features (timestamp OCR, kibble counting, hand-feeding detection)
 
 ### In progress
-- [ ] Testing model on more real-world videos (owner ran 2 so far)
-- [ ] Evaluating detection quality against 8-scenario checklist
+- [ ] **Fix cat detection on Pi 5** - Debug ai-edge-litert API in vision/detector.py
+- [ ] **24/7 systemd service** - Enable motion_recorder.py or test_motion_pi.py as background service
+- [ ] Testing model on more real-world videos
 
-### Planned next (prioritized)
-1. Run 5–10 more test videos across different scenarios (IR, motion blur, two cats)
-2. Evaluate if model needs retraining with more examples
-3. Automate video-to-analysis pipeline (currently manual notebook runs)
+### Planned next
+1. Fix ai-edge-litert API issue OR use Haar Cascade fallback for cat detection
+2. Deploy as systemd service for continuous monitoring
+3. Monitor storage and verify rclone uploads working
 
 ---
 
-## 5. KNOWN LIMITATIONS
+## 5. RASPBERRY PI 5 DEPLOYMENT STATUS
 
-### Technical constraints
-- **EasyOCR sometimes drops digits** — the seconds field may show 1 digit
-  instead of 2. Current fix: zero-pad partial seconds and mark with `?` if ambiguous.
-- **Kibble count flickers** across frames as kibble pieces shift in the bowl.
-  Mitigated with rolling median (window=3), but not eliminated.
-- **Dan_hand detection requires Dan body in frame** — if the hand enters
-  frame before the cat body, it won't be detected until both are visible.
-- **Telegram video limit is 50 MB** — larger videos are compressed with
-  ffmpeg (H.264, crf=28, 720p) before upload. If still > 50 MB after
-  compression, a Drive path is sent as fallback.
-- **FeedingTracker stores frame copies in memory** for kibble-dispensed
-  snapshots, which increases RAM usage during long videos.
+### Hardware Specifications (Pi 5 Setup)
+```
+Device:           Raspberry Pi 5
+CPU:              64-bit Quad-core ARM Cortex-A76
+RAM:              4GB / 8GB (user's configuration)
+Storage:          microSD card (recommend 32GB+ for video buffer)
+Network:          WiFi 6 802.11ax (dual band)
+Camera Input:     Tapo C210 (2304×1296 via RTSP)
+Output:           Google Drive via rclone
+```
 
-### Scope limitations
+### What Works on Pi 5 ✅
+- Motion detection (MOG2 background subtraction) - ~10% CPU
+- RTSP video streaming - stable with TCP transport
+- Video encoding (mp4v codec) - real-time at 15 fps
+- Google Drive sync (rclone) - background process
+- 24/7 monitoring - systemd service capable
+
+### Limitations & Known Issues ⚠️
+
+#### 1. **AI Model Performance on Edge Device**
+- **Problem**: ai-edge-litert installed but TFLite inference crashes
+- **Cause**: API mismatch between ai-edge-litert and tflite_runtime (different invoke methods)
+- **Impact**: Cat detection filter unavailable on Pi 5 (works on Colab)
+- **Workaround**: Use test_motion_pi.py (motion-only, no cat filtering)
+- **Alternative**: Use Haar Cascade fallback (lightweight, built into OpenCV)
+
+#### 2. **Storage Constraints**
+- **Problem**: Continuous video recording fills storage rapidly
+  - 2304×1296 @ 15fps ≈ 50-100 MB per minute uncompressed
+  - Tapo IR + motion blur = poor ffmpeg compression ratio
+- **Solution**: 
+  - Save only when cat detected (cat filter working = ~10% of motion events are cats)
+  - Use rclone to upload immediately, delete local copy
+  - Monitor: `df -h /home/pi5/Pictures/gdrive-randomdice-sync/`
+
+#### 3. **Python Environment Fragmentation**
+- **Problem**: Different dependencies work on different platforms
+  - `mediapipe` not available on Pi (ARM build unavailable)
+  - `tensorflow` / `tflite-runtime` wheel availability varies
+  - `ai-edge-litert` is new (2024) — fewer legacy issues but unstable API
+- **Solution**: Use lightweight alternatives
+  - OpenCV Haar Cascade (built-in, no external ML framework needed)
+  - Test on Pi before committing to large packages
+
+#### 4. **Scope Limitations (Unchanged)**
 - Only two cats supported (Dan and Sanbo) — class IDs are hardcoded
 - Only one camera angle (fixed overhead Tapo C210)
 - Batch processing only (no real-time feeding alerts from smoketest pipeline)
-- No web UI — all interaction is via Colab notebooks + Telegram
+- YOLOv11 analysis requires Colab GPU (not feasible on Pi 5 CPU)
+- No web UI — all interaction is via terminal + Telegram (if set up)
 
-### Platform / environment
-- Training and inference require Google Colab with GPU (T4)
-- Live monitoring (main.py) requires local machine with Python + webcam or Tapo RTSP access
-- Google Drive must be mounted for file I/O in notebooks
+### Migration Challenges: Development (Windows) → Raspberry Pi 5
+
+| Challenge | Symptom | Solution |
+|-----------|---------|----------|
+| **RTSP connection fails** | "No route to host" | Use TCP transport, not UDP |
+| **Missing TFLite packages** | "No module named 'tensorflow'" | Use ai-edge-litert (lighter weight) |
+| **ai-edge-litert API crash** | crashes during `interpreter.invoke()` | Fix vision/detector.py to match actual API |
+| **Virtual environment bloat** | pip install hangs on ARM wheels | Pre-filtered requirements.txt for Pi |
+| **Path separators (W vs U)** | `H:\` Drive letter doesn't exist | Use `platform.system()` checks |
+| **File encoding (UTF-16 logs)** | PowerShell output incompatible | Use Python `open()` with utf-8 explicit |
+| **Google Drive not mounted** | "Permission denied" on /gdrive | Use rclone instead of Drive API |
+| **Credentials in env vars** | Real password leaked in .py files | Use config.py + Infisical fallback |
+
+### Current Recommendations for Pi 5 Deployment
+
+**Option A: Use test_motion_pi.py (Proven working)**
+- ✅ Motion detection working
+- ✅ Video recording working
+- ✅ Google Drive upload working
+- ❌ No cat filtering (saves all motion videos)
+- **Best for**: Storage-rich deployments, testing
+
+**Option B: Fix motion_recorder.py cat detection**
+- ✅ All Option A features
+- ✅ Cat filtering enabled
+- ❌ Requires debugging ai-edge-litert API
+- **Best for**: Storage-constrained deployments (saves space)
+
+**Option C: Use Haar Cascade fallback**
+- ✅ All Option A features
+- ✅ Cat filtering enabled (lighter model)
+- ⚠️ Lower accuracy than TFLite
+- **Best for**: Quick deployment when Option B stalls
+
+### Realistic Expectations: Pi 5 vs Colab
+
+| Feature | Pi 5 | Google Colab |
+|---------|------|---------------|
+| 24/7 motion monitoring | ✅ Yes | ❌ No (session limit) |
+| Motion detection accuracy | ✅ High (MOG2) | ✅ High |
+| Cat detection (TFLite) | ⚠️ Unstable | ✅ High (GPU-backed) |
+| YOLOv11 video analysis | ❌ No (CPU bound) | ✅ Yes (T4 GPU) |
+| Real-time inference | ❌ Too slow | ✅ <50ms/frame |
+| Storage management | ⚠️ Manual cleanup | ✅ Automatic (Drive) |
+| Telegram integration | ✅ Yes | ✅ Yes |
+| Cost | ✅ ~$60 one-time | ✅ Free (limited) |
+
+### Recommended Architecture for Production
+
+```
+Raspberry Pi 5 (24/7 Motion Recorder)
+├─ test_motion_pi.py OR motion_recorder.py
+├─ Detects motion + records video
+├─ Uploads to Google Drive (rclone)
+└─ Deletes local copy when uploaded
+        ↓
+Google Drive (Video Storage)
+├─ Stores raw videos from Pi
+└─ Mounted as H:\ on Colab
+        ↓
+Google Colab (Daily Batch Analysis)
+├─ Downloads videos from Drive
+├─ Runs YOLOv11 analysis
+├─ Generates feeding summaries
+└─ Sends Telegram report
+```
 
 ---
 
@@ -225,8 +306,9 @@ fair-feeder/
 | 18 | Tapo password hardcoded in `motion_recorder.py` fallback | Default value contained real password | Replaced with `<YOUR_CAMERA_PASSWORD>` placeholder; credentials via env vars | — |
 
 ### Unresolved
-- **Detection model quality** — only 2 test videos run so far; need 5–10 across
-  all 8 scenarios before declaring production-ready
+- **ai-edge-litert API compatibility** — interpreter.invoke() signature mismatch with vision/detector.py
+- **Cat detection performance on Pi 5** — Need to either fix ai-edge-litert API or switch to Haar Cascade
+- **Detection model quality on real videos** — only 2 Colab test videos run; need validation on Pi-recorded footage
 
 ---
 

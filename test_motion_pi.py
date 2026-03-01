@@ -27,6 +27,7 @@ import cv2
 from pathlib import Path
 from datetime import datetime
 from collections import deque
+from urllib.parse import quote
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,7 +71,10 @@ if not CAMERA_IP or not CAMERA_USER or not CAMERA_PASS:
 
 RTSP_PORT   = 554
 RTSP_STREAM = 'stream1'
+# Use password as-is (ffmpeg verified it works). OpenCV may have trouble with special chars,
+# but we'll try TCP transport as fallback.
 RTSP_URL = f'rtsp://{CAMERA_USER}:{CAMERA_PASS}@{CAMERA_IP}:{RTSP_PORT}/{RTSP_STREAM}'
+RTSP_URL_TCP = RTSP_URL + '?rtsp_transport=tcp'
 
 PRE_BUFFER_SECONDS  = 3
 COOLDOWN_SECONDS    = 5
@@ -163,9 +167,19 @@ class RTSPFrameReader:
 
     def start(self):
         log.info(f'Connecting to RTSP: rtsp://{CAMERA_USER}:****@{CAMERA_IP}:{RTSP_PORT}/{RTSP_STREAM}')
-        self.cap = cv2.VideoCapture(self.url)
+        
+        # Try with TCP transport first (more reliable on some networks)
+        log.info('Attempting TCP transport...')
+        self.cap = cv2.VideoCapture(self.url + '?rtsp_transport=tcp')
+        
+        # Fallback to UDP if TCP fails
+        if not self.cap.isOpened():
+            log.warning('TCP failed, trying UDP...')
+            self.cap = cv2.VideoCapture(self.url)
+        
         if not self.cap.isOpened():
             log.error('RTSP stream could not be opened. Check credentials and network.')
+            log.error(f'URL attempted: {self.url}')
             sys.exit(1)
 
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))

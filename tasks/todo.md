@@ -9,26 +9,25 @@
 - [x] Google Drive upload via `rclone bisync` (background sync)
 - [x] Frame-based motion trigger (no ONVIF dependency needed)
 
-### Current Recommendation: Use `test_motion_pi.py`
+### Current Recommendation: Use `motion_recorder.py`
 For 24/7 Pi 5 monitoring:
 ```bash
 cd /home/pi5/Feeder/fair-feeder
 source .venv/bin/activate
-nohup python test_motion_pi.py > motion.log 2>&1 &
+nohup python motion_recorder.py > motion.log 2>&1 &
 ```
 
 **What it does:**
 - Detects motion (MOG2) ✅
 - Records video ✅
-- Uploads to Google Drive ✅
-- Savings: All motion videos (no cat filtering yet)
+- Runs YOLOv8n (at 0.10 conf) on video frames to find cats ✅
+- Uploads CAT videos to Google Drive ✅
+- Deletes NON-CAT videos locally ✅
 
-### Blocked: Cat Detection on Pi 5
-- [ ] **Fix cat detection in `motion_recorder.py`** - ai-edge-litert API crash
-  - Issue: `invoke()` signature incompatibility
-  - Path A: Fix vision/detector.py to use correct ai-edge-litert API
-  - Path B: Switch to OpenCV Haar Cascade (lightweight, no external ML needed)
-  - Status: User debugging separately; documentation updated
+### Solved: Cat Detection on Pi 5
+- [x] **Fix cat detection in `motion_recorder.py`** 
+  - Abandoned `ai-edge-litert` (EfficientDet) due to bad inference + hallucinating objects (ovens, sinks).
+  - Switched to `ultralytics` YOLOv8n which easily detects partial cats at ground-level view using 0.10 confidence.
 
 ### To Deploy: 24/7 Systemd Service
 - [ ] Create systemd timer to run `test_motion_pi.py` at boot

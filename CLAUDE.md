@@ -57,7 +57,7 @@ kibble, and send structured feeding reports via Telegram.
 | OCR | EasyOCR | Reads Tapo's burned-in timestamp from video frames |
 | Camera | Tapo C210 (RTSP + ONVIF) | IR night vision, 2K resolution, affordable |
 | Motion recording | ONVIF PullPoint events | Camera-side motion detection triggers recording |
-| Live detection | MediaPipe EfficientDet Lite2 | Local real-time cat detection (main.py, motion_recorder.py) |
+| Live detection | YOLOv8n (0.10 conf) | Local real-time cat detection (`motion_recorder.py`) |
 | Cat identification | Custom histogram analysis | Distinguishes Dan (tuxedo/dark) from Sanbo (calico/orange) |
 | Secret management | Infisical SDK | Stores Roboflow key, Telegram credentials |
 | Notifications | Telegram Bot API | Sends summaries, photos, video to owner's phone |
@@ -69,30 +69,23 @@ kibble, and send structured feeding reports via Telegram.
 fair-feeder/
 ├── CLAUDE.md                  # This file
 ├── config.py                  # Camera, detection, identification settings
-├── main.py                    # Live monitoring (Tapo RTSP → MediaPipe → display)
 ├── train.py                   # YOLOv11 training CLI
 ├── download_dataset.py        # Roboflow dataset downloader
 ├── polygon_to_bbox.py         # Convert polygon annotations → YOLO bbox
 ├── verify_labels.py           # Visual label verification grid
 ├── tapo_check.py              # RTSP connection tester
-├── check_onvif.py             # ONVIF + RTSP connectivity diagnostic
-├── motion_recorder.py         # Motion-triggered recording (ONVIF → RTSP → .mp4)
+├── motion_recorder.py         # 24/7 Motion-triggered recording + YOLO cat filter
 ├── README_GIT_PULL.md         # Setup guide for credentials after git pull
+├── README_RPI_SERVICE.md      # Pi 5 deployment guide
 ├── test_env.py                # Environment validation
 ├── data.yaml                  # YOLO dataset config (5 classes)
 ├── requirements.txt           # Core dependencies
 ├── fair_feeder_v13.ipynb      # Training notebook (Colab/Kaggle)
 ├── smoketest.ipynb            # Inference + feeding analysis (staged pipeline)
-├── efficientdet_lite0.tflite  # MediaPipe model (7 MB, lighter)
-├── efficientdet_lite2.tflite  # MediaPipe model (12 MB, primary)
-├── tasks/
-│   ├── todo.md                # Current task tracking (checkable items)
-│   └── lessons.md             # Self-improvement log (updated after corrections)
-└── vision/
-    ├── __init__.py
-    ├── detector.py            # MediaPipe object detection wrapper
-    ├── identifier.py          # Cat identification (Dan vs Sanbo)
-    └── motion.py              # Background subtraction (MOG2)
+├── test_yolo_detection.py     # Utility to debug YOLO on Pi camera
+└── tasks/
+    ├── todo.md                # Current task tracking (checkable items)
+    └── lessons.md             # Self-improvement log (updated after corrections)
 ```
 
 ### Key dependencies
@@ -131,12 +124,9 @@ fair-feeder/
 - [x] **TCP RTSP transport fix** - Solved network unreliability on Pi 5
 - [x] **Credentials from config.py** - No hardcoded secrets in code
 
-### Partially Working (Needs Debug)
-- ⚠️ **Cat detection with ai-edge-litert** - Model loads but crashes on inference
-  - Status: `motion_recorder.py` crashes during cat detection
-  - Symptom: ai-edge-litert `invoke()` API incompatibility in vision/detector.py
-  - Workaround: Use `test_motion_pi.py` (saves all motion videos, not just cats)
-  - Alternative: Fix vision/detector.py to use correct ai-edge-litert API
+### Working for Production (Raspberry Pi 5)
+- [x] **Cat detection filter** - `motion_recorder.py` uses YOLOv8n (at 0.10 threshold) to filter out non-cat videos.
+- [x] Efficient CPU inference (YOLOv8n runs at ~300ms/frame on Pi 5)
 
 ### Working for Production (Colab Only)
 - [x] YOLOv11 V13 model trained (5 classes, mAP50=0.928 for Dan_hand)
@@ -179,12 +169,9 @@ Output:           Google Drive via rclone
 
 ### Limitations & Known Issues ⚠️
 
-#### 1. **AI Model Performance on Edge Device**
-- **Problem**: ai-edge-litert installed but TFLite inference crashes
-- **Cause**: API mismatch between ai-edge-litert and tflite_runtime (different invoke methods)
-- **Impact**: Cat detection filter unavailable on Pi 5 (works on Colab)
-- **Workaround**: Use test_motion_pi.py (motion-only, no cat filtering)
-- **Alternative**: Use Haar Cascade fallback (lightweight, built into OpenCV)
+#### 1. **AI Model Performance on Extreme Angles**
+- **Problem**: EfficientDet models hallucinated bounding boxes ("oven", "sink") when the camera was placed at ground level aimed at the cat bowl.
+- **Solution**: Switched to YOLOv8n in `motion_recorder.py` and dropped the confidence threshold to `0.10`. YOLOv8n correctly identifies partial cat bodies in these extreme edge cases.
 
 #### 2. **Storage Constraints**
 - **Problem**: Continuous video recording fills storage rapidly
@@ -226,24 +213,12 @@ Output:           Google Drive via rclone
 
 ### Current Recommendations for Pi 5 Deployment
 
-**Option A: Use test_motion_pi.py (Proven working)**
-- ✅ Motion detection working
-- ✅ Video recording working
-- ✅ Google Drive upload working
-- ❌ No cat filtering (saves all motion videos)
-- **Best for**: Storage-rich deployments, testing
-
-**Option B: Fix motion_recorder.py cat detection**
-- ✅ All Option A features
-- ✅ Cat filtering enabled
-- ❌ Requires debugging ai-edge-litert API
-- **Best for**: Storage-constrained deployments (saves space)
-
-**Option C: Use Haar Cascade fallback**
-- ✅ All Option A features
-- ✅ Cat filtering enabled (lighter model)
-- ⚠️ Lower accuracy than TFLite
-- **Best for**: Quick deployment when Option B stalls
+**Use `motion_recorder.py` (Proven working)**
+- ✅ Motion detection working (MOG2)
+- ✅ Video recording working (3s pre-buffer)
+- ✅ Google Drive upload working (`rclone`)
+- ✅ Cat filtering enabled (YOLOv8n)
+- **Best for**: 24/7 autonomous monitoring with storage optimization (deletes non-cat motion automatically).
 
 ### Realistic Expectations: Pi 5 vs Colab
 
@@ -306,8 +281,6 @@ Google Colab (Daily Batch Analysis)
 | 18 | Tapo password hardcoded in `motion_recorder.py` fallback | Default value contained real password | Replaced with `<YOUR_CAMERA_PASSWORD>` placeholder; credentials via env vars | — |
 
 ### Unresolved
-- **ai-edge-litert API compatibility** — interpreter.invoke() signature mismatch with vision/detector.py
-- **Cat detection performance on Pi 5** — Need to either fix ai-edge-litert API or switch to Haar Cascade
 - **Detection model quality on real videos** — only 2 Colab test videos run; need validation on Pi-recorded footage
 
 ---

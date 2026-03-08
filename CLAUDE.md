@@ -182,14 +182,14 @@ Output:           Google Drive via rclone
   - Use rclone to upload immediately, delete local copy
   - Monitor: `df -h /home/pi5/Pictures/gdrive-randomdice-sync/`
 
-#### 3. **Python Environment Fragmentation**
-- **Problem**: Different dependencies work on different platforms
-  - `mediapipe` not available on Pi (ARM build unavailable)
-  - `tensorflow` / `tflite-runtime` wheel availability varies
-  - `ai-edge-litert` is new (2024) — fewer legacy issues but unstable API
-- **Solution**: Use lightweight alternatives
-  - OpenCV Haar Cascade (built-in, no external ML framework needed)
-  - Test on Pi before committing to large packages
+#### 3. **Python Environment Fragmentation (ARM64 vs x86)**
+- **Problem**: Pre-built Python dependencies (wheels) drop support or break APIs on the Raspberry Pi's ARM architecture.
+  - `ai-edge-litert` is installed natively on the Pi OS as the modern replacement for `tflite-runtime`, but its API can differ or crash unexpectedly compared to older Windows versions.
+  - `infisical-sdk` (written in Rust) lacks official pre-built ARM64 binaries and fails to install on the Pi.
+- **Solution**: 
+  - ALWAYS run `pip list` or query the Pi's native environment to see what is *actually* installed rather than assuming packages are missing.
+  - When an SDK fails to build on ARM, pivot to calling its REST API natively using Python `requests` (e.g., Infisical Universal Auth).
+  - Use lightweight alternatives when complex packages fail.
 
 #### 4. **Scope Limitations (Unchanged)**
 - Only two cats supported (Dan and Sanbo) — class IDs are hardcoded
@@ -204,12 +204,13 @@ Output:           Google Drive via rclone
 |-----------|---------|----------|
 | **RTSP connection fails** | "No route to host" | Use TCP transport, not UDP |
 | **Missing TFLite packages** | "No module named 'tensorflow'" | Use ai-edge-litert (lighter weight) |
-| **ai-edge-litert API crash** | crashes during `interpreter.invoke()` | Fix vision/detector.py to match actual API |
+| **ai-edge-litert API crash** | Noticed API mismatch, assumed edge AI was dead | Verify environment directly; YOLOv8n proved more stable on CPU |
 | **Virtual environment bloat** | pip install hangs on ARM wheels | Pre-filtered requirements.txt for Pi |
 | **Path separators (W vs U)** | `H:\` Drive letter doesn't exist | Use `platform.system()` checks |
 | **File encoding (UTF-16 logs)** | PowerShell output incompatible | Use Python `open()` with utf-8 explicit |
 | **Google Drive not mounted** | "Permission denied" on /gdrive | Use rclone instead of Drive API |
-| **Credentials in env vars** | Real password leaked in .py files | Use config.py + Infisical fallback |
+| **Infisical SDK fails on ARM** | pip cannot find matching wheel `infisical-sdk` | Use standard `requests` to call Universal Auth REST API directly |
+| **Credentials in env vars** | Real password leaked in .py files | Load via REST API / `.env` file |
 
 ### Current Recommendations for Pi 5 Deployment
 

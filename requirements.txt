@@ -8,6 +8,8 @@
 #  as YOLOv8n can export to NCNN/TFLite, or just uses the TFLite runtime.)
 opencv-python-headless
 ultralytics
+requests
+python-dotenv
 
 # 2️⃣ Google Colab / PC (Training & Data Processing)
 # These are required for running the `.ipynb` notebooks, `train.py`, 

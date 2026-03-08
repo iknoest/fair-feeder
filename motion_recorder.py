@@ -219,10 +219,12 @@ class RTSPFrameReader:
 class RecordingController:
     # How often to sample a frame for cat detection (seconds)
     CAT_CHECK_INTERVAL = 2
+    # YOLO confidence threshold (low because ground-level camera sees partial cats)
+    YOLO_CONF = 0.10
 
-    def __init__(self, reader, listener, cat_detector=None):
+    def __init__(self, reader, listener, yolo_model=None):
         self.reader, self.listener = reader, listener
-        self.cat_detector = cat_detector
+        self.yolo_model = yolo_model
         self.is_recording = False
         self.writer = None
         self.clips_saved = 0
@@ -250,7 +252,7 @@ class RecordingController:
                 self.frames_written += 1
 
                 # Periodic cat detection check
-                if self.cat_detector and not self.cat_seen:
+                if self.yolo_model and not self.cat_seen:
                     if now - self._last_cat_check >= self.CAT_CHECK_INTERVAL:
                         self._last_cat_check = now
                         self._check_for_cat(frame)
@@ -266,16 +268,21 @@ class RecordingController:
                 self._stop_recording()
 
     def _check_for_cat(self, frame):
-        """Run cat detection on a downscaled frame."""
-        h, w = frame.shape[:2]
-        scale = 640 / w
-        small = cv2.resize(frame, (640, int(h * scale)))
-        detections = self.cat_detector.detect(small, filter_cats=True)
-        if detections:
-            self.cat_seen = True
-            best = max(detections, key=lambda d: d['score'])
-            elapsed = time.time() - self.recording_start
-            print(f'   🐱 Cat detected! (conf={best["score"]:.0%}, t={elapsed:.0f}s)')
+        """Run YOLO cat detection on the frame."""
+        try:
+            results = self.yolo_model(frame, imgsz=640, conf=self.YOLO_CONF, verbose=False)
+            for r in results:
+                for box in r.boxes:
+                    cls_id = int(box.cls[0])
+                    conf = float(box.conf[0])
+                    name = self.yolo_model.names[cls_id]
+                    if name == 'cat':
+                        self.cat_seen = True
+                        elapsed = time.time() - self.recording_start
+                        print(f'   🐱 Cat detected! (conf={conf:.0%}, t={elapsed:.0f}s)')
+                        return
+        except Exception as e:
+            print(f'   ⚠️ YOLO detection error: {e}')
 
     def _duration_str(self, seconds):
         """Format seconds as e.g. '4m_26s' or '10s'."""
@@ -306,7 +313,7 @@ class RecordingController:
         print(f'🔴 Recording started: {self._base_name}')
 
         # Check pre-buffer frames for cat (catches cats already in frame)
-        if self.cat_detector and pre_frames:
+        if self.yolo_model and pre_frames:
             self._check_for_cat(pre_frames[-1])
 
     def _stop_recording(self):
@@ -323,7 +330,7 @@ class RecordingController:
             return
 
         # Cat detection filter: delete if no cat found in any sampled frame
-        if self.cat_detector and not self.cat_seen:
+        if self.yolo_model and not self.cat_seen:
             self.temp_path.unlink()
             self.clips_deleted += 1
             print(f'🗑️  Deleted (no cat, {dur_str}): {final_name}')
@@ -375,19 +382,18 @@ if __name__ == "__main__":
     log.info('  Fair Feeder — Motion Recorder with Cat Detection')
     log.info('='*60)
     
-    # Initialize cat detector (MediaPipe EfficientDet)
-    cat_detector = None
+    # Initialize YOLO cat detector
+    yolo_model = None
     try:
-        from vision.detector import CatDetector
-        cat_detector = CatDetector(model_path='efficientdet_lite2.tflite',
-                                   min_detection_confidence=0.35)
-        log.info('🐱 Cat detector loaded (EfficientDet Lite2)')
+        from ultralytics import YOLO
+        yolo_model = YOLO('yolov8n.pt')
+        log.info('🐱 Cat detector loaded (YOLOv8n)')
     except ImportError as e:
-        log.warning(f'⚠️  ai-edge-litert not found: {e}')
-        log.warning('   Try: pip install ai-edge-litert')
+        log.warning(f'⚠️  ultralytics not found: {e}')
+        log.warning('   Try: pip install ultralytics')
         log.info('   Falling back to: all clips will be kept (no cat filtering)')
     except Exception as e:
-        log.warning(f'⚠️  Cat detector not available ({e})')
+        log.warning(f'⚠️  YOLO not available ({e})')
         log.info('   Falling back to: all clips will be kept (no cat filtering)')
 
     listener = FrameMotionDetector(None, threshold_percent=2.0)
@@ -397,7 +403,7 @@ if __name__ == "__main__":
     try:
         listener.start()
         reader.start()
-        controller = RecordingController(reader, listener, cat_detector=cat_detector)
+        controller = RecordingController(reader, listener, yolo_model=yolo_model)
         log.info('')
         log.info('\ud83d\ude80 Monitoring... Press Ctrl+C to stop.')
         log.info('')

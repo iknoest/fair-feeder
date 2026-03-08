@@ -279,6 +279,7 @@ class RecordingController:
         self.writer = None
         self.clips_saved = 0
         self.clips_deleted = 0
+        self._clips_lock = threading.Lock()  # add this line
         self._last_motion_ts = 0
 
     def tick(self):
@@ -382,7 +383,8 @@ class RecordingController:
         # Cat detection filter: delete if no cat found in any sampled frame
         if self.yolo_model and not self.cat_seen:
             self.temp_path.unlink()
-            self.clips_deleted += 1
+            with self._clips_lock:
+                self.clips_deleted += 1
             print(f'🗑️  Deleted (no cat, {dur_str}): {final_name}')
             return
 
@@ -391,7 +393,8 @@ class RecordingController:
         self.temp_path.rename(final_temp)
         dest = DRIVE_OUTPUT_DIR / final_name
         shutil.move(str(final_temp), str(dest))
-        self.clips_saved += 1
+        with self._clips_lock:
+            self.clips_saved += 1
         size_mb = dest.stat().st_size / (1024 * 1024)
         cat_status = '🐱' if self.cat_seen else '❓ no cat'
         print(f'✅ Saved: {final_name} ({size_mb:.1f} MB) [{cat_status}]')
@@ -462,11 +465,14 @@ class TelegramCommandListener:
             disk_str = 'unknown'
         last_motion = self.controller.listener.last_motion_time
         motion_str = last_motion.strftime('%H:%M:%S') if last_motion else 'none yet'
+        with self.controller._clips_lock:
+            saved = self.controller.clips_saved
+            deleted = self.controller.clips_deleted
         self._send(
             f'✅ Fair Feeder Status\n'
             f'Uptime: {h}h {m}m\n'
-            f'Clips saved: {self.controller.clips_saved}\n'
-            f'Clips deleted: {self.controller.clips_deleted}\n'
+            f'Clips saved: {saved}\n'
+            f'Clips deleted: {deleted}\n'
             f'Drive space: {disk_str}\n'
             f'Last motion: {motion_str}'
         )
@@ -484,7 +490,9 @@ class TelegramCommandListener:
         url = f'https://api.telegram.org/bot{self.bot_token}/sendVideo'
         try:
             with open(latest, 'rb') as f:
-                requests.post(url, data={'chat_id': self.chat_id}, files={'video': f}, timeout=60)
+                resp = requests.post(url, data={'chat_id': self.chat_id}, files={'video': f}, timeout=60)
+            if resp.status_code != 200:
+                self._send(f'Telegram rejected clip (HTTP {resp.status_code}): {latest.name}')
         except Exception as e:
             self._send(f'Failed to send clip: {e}')
 

@@ -61,6 +61,7 @@ from collections import deque
 # Suppress verbose logs
 logging.getLogger('zeep').setLevel(logging.CRITICAL)
 logging.getLogger('httpx').setLevel(logging.CRITICAL)
+logging.getLogger('urllib3').setLevel(logging.CRITICAL)
 
 # Configure logging for better debugging
 logging.basicConfig(
@@ -110,6 +111,54 @@ LOCAL_TEMP_DIR   = Path('recordings_temp')
 # Ensure directories exist
 LOCAL_TEMP_DIR.mkdir(exist_ok=True)
 DRIVE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── TELEGRAM ───────────────────────────────────────────────────────
+import requests
+
+def send_telegram_alert(message):
+    """Sends a ping to the user's Telegram."""
+    try:
+        # 1. We try to get from env first
+        bot_token = os.getenv('TelegramBotToken')
+        chat_id = os.getenv('TelegramChatId')
+        
+        # 2. If not in env, use Infisical REST API (No SDK required for Pi ARM compatibility)
+        if not bot_token or not chat_id:
+            client_id = os.getenv('INFISICAL_ID')
+            client_secret = os.getenv('INFISICAL_SECRET')
+            proj_id = os.getenv('INFISICAL_PROJECT_ID')
+            
+            if client_id and client_secret and proj_id:
+                try:
+                    r = requests.post('https://app.infisical.com/api/v1/auth/universal-auth/login', 
+                                      json={'clientId': client_id, 'clientSecret': client_secret}, timeout=10)
+                    if r.status_code == 200:
+                        token = r.json()['accessToken']
+                        r2 = requests.get(f'https://app.infisical.com/api/v3/secrets/raw?workspaceId={proj_id}&environment=dev', 
+                                          headers={'Authorization': f'Bearer {token}'}, timeout=10)
+                        if r2.status_code == 200:
+                            secrets = r2.json().get('secrets', [])
+                            for s in secrets:
+                                if s.get('secretKey') == 'TelegramBotToken':
+                                    bot_token = s.get('secretValue')
+                                elif s.get('secretKey') == 'TelegramChatId':
+                                    chat_id = s.get('secretValue')
+                except Exception as e:
+                    log.warning(f"⚠️ Failed to fetch Telegram secrets from Infisical API: {e}")
+        
+        if bot_token and chat_id:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            payload = {"chat_id": chat_id, "text": message}
+            try:
+                requests.post(url, json=payload, timeout=5)
+                log.info("📲 Telegram startup message sent.")
+            except Exception as e:
+                log.warning(f"⚠️ Failed to send Telegram: {e}")
+        else:
+            log.info("No Telegram credentials found; skipped msg.")
+            
+    except Exception as e:
+        log.warning(f"⚠️ Telegram config error: {e}")
 
 # ── CLASSES ────────────────────────────────────────────────────────
 
@@ -406,6 +455,10 @@ if __name__ == "__main__":
         controller = RecordingController(reader, listener, yolo_model=yolo_model)
         log.info('')
         log.info('\ud83d\ude80 Monitoring... Press Ctrl+C to stop.')
+        
+        # Ping Telegram so user knows the service is running (e.g. after a reboot)
+        send_telegram_alert("✅ Fair Feeder Monitor is LIVE and protecting the bowl! 🐱\nRaspberry Pi 5 is officially monitoring 24/7.")
+        
         log.info('')
 
         status_interval = 30

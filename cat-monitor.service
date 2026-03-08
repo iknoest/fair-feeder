@@ -7,16 +7,21 @@ Wants=network-online.target
 Type=simple
 User=pi5
 
-# Adjust this path if you clone the repo somewhere else
-WorkingDirectory=/home/pi5/fair-feeder
+# The working directory where the script lives
+WorkingDirectory=/home/pi5/Feeder/fair-feeder
 
-# If you use a virtual environment, use that python executable instead
-# e.g., ExecStart=/home/pi5/fair-feeder/venv/bin/python motion_recorder.py
-ExecStart=/usr/bin/python3 /home/pi5/fair-feeder/motion_recorder.py
+# Run the script using the dedicated Python virtual environment
+ExecStart=/home/pi5/Feeder/fair-feeder/.venv/bin/python motion_recorder.py
 
-# Auto-restart if the script crashes
+# Auto-restart if the script crashes or the camera connection drops
 Restart=always
 RestartSec=10
+
+# Ensure logs don't get buffered so we can read them live
+Environment=PYTHONUNBUFFERED=1
+
+# Load Infisical credentials and Telegram config
+EnvironmentFile=/home/pi5/Feeder/fair-feeder/.env
 
 [Install]
 WantedBy=multi-user.target

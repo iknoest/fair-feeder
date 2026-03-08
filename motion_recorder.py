@@ -70,6 +70,7 @@ logging.basicConfig(
     datefmt='%H:%M:%S',
 )
 log = logging.getLogger('motion-recorder')
+START_TIME = time.time()
 
 # ── CONFIGURATION ──────────────────────────────────────────────────
 try:
@@ -406,6 +407,102 @@ class RecordingController:
                 stderr=subprocess.DEVNULL
             )
 
+class TelegramCommandListener:
+    """Polls Telegram Bot API for commands and replies with live Pi stats."""
+    POLL_INTERVAL = 2  # seconds between polls
+
+    def __init__(self, bot_token, chat_id, controller):
+        self.bot_token = bot_token
+        self.chat_id = str(chat_id)
+        self.controller = controller
+        self.running = False
+        self._last_update_id = 0
+
+    def start(self):
+        self.running = True
+        threading.Thread(target=self._poll_loop, daemon=True).start()
+        log.info('📲 Telegram command listener started')
+
+    def _poll_loop(self):
+        while self.running:
+            try:
+                self._check_messages()
+            except Exception as e:
+                log.warning(f'Telegram poll error: {e}')
+            time.sleep(self.POLL_INTERVAL)
+
+    def _check_messages(self):
+        url = f'https://api.telegram.org/bot{self.bot_token}/getUpdates'
+        r = requests.get(url, params={'offset': self._last_update_id + 1, 'timeout': 0}, timeout=5)
+        if r.status_code != 200:
+            return
+        for update in r.json().get('result', []):
+            self._last_update_id = update['update_id']
+            msg = update.get('message', {})
+            text = msg.get('text', '').strip()
+            sender_id = str(msg.get('chat', {}).get('id', ''))
+            if sender_id == self.chat_id and text.startswith('/'):
+                self._handle_command(text.split()[0].lower())
+
+    def _handle_command(self, cmd):
+        dispatch = {'/status': self._cmd_status, '/lastclip': self._cmd_lastclip, '/help': self._cmd_help}
+        handler = dispatch.get(cmd)
+        if handler:
+            handler()
+
+    def _cmd_status(self):
+        uptime_secs = int(time.time() - START_TIME)
+        h, rem = divmod(uptime_secs, 3600)
+        m = rem // 60
+        try:
+            disk = shutil.disk_usage(str(DRIVE_OUTPUT_DIR))
+            free_gb = disk.free / (1024 ** 3)
+            disk_str = f'{free_gb:.1f} GB free'
+        except Exception:
+            disk_str = 'unknown'
+        last_motion = self.controller.listener.last_motion_time
+        motion_str = last_motion.strftime('%H:%M:%S') if last_motion else 'none yet'
+        self._send(
+            f'✅ Fair Feeder Status\n'
+            f'Uptime: {h}h {m}m\n'
+            f'Clips saved: {self.controller.clips_saved}\n'
+            f'Clips deleted: {self.controller.clips_deleted}\n'
+            f'Drive space: {disk_str}\n'
+            f'Last motion: {motion_str}'
+        )
+
+    def _cmd_lastclip(self):
+        clips = sorted(DRIVE_OUTPUT_DIR.glob('*.mp4'), key=lambda p: p.stat().st_mtime)
+        if not clips:
+            self._send('No clips saved yet.')
+            return
+        latest = clips[-1]
+        size_mb = latest.stat().st_size / (1024 * 1024)
+        if size_mb > 50:
+            self._send(f'Latest clip too large to send ({size_mb:.0f} MB): {latest.name}')
+            return
+        url = f'https://api.telegram.org/bot{self.bot_token}/sendVideo'
+        try:
+            with open(latest, 'rb') as f:
+                requests.post(url, data={'chat_id': self.chat_id}, files={'video': f}, timeout=60)
+        except Exception as e:
+            self._send(f'Failed to send clip: {e}')
+
+    def _cmd_help(self):
+        self._send(
+            '🐱 Fair Feeder Commands\n'
+            '/status — uptime, clips, disk space\n'
+            '/lastclip — send most recent cat clip\n'
+            '/help — this message'
+        )
+
+    def _send(self, text):
+        url = f'https://api.telegram.org/bot{self.bot_token}/sendMessage'
+        try:
+            requests.post(url, json={'chat_id': self.chat_id, 'text': text}, timeout=5)
+        except Exception as e:
+            log.warning(f'Telegram reply failed: {e}')
+
 # ── MAIN ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -458,7 +555,16 @@ if __name__ == "__main__":
         
         # Ping Telegram so user knows the service is running (e.g. after a reboot)
         send_telegram_alert("✅ Fair Feeder Monitor is LIVE and protecting the bowl! 🐱\nRaspberry Pi 5 is officially monitoring 24/7.")
-        
+
+        # Start Telegram command listener (two-way health check)
+        cmd_bot_token = os.getenv('TelegramBotToken')
+        cmd_chat_id = os.getenv('TelegramChatId')
+        if cmd_bot_token and cmd_chat_id:
+            cmd_listener = TelegramCommandListener(cmd_bot_token, cmd_chat_id, controller)
+            cmd_listener.start()
+        else:
+            log.info('No Telegram credentials — command listener disabled')
+
         log.info('')
 
         status_interval = 30

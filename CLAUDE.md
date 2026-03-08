@@ -56,12 +56,13 @@ kibble, and send structured feeding reports via Telegram.
 | Dataset | Roboflow (ir-kibble v13) | Managed labelling + versioning + export |
 | OCR | EasyOCR | Reads Tapo's burned-in timestamp from video frames |
 | Camera | Tapo C210 (RTSP + ONVIF) | IR night vision, 2K resolution, affordable |
-| Motion recording | ONVIF PullPoint events | Camera-side motion detection triggers recording |
+| Motion recording | MOG2 background subtraction | Frame-based, no ONVIF dependency, proven on Pi 5 |
 | Live detection | YOLOv8n (0.10 conf) | Local real-time cat detection (`motion_recorder.py`) |
 | Cat identification | Custom histogram analysis | Distinguishes Dan (tuxedo/dark) from Sanbo (calico/orange) |
-| Secret management | Infisical SDK | Stores Roboflow key, Telegram credentials |
-| Notifications | Telegram Bot API | Sends summaries, photos, video to owner's phone |
-| Storage | Google Drive (mounted as H:\) | Persistent storage for models, videos, outputs |
+| Secret management | Infisical REST API | Stores Roboflow key, Telegram credentials (ARM64 compatible) |
+| Notifications | Telegram Bot API | Sends summaries, photos, video to owner's phone (two-way) |
+| Storage | Google Drive (rclone bisync) | Persistent storage for models, videos, outputs |
+| Automation | GitHub Actions (cron) | Morning kibble report, weekly digest — runs smoketest.ipynb via papermill |
 | Experiment tracking | Weights & Biases | Training metrics, loss curves, checkpoints |
 
 ### Project structure
@@ -136,14 +137,17 @@ fair-feeder/
 - [x] All AI analysis features (timestamp OCR, kibble counting, hand-feeding detection)
 
 ### In progress
-- [ ] **Fix cat detection on Pi 5** - Debug ai-edge-litert API in vision/detector.py
-- [ ] **24/7 systemd service** - Enable motion_recorder.py or test_motion_pi.py as background service
-- [ ] Testing model on more real-world videos
+- [ ] **Phase B improvements** — see `docs/plans/2026-03-08-system-improvements-design.md`
+  - [ ] Fix hardcoded password in `config.py:48`
+  - [ ] Fix RTSP reconnect to use TCP in `motion_recorder.py:257`
+  - [ ] Add Pi ↔ Telegram two-way health check (`/status`, `/lastclip`, `/help`)
+  - [ ] Morning kibble report via GitHub Actions (cron 6:45am Thailand time)
+  - [ ] Long-term trend tracking (feeding_log.csv + weekly digest)
 
-### Planned next
-1. Fix ai-edge-litert API issue OR use Haar Cascade fallback for cat detection
-2. Deploy as systemd service for continuous monitoring
-3. Monitor storage and verify rclone uploads working
+### Planned next (Phase C)
+1. Bowl ROI zone filter in `motion_recorder.py`
+2. Clip tagging with Dan/Sanbo identity in filename
+3. Data flywheel — flagged low-confidence clips for manual review → training dataset
 
 ---
 

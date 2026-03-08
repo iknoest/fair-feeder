@@ -1,47 +1,56 @@
 # Current Tasks
 
-## Raspberry Pi 5: 24/7 Monitoring Setup
+## Phase B: Fix + Communicate + Trends
+*Design doc: `docs/plans/2026-03-08-system-improvements-design.md`*
 
-### Working Now ✅
-- [x] RTSP camera connection (TCP transport)
-- [x] Motion detection via `motion_recorder.py` (MOG2 background subtraction)
-- [x] Video recording with 3-second pre-buffer
-- [x] Google Drive upload via `rclone bisync` (background sync)
-- [x] Frame-based motion trigger (no ONVIF dependency needed)
-- [x] Telegram boot alerts via Infisical REST API (ARM64 SDK workaround)
+### B1 — Bug Fixes
+- [ ] Fix hardcoded camera password in `config.py:48` — replace with `<YOUR_CAMERA_PASSWORD>`
+- [ ] Fix RTSP reconnect in `motion_recorder.py:257` — append `?rtsp_transport=tcp`
 
-### Current Recommendation: Use `motion_recorder.py`
-For 24/7 Pi 5 monitoring:
-```bash
-cd /home/pi5/Feeder/fair-feeder
-source .venv/bin/activate
-nohup python motion_recorder.py > motion.log 2>&1 &
-```
+### B2 — Pi ↔ Telegram Two-Way Health Check
+- [ ] Add `TelegramCommandListener` class to `motion_recorder.py`
+  - `/status` — uptime, clips saved/deleted today, disk space, last motion time
+  - `/lastclip` — send most recent cat clip as Telegram video
+  - `/help` — list commands
+- [ ] Wire into main loop (daemon thread, shares `RecordingController` instance)
+- [ ] Test on Pi: send `/status` from phone, verify reply
 
-**What it does:**
-- Detects motion (MOG2) ✅
-- Records video ✅
-- Runs YOLOv8n (at 0.10 conf) on video frames to find cats ✅
-- Uploads CAT videos to Google Drive ✅
-- Deletes NON-CAT videos locally ✅
+### B3 — Morning Kibble Report (GitHub Actions)
+- [ ] Create Google Cloud project + service account (one-time)
+- [ ] Share Drive folder with service account email
+- [ ] Store JSON key as GitHub Actions secret (`GDRIVE_SERVICE_ACCOUNT_KEY`)
+- [ ] Add environment-detection auth cell to `smoketest.ipynb` (Colab vs CI)
+- [ ] Add CSV append cell to `smoketest.ipynb` (writes to `feeding_log.csv` on Drive)
+- [ ] Create `.github/workflows/morning-report.yml`
+  - Cron: `45 23 * * *` (= 6:45am Thailand UTC+7)
+  - Install packages (ultralytics, easyocr, opencv, papermill, google-auth)
+  - Download new Drive videos via service account
+  - Run `smoketest.ipynb` via papermill
+  - Upload results back to Drive
+- [ ] Test end-to-end dry run
 
-### Solved: Cat Detection on Pi 5
-- [x] **Fix cat detection in `motion_recorder.py`** 
-  - Abandoned `ai-edge-litert` (EfficientDet) due to bad inference + hallucinating objects (ovens, sinks).
-  - Switched to `ultralytics` YOLOv8n which easily detects partial cats at ground-level view using 0.10 confidence.
+### B4 — Weekly Trend Digest
+- [ ] Add second job to `morning-report.yml`
+  - Cron: `0 0 * * 1` (= 7:00am Monday Thailand time)
+  - Reads last 7 rows of `feeding_log.csv`
+  - Sends weekly Telegram digest
+- [ ] Verify CSV schema matches digest format
 
-### To Deploy: 24/7 Systemd Service
-- [x] Create systemd timer (`cat-monitor.service`) to run `motion_recorder.py` at boot
-- [x] Ensure Infisical secrets load securely via `.env` injection
-- [ ] Monitor rclone uploads via log file (Ongoing)
-- [ ] Set up storage cleanup script (delete uploaded videos)
+---
+
+## Phase C: Smarter Recording + Data Flywheel
+*(Start after Phase B is stable and running for 1–2 weeks)*
+
+- [ ] Bowl ROI zone filter in `motion_recorder.py` (`BOWL_ROI` in `config.py`)
+- [ ] Lightweight Dan/Sanbo classifier on Pi — tag clip filenames
+- [ ] `/review` Telegram command — sends flagged low-confidence clips
+- [ ] Auto-copy confirmed clips to `training_candidates/` folder on Drive
+
+---
+
+## Ongoing
+- [ ] Monitor rclone uploads via log file
 - [ ] Monitor disk usage: `df -h /home/pi5/Pictures/gdrive-randomdice-sync/`
-
-### For Future: Colab Batch Analysis
-- [ ] Download recorded videos from Google Drive
-- [ ] Run smoketest.ipynb pipeline (YOLOv11 analysis)
-- [ ] Generate feeding summaries + Telegram reports
-- [ ] Scale when Pi recordings become routine
 
 ---
 
@@ -53,3 +62,10 @@ nohup python motion_recorder.py > motion.log 2>&1 &
 - [x] YOLOv11 V13 model trained (Colab)
 - [x] Telegram bot integration (Colab)
 - [x] Motion-triggered recording via ONVIF (deprecated; motion_recorder.py is simpler)
+- [x] RTSP camera connection (TCP transport)
+- [x] Motion detection via `motion_recorder.py` (MOG2 background subtraction)
+- [x] Video recording with 3-second pre-buffer
+- [x] Google Drive upload via `rclone bisync` (background sync)
+- [x] Telegram boot alerts via Infisical REST API (ARM64 SDK workaround)
+- [x] Cat detection filter (YOLOv8n at 0.10 conf)
+- [x] Systemd service (`cat-monitor.service`)

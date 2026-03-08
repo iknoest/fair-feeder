@@ -254,7 +254,7 @@ class RTSPFrameReader:
             ret, frame = self.cap.read()
             if not ret:
                 time.sleep(2)
-                self.cap = cv2.VideoCapture(self.url)
+                self.cap = cv2.VideoCapture(self.url + '?rtsp_transport=tcp')
                 continue
             with self._lock: self.buffer.append(frame)
             self.frames_read += 1

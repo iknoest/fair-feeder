@@ -45,7 +45,7 @@ def _load_tapo_credentials():
         return (
             os.getenv('TAPO_IP', '192.168.1.246'),
             os.getenv('TAPO_USER', 'c210RTSP'),
-            os.getenv('TAPO_PASS', 'mkeihfCCP@198964'),
+            os.getenv('TAPO_PASS', '<YOUR_CAMERA_PASSWORD>'),
         )
 
 TAPO_IP, TAPO_USER, TAPO_PASS = _load_tapo_credentials()

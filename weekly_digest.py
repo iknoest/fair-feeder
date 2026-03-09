@@ -55,24 +55,29 @@ def build_digest(rows):
     dan_avg = sum(dan) / len(dan)
     sanbo_avg = sum(sanbo) / len(sanbo)
     min_day = min(rows, key=lambda r: float(r.get('dan_kibble', 0) or 0))
-    dates = f"{rows[0]['date']} - {rows[-1]['date']}"
+    dates = f"{rows[0].get('date', '?')} - {rows[-1].get('date', '?')}"
     return (
         f'── Week of {dates} ──\n'
         f'Dan avg kibble:   {dan_avg:.1f}/day\n'
         f'Sanbo avg kibble: {sanbo_avg:.1f}/day\n'
         f'Hand-feeding:     {hand}x this week\n'
-        f'Lowest day:       {min_day["date"]} (Dan ate {min_day["dan_kibble"]})'
+        f'Lowest day:       {min_day.get("date", "?")} (Dan ate {min_day.get("dan_kibble", 0)})'
     )
 
 
 def send_telegram(text):
     token = os.environ['TelegramBotToken']
     chat_id = os.environ['TelegramChatId']
-    requests.post(
-        f'https://api.telegram.org/bot{token}/sendMessage',
-        json={'chat_id': chat_id, 'text': text},
-        timeout=10
-    )
+    try:
+        resp = requests.post(
+            f'https://api.telegram.org/bot{token}/sendMessage',
+            json={'chat_id': chat_id, 'text': text},
+            timeout=10
+        )
+        if resp.status_code != 200:
+            print(f'Telegram error {resp.status_code}: {resp.text}')
+    except Exception as e:
+        print(f'Telegram send failed: {e}')
 
 
 if __name__ == '__main__':

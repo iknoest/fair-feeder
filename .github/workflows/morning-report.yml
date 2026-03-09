@@ -58,7 +58,7 @@ jobs:
   weekly-digest:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule')
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 6 * * 1'
 
     steps:
       - name: Checkout repo

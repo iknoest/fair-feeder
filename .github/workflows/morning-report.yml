@@ -1,0 +1,82 @@
+name: Fair Feeder Morning Report
+
+on:
+  schedule:
+    - cron: '45 5 * * *'   # 06:45 Amsterdam CET (UTC+1) / 07:45 CEST (UTC+2)
+    - cron: '0 6 * * 1'    # 07:00 Amsterdam CET Monday / 08:00 CEST
+  workflow_dispatch:         # Manual trigger for testing
+
+jobs:
+  morning-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install \
+            ultralytics \
+            easyocr \
+            opencv-python-headless \
+            papermill \
+            ipykernel \
+            google-auth \
+            google-api-python-client \
+            requests \
+            nbformat
+
+      - name: Run analysis notebook
+        env:
+          GITHUB_ACTIONS: 'true'
+          GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
+          GDRIVE_UPLOAD_FOLDER_ID: ${{ secrets.GDRIVE_UPLOAD_FOLDER_ID }}
+          GDRIVE_OUTPUT_FOLDER_ID: ${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}
+          TelegramBotToken: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TelegramChatId: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          papermill smoketest.ipynb /tmp/smoketest_output.ipynb \
+            --no-progress-bar \
+            --kernel python3
+
+      - name: Upload output notebook (always, for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoketest-output-${{ github.run_id }}
+          path: /tmp/smoketest_output.ipynb
+          retention-days: 7
+
+  weekly-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule')
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install google-auth google-api-python-client requests
+
+      - name: Send weekly digest
+        env:
+          GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
+          GDRIVE_OUTPUT_FOLDER_ID: ${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}
+          TelegramBotToken: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TelegramChatId: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python weekly_digest.py

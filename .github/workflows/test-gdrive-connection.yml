@@ -1,0 +1,108 @@
+name: Test Google Drive Connection
+
+on:
+  workflow_dispatch:  # Manual trigger only
+
+jobs:
+  test-gdrive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install google-auth google-api-python-client
+
+      - name: Test service account + Drive access
+        env:
+          GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
+          GDRIVE_UPLOAD_FOLDER_ID: ${{ secrets.GDRIVE_UPLOAD_FOLDER_ID }}
+          GDRIVE_OUTPUT_FOLDER_ID: ${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}
+        run: |
+          python - <<'EOF'
+          import json, os, sys
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+
+          print("=== Fair Feeder Drive Connection Test ===\n")
+
+          # 1. Parse service account key
+          try:
+              key = json.loads(os.environ['GDRIVE_SERVICE_ACCOUNT_KEY'])
+              print(f"✅ Service account key parsed OK")
+              print(f"   Account: {key.get('client_email', 'unknown')}")
+          except Exception as e:
+              print(f"❌ Failed to parse GDRIVE_SERVICE_ACCOUNT_KEY: {e}")
+              sys.exit(1)
+
+          # 2. Authenticate
+          try:
+              creds = service_account.Credentials.from_service_account_info(
+                  key, scopes=['https://www.googleapis.com/auth/drive.readonly']
+              )
+              drive = build('drive', 'v3', credentials=creds)
+              print(f"✅ Authenticated with Google Drive API")
+          except Exception as e:
+              print(f"❌ Authentication failed: {e}")
+              sys.exit(1)
+
+          # 3. Check upload folder
+          upload_id = os.environ.get('GDRIVE_UPLOAD_FOLDER_ID', '')
+          try:
+              result = drive.files().list(
+                  q=f"'{upload_id}' in parents and trashed=false",
+                  fields='files(id, name, mimeType)',
+                  pageSize=10
+              ).execute()
+              files = result.get('files', [])
+              print(f"\n✅ Upload folder accessible (GDRIVE_UPLOAD_FOLDER_ID)")
+              mp4s = [f for f in files if f['name'].endswith('.mp4')]
+              print(f"   Total items: {len(files)}")
+              print(f"   MP4 videos:  {len(mp4s)}")
+              if mp4s:
+                  print(f"   Latest:      {mp4s[0]['name']}")
+          except Exception as e:
+              print(f"\n❌ Upload folder NOT accessible: {e}")
+              print(f"   Check: folder shared with {key.get('client_email')}?")
+              sys.exit(1)
+
+          # 4. Check output folder
+          output_id = os.environ.get('GDRIVE_OUTPUT_FOLDER_ID', '')
+          try:
+              result = drive.files().list(
+                  q=f"'{output_id}' in parents and trashed=false",
+                  fields='files(id, name)',
+                  pageSize=5
+              ).execute()
+              files = result.get('files', [])
+              print(f"\n✅ Output folder accessible (GDRIVE_OUTPUT_FOLDER_ID)")
+              print(f"   Total items: {len(files)}")
+          except Exception as e:
+              print(f"\n❌ Output folder NOT accessible: {e}")
+              print(f"   Check: folder shared with {key.get('client_email')}?")
+              sys.exit(1)
+
+          print("\n=== All checks passed ✅ ===")
+          print("Service account has access to both folders.")
+          print("Ready to proceed with morning report workflow.")
+          EOF
+
+      - name: Check Telegram secrets present
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "⚠️  TELEGRAM_BOT_TOKEN secret is not set"
+          else
+            echo "✅ TELEGRAM_BOT_TOKEN is set (${#TELEGRAM_BOT_TOKEN} chars)"
+          fi
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "⚠️  TELEGRAM_CHAT_ID secret is not set"
+          else
+            echo "✅ TELEGRAM_CHAT_ID is set"
+          fi
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

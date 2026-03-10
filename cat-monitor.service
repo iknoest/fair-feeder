@@ -1,0 +1,27 @@
+[Unit]
+Description=Cat Monitor Motion Recorder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi5
+
+# The working directory where the script lives
+WorkingDirectory=/home/pi5/Feeder/fair-feeder
+
+# Run the script using the dedicated Python virtual environment
+ExecStart=/home/pi5/Feeder/fair-feeder/.venv/bin/python motion_recorder.py
+
+# Auto-restart if the script crashes or the camera connection drops
+Restart=always
+RestartSec=10
+
+# Ensure logs don't get buffered so we can read them live
+Environment=PYTHONUNBUFFERED=1
+
+# Load Infisical credentials and Telegram config
+EnvironmentFile=/home/pi5/Feeder/fair-feeder/.env
+
+[Install]
+WantedBy=multi-user.target

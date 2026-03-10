@@ -1,0 +1,20 @@
+# Virtual environments
+.venv/
+venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Temporary files
+check_output.txt
+recordings_temp/
+
+# OS files
+Thumbs.db
+.DS_Store
+_update_notebook.py
+motion_recorder.py
+motion_recorder.py
+.env

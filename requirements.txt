@@ -1,0 +1,20 @@
+# -------------------------------------------------------------------
+# requirements.txt — Fair Feeder Dependencies
+# -------------------------------------------------------------------
+
+# 1️⃣ Raspberry Pi 5 (Production / 24-7 Motion Recorder)
+# These are required to run `motion_recorder.py` on the Pi.
+# (Note: PyTorch and heavy ML frameworks are NOT needed on the Pi, 
+#  as YOLOv8n can export to NCNN/TFLite, or just uses the TFLite runtime.)
+opencv-python-headless
+ultralytics
+requests
+python-dotenv
+
+# 2️⃣ Google Colab / PC (Training & Data Processing)
+# These are required for running the `.ipynb` notebooks, `train.py`, 
+# and manipulating the dataset.
+pandas
+numpy
+roboflow
+# mediapipe    # (Deprecated: Removed MediaPipe efficientdet models in favor of YOLO)

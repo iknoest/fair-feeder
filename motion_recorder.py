@@ -241,14 +241,17 @@ class RTSPFrameReader:
         
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
+
         if self.frame_width == 0 or self.frame_height == 0:
             log.error('RTSP connected but returned 0x0 frame size. Stream may be invalid.')
             sys.exit(1)
-        
+
+        reported = self.cap.get(cv2.CAP_PROP_FPS)
+        self.stream_fps = reported if reported > 0 else self.fps
+
         self.running = True
         threading.Thread(target=self._read_loop, daemon=True).start()
-        log.info(f"📹 Stream Connected: {self.frame_width}x{self.frame_height}")
+        log.info(f"📹 Stream Connected: {self.frame_width}x{self.frame_height} @ {self.stream_fps:.1f} fps")
 
     def _read_loop(self):
         while self.running:
@@ -301,6 +304,7 @@ class RecordingController:
             if frame is not None and self.writer:
                 self.writer.write(frame)
                 self.frames_written += 1
+                self._frame_count += 1
 
                 # Periodic cat detection check
                 if self.yolo_model and not self.cat_seen:
@@ -346,9 +350,11 @@ class RecordingController:
         self._base_name = f"motion_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         # Temporary name (duration added on stop)
         self.temp_path = LOCAL_TEMP_DIR / f'{self._base_name}.mp4'
+        # Use the stream's reported FPS so playback matches real wall-clock time
+        self._declared_fps = getattr(self.reader, 'stream_fps', VIDEO_FPS)
         self.writer = cv2.VideoWriter(
             str(self.temp_path),
-            cv2.VideoWriter_fourcc(*'mp4v'), VIDEO_FPS,
+            cv2.VideoWriter_fourcc(*'mp4v'), self._declared_fps,
             (self.reader.frame_width, self.reader.frame_height),
         )
 
@@ -359,6 +365,7 @@ class RecordingController:
         self.is_recording = True
         self.recording_start = time.time()
         self.frames_written = len(pre_frames)
+        self._frame_count = len(pre_frames)
         self.cat_seen = False
         self._last_cat_check = time.time()
         print(f'🔴 Recording started: {self._base_name}')
@@ -379,6 +386,27 @@ class RecordingController:
         if not self.temp_path.exists():
             print('⬜ Recording stopped (no file)')
             return
+
+        # Remux if actual frame rate diverged significantly from declared FPS
+        # (fixes sped-up playback when RTSP delivers fewer frames than declared)
+        if duration > 0:
+            import subprocess
+            actual_fps = self._frame_count / duration
+            if abs(actual_fps - self._declared_fps) / max(self._declared_fps, 1) > 0.20:
+                corrected = str(self.temp_path).replace('.mp4', '_fixed.mp4')
+                pts_factor = self._declared_fps / actual_fps
+                result = subprocess.run(
+                    ["ffmpeg", "-i", str(self.temp_path),
+                     "-vf", f"setpts={pts_factor:.6f}*PTS",
+                     "-r", str(self._declared_fps), "-c:v", "libx264",
+                     "-preset", "fast", "-y", corrected],
+                    capture_output=True
+                )
+                if result.returncode == 0 and os.path.exists(corrected):
+                    os.replace(corrected, str(self.temp_path))
+                    print(f'   🔧 Remuxed: actual {actual_fps:.1f} fps → declared {self._declared_fps:.1f} fps')
+                else:
+                    print(f'   ⚠️ Remux failed (ffmpeg rc={result.returncode}), keeping original')
 
         # Cat detection filter: delete if no cat found in any sampled frame
         if self.yolo_model and not self.cat_seen:

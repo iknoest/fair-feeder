@@ -16,18 +16,22 @@
 - [ ] Test on Pi: send `/status` from phone, verify reply
 
 ### B3 — Morning Kibble Report (GitHub Actions)
-- [ ] Create Google Cloud project + service account (one-time)
-- [ ] Share Drive folder with service account email
-- [ ] Store JSON key as GitHub Actions secret (`GDRIVE_SERVICE_ACCOUNT_KEY`)
-- [ ] Add environment-detection auth cell to `smoketest.ipynb` (Colab vs CI)
-- [ ] Add CSV append cell to `smoketest.ipynb` (writes to `feeding_log.csv` on Drive)
-- [ ] Create `.github/workflows/morning-report.yml`
+- [x] Create Google Cloud project + service account (one-time)
+- [x] Share Drive folder with service account email
+- [x] Store JSON key as GitHub Actions secret (`GDRIVE_SERVICE_ACCOUNT_KEY`)
+- [x] Add environment-detection auth cell to `smoketest.ipynb` (Colab vs CI)
+- [x] Add CSV append cell to `smoketest.ipynb` (writes to `feeding_log.csv` on Drive)
+- [x] Create `.github/workflows/morning-report.yml`
   - Cron: `45 23 * * *` (= 6:45am Thailand UTC+7)
   - Install packages (ultralytics, easyocr, opencv, papermill, google-auth)
   - Download new Drive videos via service account
   - Run `smoketest.ipynb` via papermill
   - Upload results back to Drive
-- [ ] Test end-to-end dry run
+- [x] Fix: guard Colab-only cells with `RUNNING_IN_CI` check
+- [x] Fix: replace `tqdm.notebook` with `tqdm.auto` for CI compatibility
+- [x] Fix: wrap `feeding_log.csv` create in try/except for quota error on first run
+- [x] Fix: pass `GDRIVE_MODEL_FILE_ID` secret to papermill step in workflow
+- [x] Test end-to-end — CI pipeline runs successfully
 
 ### B4 — Weekly Trend Digest
 - [ ] Add second job to `morning-report.yml`
@@ -41,6 +45,7 @@
 ## Phase C: Smarter Recording + Data Flywheel
 *(Start after Phase B is stable and running for 1–2 weeks)*
 
+- [x] Feeding window filter in morning report — `smoketest.ipynb` filters clips to 06:18–06:30 by filename timestamp; multi-clip stitch via ffmpeg concat
 - [ ] Bowl ROI zone filter in `motion_recorder.py` (`BOWL_ROI` in `config.py`)
 - [ ] Lightweight Dan/Sanbo classifier on Pi — tag clip filenames
 - [ ] `/review` Telegram command — sends flagged low-confidence clips
@@ -55,6 +60,7 @@
 ---
 
 ## Completed (Archived)
+- [x] CI fixes: ffmpeg installed in workflow; feeding window filter (06:18–06:30) + multi-clip stitch in `smoketest.ipynb`; `motion_recorder.py` stream FPS + remux fix
 - [x] Raspberry Pi deployment: `systemd` auto-start service with Telegram ping
 - [x] Background `rclone bisync` trigger
 - [x] OS path detection (Windows vs Pi)

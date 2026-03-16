@@ -136,18 +136,23 @@ fair-feeder/
 - [x] Telegram bot integration with video uploads
 - [x] All AI analysis features (timestamp OCR, kibble counting, hand-feeding detection)
 
+### Working for Production (GitHub Actions / CI)
+- [x] **Morning kibble report** — `smoketest.ipynb` runs via papermill on cron schedule (6:45am Thailand time)
+- [x] **CI-compatible notebook** — `RUNNING_IN_CI` guard on all Colab-only cells; `tqdm.auto` replaces `tqdm.notebook`
+- [x] **Drive service account integration** — feeds results to `feeding_log.csv` via service account (update-only; file pre-created in Drive UI)
+
 ### In progress
-- [ ] **Phase B improvements** — see `docs/plans/2026-03-08-system-improvements-design.md`
+- [ ] **Phase B remaining** — see `docs/plans/2026-03-08-system-improvements-design.md`
   - [ ] Fix hardcoded password in `config.py:48`
   - [ ] Fix RTSP reconnect to use TCP in `motion_recorder.py:257`
   - [ ] Add Pi ↔ Telegram two-way health check (`/status`, `/lastclip`, `/help`)
-  - [ ] Morning kibble report via GitHub Actions (cron 6:45am Thailand time)
-  - [ ] Long-term trend tracking (feeding_log.csv + weekly digest)
+  - [ ] Long-term trend tracking — weekly digest (B4)
 
 ### Planned next (Phase C)
-1. Bowl ROI zone filter in `motion_recorder.py`
-2. Clip tagging with Dan/Sanbo identity in filename
-3. Data flywheel — flagged low-confidence clips for manual review → training dataset
+1. ~~Filter videos to last 24h~~ → **Done**: feeding window filter (06:18–06:30) + multi-clip stitch in `smoketest.ipynb`
+2. Bowl ROI zone filter in `motion_recorder.py`
+3. Clip tagging with Dan/Sanbo identity in filename
+4. Data flywheel — flagged low-confidence clips for manual review → training dataset
 
 ---
 
@@ -284,6 +289,13 @@ Google Colab (Daily Batch Analysis)
 | 16 | `motion_recorder.py` TypeError on `create_pullpoint_manager` | Missing `subscription_lost_callback` keyword arg | Added the callback parameter | — |
 | 17 | Recording stops and restarts during continuous motion | Tapo ONVIF firmware sends events in bursts with 1-3s gaps (debounce) | Changed stop logic to use `last_motion_time` timer instead of instantaneous flag; only stops after full 5s with no event | — |
 | 18 | Tapo password hardcoded in `motion_recorder.py` fallback | Default value contained real password | Replaced with `<YOUR_CAMERA_PASSWORD>` placeholder; credentials via env vars | — |
+| 19 | GitHub Actions workflow silently received empty secrets | Secrets added to repo settings but not listed in the step's `env:` block; `os.environ.get()` returned `''` | Listed every required secret explicitly under `env:` in the papermill step | f804329 |
+| 20 | `tqdm.notebook` ImportError in CI (IProgress not found) | `tqdm.notebook` requires `ipywidgets.IntProgress`; no widget server in papermill/CI | Replaced all `tqdm.notebook` imports with `tqdm.auto` | f804329 |
+| 21 | `feeding_log.csv` create raised `HttpError 403 storageQuotaExceeded` on first CI run | Service accounts have zero storage quota on personal Google Drive; `files().create()` uses SA quota | Pre-created file in Drive UI, shared with SA (Editor); wrapped `create()` in try/except; CI only calls `update()` | a0e1853 |
+| 22 | CI ran stale notebook code despite fix being pushed | Workflow triggered just before push landed; GitHub checked out pre-fix commit | Re-triggered workflow manually after confirming fix was on main | — |
+| 23 | `motion_recorder.py` videos played back ~1.7× sped up | `cv2.VideoWriter` hardcoded at `VIDEO_FPS=15`; RTSP stream delivered fewer real frames/s under load; each frame stamped `1/15 s` apart | Read `cap.get(cv2.CAP_PROP_FPS)` after connect and use as writer FPS; count actual frames written; on stop, remux with ffmpeg `setpts` if actual vs declared rate diverges >20% | — |
+| 24 | CI workflow crashed with `FileNotFoundError: ffmpeg` on first Telegram compression | ffmpeg not installed in GitHub Actions runner | Added `sudo apt-get install -y ffmpeg` step before pip install in `morning-report.yml` | — |
+| 25 | Morning report processed every video in Drive on every run | No date/time filter applied to Drive file list | Added `_in_feeding_window()` filter in `smoketest.ipynb` to match filenames against 06:18–06:30 window; multiple clips stitched with ffmpeg concat before analysis | — |
 
 ### Unresolved
 - **Detection model quality on real videos** — only 2 Colab test videos run; need validation on Pi-recorded footage
@@ -319,6 +331,9 @@ Google Colab (Daily Batch Analysis)
 | 3-stage pipeline (cache → analytics → output) | YOLO runs once; analytics re-runnable in <2s for threshold tuning | Monolithic cell (re-runs everything); 2-stage with video seeking (still slow for snapshots) |
 | Background rclone sync per recording | Fire-and-forget `subprocess.Popen` keeps Python responsive so it doesn't miss the next motion capture | Synchronous Python upload (blocks the loop and drops frames while uploading) |
 | OS platform detection for output paths | Single script runs on both Windows dev environment and Pi seamlessly | Maintaining separate branch or script for Raspberry Pi |
+| `tqdm.auto` over `tqdm.notebook` in all notebooks | `tqdm.notebook` requires ipywidgets; crashes in CI with no widget server. `tqdm.auto` works in both Colab and CI | `tqdm.notebook` (CI incompatible); conditional import (fragile) |
+| `RUNNING_IN_CI` guard for all Colab-only cells | `google.colab`, `infisical_sdk`, and `drive.mount()` all crash in CI; single env-check flag is cleanest isolation | Try/except per-import (hides errors); duplicate notebook (maintenance burden) |
+| Service account uses `update()` not `create()` for Drive files | SA has zero storage quota on personal Drive; `create()` fails with 403. `update()` uses file owner's quota | Granting SA more permissions (unnecessary); skipping logging (loses data) |
 
 ---
 
@@ -335,8 +350,10 @@ Google Colab (Daily Batch Analysis)
 - **Model versioning** — Will use lightweight `MODELS.md` file (git-tracked) to log each
   trained model: name, mAP50, date, Colab commit, Drive path, notes.
 
+- **Automated scheduling** — Resolved: morning kibble report runs via GitHub Actions cron (`45 23 * * *` = 6:45am Thailand UTC+7).
+
 ### Still open (nice-to-have)
-- Scheduling implementation details (cron, Cloud Functions, etc.)
+- Weekly digest scheduling (B4) — schema and cron already designed, not yet implemented
 
 ---
 
@@ -382,6 +399,18 @@ Google Colab (Daily Batch Analysis)
 5. **Document Results**: Add review section to `tasks/todo.md`
 6. **Capture Lessons**: Update `tasks/lessons.md` after corrections
 
+### When to update each file
+
+| File | Update when | What goes in it |
+|------|------------|----------------|
+| `CLAUDE.md` | Phase status changes, new issue resolved, new architectural decision, new coding convention established | Permanent project knowledge — any new agent session reads this cold |
+| `tasks/lessons.md` | A mistake was corrected or non-obvious behavior was discovered through debugging | Anti-patterns + how to avoid them; numbered rows, consistent style |
+| `tasks/todo.md` | Task state changes — items completed, added, or started | Current work items only; completed items move to Archived section |
+
+**Rule of thumb:** CLAUDE.md = *what is true about this project*. lessons.md = *what went wrong and how to avoid it*. todo.md = *what needs to be done*.
+
+A resolved issue can appear in both CLAUDE.md's Issues Log (what was fixed + commit) and lessons.md (the generalised rule to prevent recurrence) — they are complementary, not redundant.
+
 ---
 
 ## 11. CORE PRINCIPLES
@@ -415,6 +444,8 @@ Google Colab (Daily Batch Analysis)
 - Clean up orphaned snapshots when filtering episodes in `summarize()`
 - When modifying `.ipynb` files, use a Python script to update the JSON programmatically
   (cannot edit `.ipynb` directly with editor tools)
+- Guard ALL Colab-only imports (`google.colab`, `infisical_sdk`, `drive.mount`) with `if not RUNNING_IN_CI:` — do a full cell audit when adding CI support to any notebook
+- Use `tqdm.auto` not `tqdm.notebook` — the latter crashes in CI (no widget server)
 
 ### Never do
 - Never hardcode API keys, tokens, or passwords in committed code

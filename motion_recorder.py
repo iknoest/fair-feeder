@@ -116,36 +116,40 @@ DRIVE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 # ── TELEGRAM ───────────────────────────────────────────────────────
 import requests
 
+def get_telegram_credentials():
+    """Fetches Telegram credentials from env or Infisical."""
+    bot_token = os.getenv('TelegramBotToken')
+    chat_id = os.getenv('TelegramChatId')
+    
+    # 2. If not in env, use Infisical REST API (No SDK required for Pi ARM compatibility)
+    if not bot_token or not chat_id:
+        client_id = os.getenv('INFISICAL_ID')
+        client_secret = os.getenv('INFISICAL_SECRET')
+        proj_id = os.getenv('INFISICAL_PROJECT_ID')
+        
+        if client_id and client_secret and proj_id:
+            try:
+                r = requests.post('https://app.infisical.com/api/v1/auth/universal-auth/login', 
+                                  json={'clientId': client_id, 'clientSecret': client_secret}, timeout=10)
+                if r.status_code == 200:
+                    token = r.json()['accessToken']
+                    r2 = requests.get(f'https://app.infisical.com/api/v3/secrets/raw?workspaceId={proj_id}&environment=dev', 
+                                      headers={'Authorization': f'Bearer {token}'}, timeout=10)
+                    if r2.status_code == 200:
+                        secrets = r2.json().get('secrets', [])
+                        for s in secrets:
+                            if s.get('secretKey') == 'TelegramBotToken':
+                                bot_token = s.get('secretValue')
+                            elif s.get('secretKey') == 'TelegramChatId':
+                                chat_id = s.get('secretValue')
+            except Exception as e:
+                log.warning(f"⚠️ Failed to fetch Telegram secrets from Infisical API: {e}")
+    return bot_token, chat_id
+
 def send_telegram_alert(message):
     """Sends a ping to the user's Telegram."""
     try:
-        # 1. We try to get from env first
-        bot_token = os.getenv('TelegramBotToken')
-        chat_id = os.getenv('TelegramChatId')
-        
-        # 2. If not in env, use Infisical REST API (No SDK required for Pi ARM compatibility)
-        if not bot_token or not chat_id:
-            client_id = os.getenv('INFISICAL_ID')
-            client_secret = os.getenv('INFISICAL_SECRET')
-            proj_id = os.getenv('INFISICAL_PROJECT_ID')
-            
-            if client_id and client_secret and proj_id:
-                try:
-                    r = requests.post('https://app.infisical.com/api/v1/auth/universal-auth/login', 
-                                      json={'clientId': client_id, 'clientSecret': client_secret}, timeout=10)
-                    if r.status_code == 200:
-                        token = r.json()['accessToken']
-                        r2 = requests.get(f'https://app.infisical.com/api/v3/secrets/raw?workspaceId={proj_id}&environment=dev', 
-                                          headers={'Authorization': f'Bearer {token}'}, timeout=10)
-                        if r2.status_code == 200:
-                            secrets = r2.json().get('secrets', [])
-                            for s in secrets:
-                                if s.get('secretKey') == 'TelegramBotToken':
-                                    bot_token = s.get('secretValue')
-                                elif s.get('secretKey') == 'TelegramChatId':
-                                    chat_id = s.get('secretValue')
-                except Exception as e:
-                    log.warning(f"⚠️ Failed to fetch Telegram secrets from Infisical API: {e}")
+        bot_token, chat_id = get_telegram_credentials()
         
         if bot_token and chat_id:
             url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -593,8 +597,7 @@ if __name__ == "__main__":
         send_telegram_alert("✅ Fair Feeder Monitor is LIVE and protecting the bowl! 🐱\nRaspberry Pi 5 is officially monitoring 24/7.")
 
         # Start Telegram command listener (two-way health check)
-        cmd_bot_token = os.getenv('TelegramBotToken')
-        cmd_chat_id = os.getenv('TelegramChatId')
+        cmd_bot_token, cmd_chat_id = get_telegram_credentials()
         if cmd_bot_token and cmd_chat_id:
             cmd_listener = TelegramCommandListener(cmd_bot_token, cmd_chat_id, controller)
             cmd_listener.start()

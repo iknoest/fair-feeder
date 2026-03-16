@@ -4,16 +4,13 @@
 *Design doc: `docs/plans/2026-03-08-system-improvements-design.md`*
 
 ### B1 — Bug Fixes
-- [ ] Fix hardcoded camera password in `config.py:48` — replace with `<YOUR_CAMERA_PASSWORD>`
-- [ ] Fix RTSP reconnect in `motion_recorder.py:257` — append `?rtsp_transport=tcp`
+- [x] Fix hardcoded camera password in `config.py:48` — placeholder + Infisical/env var load
+- [x] Fix RTSP reconnect in `motion_recorder.py` — TCP transport already used in reconnect path
 
 ### B2 — Pi ↔ Telegram Two-Way Health Check
-- [ ] Add `TelegramCommandListener` class to `motion_recorder.py`
-  - `/status` — uptime, clips saved/deleted today, disk space, last motion time
-  - `/lastclip` — send most recent cat clip as Telegram video
-  - `/help` — list commands
-- [ ] Wire into main loop (daemon thread, shares `RecordingController` instance)
-- [ ] Test on Pi: send `/status` from phone, verify reply
+- [x] Add `TelegramCommandListener` class to `motion_recorder.py`
+- [x] Wire into main loop (daemon thread, shares `RecordingController` instance)
+- [ ] **Test on Pi**: send `/status`, `/lastclip`, `/help` from phone and verify replies
 
 ### B3 — Morning Kibble Report (GitHub Actions)
 - [x] Create Google Cloud project + service account (one-time)

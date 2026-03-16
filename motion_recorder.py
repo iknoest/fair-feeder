@@ -437,7 +437,7 @@ class RecordingController:
             print('🔄 Triggering rclone to Google Drive...')
             # Run in the background (fire-and-forget) so it doesn't block the next recording
             subprocess.Popen(
-                ["rclone", "bisync", str(DRIVE_OUTPUT_DIR), "gdrive-randomdice:", "--progress"],
+                ["rclone", "copy", str(DRIVE_OUTPUT_DIR), "gdrive-randomdice:"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )

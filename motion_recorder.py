@@ -480,7 +480,7 @@ class TelegramCommandListener:
                 self._handle_command(text.split()[0].lower())
 
     def _handle_command(self, cmd):
-        dispatch = {'/status': self._cmd_status, '/lastclip': self._cmd_lastclip, '/help': self._cmd_help}
+        dispatch = {'/status': self._cmd_status, '/lastclip': self._cmd_lastclip, '/syncstatus': self._cmd_syncstatus, '/help': self._cmd_help}
         handler = dispatch.get(cmd)
         if handler:
             handler()
@@ -528,11 +528,45 @@ class TelegramCommandListener:
         except Exception as e:
             self._send(f'Failed to send clip: {e}')
 
+    def _cmd_syncstatus(self):
+        self._send("🔄 Checking sync status (this takes a few seconds)...")
+        import subprocess
+        try:
+            # Check local files
+            local_count = len(list(DRIVE_OUTPUT_DIR.glob('*.mp4')))
+            
+            # Check remote files using rclone size
+            result = subprocess.run(
+                ["rclone", "size", "gdrive-randomdice:", "--json"], 
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0:
+                import json
+                try:
+                    data = json.loads(result.stdout)
+                    remote_count = data.get("count", "unknown")
+                    self._send(
+                        f"☁️ Sync Status\n"
+                        f"Pi Local Files: {local_count}\n"
+                        f"Google Drive Files: {remote_count}\n\n"
+                        f"Connection to Google Drive is Active! ✅"
+                    )
+                except Exception as je:
+                    log.warning(f"JSON Parse error in syncstatus: {je}\nOutput: {result.stdout}")
+                    self._send(f"⚠️ Could not parse Google Drive stats. Local total is {local_count}.")
+            else:
+                self._send(f"⚠️ Error reaching Google Drive: {result.stderr.strip()[:100]}")
+        except subprocess.TimeoutExpired:
+            self._send("⚠️ Sync check timed out. Google Drive is slow to respond.")
+        except Exception as e:
+            self._send(f"⚠️ Failed to check sync: {e}")
+
     def _cmd_help(self):
         self._send(
             '🐱 Fair Feeder Commands\n'
             '/status — uptime, clips, disk space\n'
             '/lastclip — send most recent cat clip\n'
+            '/syncstatus — check Google Drive connection and file count\n'
             '/help — this message'
         )
 

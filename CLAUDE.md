@@ -84,6 +84,7 @@ fair-feeder/
 ├── fair_feeder_v13.ipynb      # Training notebook (Colab/Kaggle)
 ├── smoketest.ipynb            # Inference + feeding analysis (staged pipeline)
 ├── test_yolo_detection.py     # Utility to debug YOLO on Pi camera
+├── sync_cleanup.sh            # Auto-purge cron job to delete old local videos
 └── tasks/
     ├── todo.md                # Current task tracking (checkable items)
     └── lessons.md             # Self-improvement log (updated after corrections)
@@ -145,7 +146,6 @@ fair-feeder/
 - [ ] **Phase B remaining** — see `docs/plans/2026-03-08-system-improvements-design.md`
   - [ ] Fix hardcoded password in `config.py:48`
   - [ ] Fix RTSP reconnect to use TCP in `motion_recorder.py:257`
-  - [ ] Add Pi ↔ Telegram two-way health check (`/status`, `/lastclip`, `/help`)
   - [ ] Long-term trend tracking — weekly digest (B4)
 
 ### Planned next (Phase C)
@@ -188,8 +188,9 @@ Output:           Google Drive via rclone
   - Tapo IR + motion blur = poor ffmpeg compression ratio
 - **Solution**: 
   - Save only when cat detected (cat filter working = ~10% of motion events are cats)
-  - Use rclone to upload immediately, delete local copy
-  - Monitor: `df -h /home/pi5/Pictures/gdrive-randomdice-sync/`
+  - Use `rclone copy` to upload instantly without `.lck` deadlocks
+  - Use a daily cron job (`sync_cleanup.sh`) to automatically purge local files older than 3 days
+  - You can check storage and sync health via the Telegram `/syncstatus` command
 
 #### 3. **Python Environment Fragmentation (ARM64 vs x86)**
 - **Problem**: Pre-built Python dependencies (wheels) drop support or break APIs on the Raspberry Pi's ARM architecture.
@@ -249,8 +250,8 @@ Output:           Google Drive via rclone
 Raspberry Pi 5 (24/7 Motion Recorder)
 ├─ test_motion_pi.py OR motion_recorder.py
 ├─ Detects motion + records video
-├─ Uploads to Google Drive (rclone)
-└─ Deletes local copy when uploaded
+├─ Uploads to Google Drive instantly (rclone copy)
+└─ sync_cleanup.sh (cron) deletes local videos > 3 days old
         ↓
 Google Drive (Video Storage)
 ├─ Stores raw videos from Pi

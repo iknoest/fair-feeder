@@ -18,3 +18,4 @@ _update_notebook.py
 motion_recorder.py
 motion_recorder.py
 .env
+.claude/settings.local.json

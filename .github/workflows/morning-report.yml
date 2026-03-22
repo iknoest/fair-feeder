@@ -35,7 +35,8 @@ jobs:
             google-auth \
             google-api-python-client \
             requests \
-            nbformat
+            nbformat \
+            pytz
 
       - name: Run analysis notebook
         env:

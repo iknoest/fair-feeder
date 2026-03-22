@@ -19,7 +19,7 @@
 - [x] Add environment-detection auth cell to `smoketest.ipynb` (Colab vs CI)
 - [x] Add CSV append cell to `smoketest.ipynb` (writes to `feeding_log.csv` on Drive)
 - [x] Create `.github/workflows/morning-report.yml`
-  - Cron: `45 23 * * *` (= 6:45am Thailand UTC+7)
+  - Cron: `45 5 * * *` (= 06:45 CET / 07:45 CEST)
   - Install packages (ultralytics, easyocr, opencv, papermill, google-auth)
   - Download new Drive videos via service account
   - Run `smoketest.ipynb` via papermill
@@ -32,7 +32,7 @@
 
 ### B4 — Weekly Trend Digest
 - [ ] Add second job to `morning-report.yml`
-  - Cron: `0 0 * * 1` (= 7:00am Monday Thailand time)
+  - Cron: `0 6 * * 1` (= 07:00 CET Monday)
   - Reads last 7 rows of `feeding_log.csv`
   - Sends weekly Telegram digest
 - [ ] Verify CSV schema matches digest format

@@ -138,7 +138,7 @@ fair-feeder/
 - [x] All AI analysis features (timestamp OCR, kibble counting, hand-feeding detection)
 
 ### Working for Production (GitHub Actions / CI)
-- [x] **Morning kibble report** — `smoketest.ipynb` runs via papermill on cron schedule (6:45am Thailand time)
+- [x] **Morning kibble report** — `smoketest.ipynb` runs via papermill on cron schedule (06:45 CET / 07:45 CEST)
 - [x] **CI-compatible notebook** — `RUNNING_IN_CI` guard on all Colab-only cells; `tqdm.auto` replaces `tqdm.notebook`
 - [x] **Drive service account integration** — feeds results to `feeding_log.csv` via service account (update-only; file pre-created in Drive UI)
 
@@ -351,7 +351,7 @@ Google Colab (Daily Batch Analysis)
 - **Model versioning** — Will use lightweight `MODELS.md` file (git-tracked) to log each
   trained model: name, mAP50, date, Colab commit, Drive path, notes.
 
-- **Automated scheduling** — Resolved: morning kibble report runs via GitHub Actions cron (`45 23 * * *` = 6:45am Thailand UTC+7).
+- **Automated scheduling** — Resolved: morning kibble report runs via GitHub Actions cron (`45 5 * * *` = 06:45 CET / 07:45 CEST).
 
 ### Still open (nice-to-have)
 - Weekly digest scheduling (B4) — schema and cron already designed, not yet implemented

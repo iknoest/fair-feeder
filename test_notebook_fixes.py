@@ -16,6 +16,7 @@ def _parse_clip_times(filename):
 def _group_by_gap(paths, gap_sec=10):
     if not paths:
         return []
+    paths = sorted(paths, key=lambda p: p.name)
     timed = [(p, *_parse_clip_times(p.name)) for p in paths]
     groups, cur = [], [timed[0]]
     for i in range(1, len(timed)):

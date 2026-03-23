@@ -3,8 +3,11 @@ name: Fair Feeder Morning Report
 on:
   schedule:
     - cron: '45 5 * * *'   # 06:45 Amsterdam CET (UTC+1) / 07:45 CEST (UTC+2)
-    - cron: '0 6 * * 1'    # 07:00 Amsterdam CET Monday / 08:00 CEST
   workflow_dispatch:         # Manual trigger for testing
+
+concurrency:
+  group: morning-report
+  cancel-in-progress: false  # don't cancel a running analysis mid-flight
 
 jobs:
   morning-report:
@@ -60,28 +63,3 @@ jobs:
           path: /tmp/smoketest_output.ipynb
           retention-days: 7
 
-  weekly-digest:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 6 * * 1'
-
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: pip install google-auth google-api-python-client requests
-
-      - name: Send weekly digest
-        env:
-          GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
-          GDRIVE_OUTPUT_FOLDER_ID: ${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}
-          TelegramBotToken: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TelegramChatId: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python weekly_digest.py

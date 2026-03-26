@@ -39,7 +39,8 @@ jobs:
             google-api-python-client \
             requests \
             nbformat \
-            pytz
+            pytz \
+            roboflow
 
       - name: Run analysis notebook
         env:
@@ -50,6 +51,8 @@ jobs:
           GDRIVE_MODEL_FILE_ID: ${{ secrets.GDRIVE_MODEL_FILE_ID }}
           TelegramBotToken: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TelegramChatId: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ROBOFLOW_API_KEY: ${{ secrets.ROBOFLOW_API_KEY }}
+          ROBOFLOW_WORKSPACE: ${{ secrets.ROBOFLOW_WORKSPACE }}
         run: |
           papermill morning_report.ipynb /tmp/smoketest_output.ipynb \
             --no-progress-bar \

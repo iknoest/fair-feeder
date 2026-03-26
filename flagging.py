@@ -10,9 +10,21 @@ class FlaggedFrame:
     max_conf: float = 0.0
 
 
+def _det_cls(det):
+    """Extract class name — handles both old ('class') and new ('class_name') cache formats."""
+    return det.get('class_name') or det.get('class', '')
+
+
+def _det_conf(det):
+    """Extract confidence — handles both old ('confidence') and new ('conf') formats."""
+    return det.get('conf') if 'conf' in det else det['confidence']
+
+
 def _det_box(det):
-    """Extract [x1,y1,x2,y2] from a detection dict (real cache format)."""
-    return [det['x1'], det['y1'], det['x2'], det['y2']]
+    """Extract [x1,y1,x2,y2] — handles both old ('box' list) and new (x1/y1/x2/y2) formats."""
+    if 'x1' in det:
+        return [det['x1'], det['y1'], det['x2'], det['y2']]
+    return det['box']
 
 
 def _bbox_iou(box_a, box_b):
@@ -35,7 +47,7 @@ def _find_blips(frames, blip_max_frames, blip_gap_frames):
     class_frames = {}
     for i, frame in enumerate(frames):
         for det in frame.get('detections', []):
-            cls = det['class_name']
+            cls = _det_cls(det)
             class_frames.setdefault(cls, []).append(i)
 
     # For each class, find runs of consecutive frames
@@ -99,9 +111,9 @@ def flag_detections(frames, conf_threshold=0.40, blip_max_frames=2,
     # 1. Low-confidence
     for i, frame in enumerate(frames):
         for det in frame.get('detections', []):
-            if det['conf'] < conf_threshold:
-                score_int = int(det['conf'] * 100)
-                cls_lower = det['class_name'].lower()
+            if _det_conf(det) < conf_threshold:
+                score_int = int(_det_conf(det) * 100)
+                cls_lower = _det_cls(det).lower()
                 _add_tag(i, f'low-conf-{cls_lower}-{score_int}')
 
     # 2. Blip detection
@@ -113,15 +125,15 @@ def flag_detections(frames, conf_threshold=0.40, blip_max_frames=2,
     # 3. No co-detection (Dan_hand without Dan)
     for i, frame in enumerate(frames):
         dets = frame.get('detections', [])
-        classes_in_frame = {d['class_name'] for d in dets}
+        classes_in_frame = {_det_cls(d) for d in dets}
         if 'Dan_hand' in classes_in_frame and 'Dan' not in classes_in_frame:
             _add_tag(i, 'no-codetect-dan_hand')
 
     # 4. High-confidence conflict (Dan & Sanbo overlapping)
     for i, frame in enumerate(frames):
         dets = frame.get('detections', [])
-        dan_dets = [d for d in dets if d['class_name'] == 'Dan']
-        sanbo_dets = [d for d in dets if d['class_name'] == 'Sanbo']
+        dan_dets = [d for d in dets if _det_cls(d) == 'Dan']
+        sanbo_dets = [d for d in dets if _det_cls(d) == 'Sanbo']
         for dd in dan_dets:
             for sd in sanbo_dets:
                 if _bbox_iou(_det_box(dd), _det_box(sd)) >= iou_conflict:
@@ -131,7 +143,7 @@ def flag_detections(frames, conf_threshold=0.40, blip_max_frames=2,
     prev_kibble = None
     for i, frame in enumerate(frames):
         dets = frame.get('detections', [])
-        kibble_count = sum(1 for d in dets if d['class_name'] == 'Kibble')
+        kibble_count = sum(1 for d in dets if _det_cls(d) == 'Kibble')
         if prev_kibble is not None:
             delta = abs(kibble_count - prev_kibble)
             if delta > kibble_jump:
@@ -143,7 +155,7 @@ def flag_detections(frames, conf_threshold=0.40, blip_max_frames=2,
     for i in sorted(frame_tags.keys()):
         tags = list(dict.fromkeys(frame_tags[i]))  # deduplicate preserving order
         dets = frames[i].get('detections', [])
-        max_conf = max((d['conf'] for d in dets), default=0.0)
+        max_conf = max((_det_conf(d) for d in dets), default=0.0)
         flagged.append(FlaggedFrame(
             frame_idx=i,
             jpeg=frames[i].get('jpeg', b''),

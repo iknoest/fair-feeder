@@ -2,32 +2,14 @@
 
 ---
 
-## Pipeline Regressions — FIXED (awaiting morning verification)
+## Pipeline Regressions — ALL VERIFIED ✅
 
-All 4 bugs fixed in `morning_report.ipynb` (commits `ae49d5c`–`c83fcd4`). Awaiting next scheduled run (06:45 CET) to verify with real clips.
+All 4 bugs fixed and verified in CI run 2026-03-26.
 
-### Bug 1 — FeedingTracker returns 0 (issue #31) ✅ FIXED
-- [x] Root cause: `_find_clear_kibble_count` searches no-cat frames; model only detects kibble with cats present
-- [x] Fix: added `_find_kibble_at_phase_entry` / `_find_kibble_at_phase_exit` fallback methods to FeedingTracker
-- [x] **Verify**: CI run 2026-03-26 — Dan 95% (~21 kibble), Sanbo 5% (~1 kibble) ✅
-
-### Bug 2 — Wrong annotated video sent to Telegram (issue #32) ✅ FIXED
-- [x] Root cause: Phase 1/2 re-scanned SOURCE_DIR overwriting video_paths from stitch cell
-- [x] Fix: guarded re-scan behind `if not RUNNING_IN_CI:` in Cells 12 and 13
-- [x] Fix: merged_names now uses `merged_sources` dict (set by Cell 1)
-- [x] **Verify**: CI run 2026-03-26 — correct annotated video sent via Telegram ✅
-
+### Bug 1 — FeedingTracker returns 0 (issue #31) ✅ VERIFIED
+### Bug 2 — Wrong annotated video sent to Telegram (issue #32) ✅ VERIFIED
 ### Bug 3 — Drive video upload dropped by design (issue #33) ✅ RESOLVED
-- [x] Root cause: SA has zero quota on personal Drive; `files().create()` always fails 403
-- [x] Decision: drop Drive uploads from CI entirely; Colab handles archive (user's account)
-- [x] Drive video upload code removed from Cell 14
-- [x] Annotated videos delivered via Telegram (already working)
-
-### Bug 4 — feeding_log.csv not accumulating (issue #34) ✅ FIXED
-- [x] Root cause: CSV cell ran before Phase 1–3 (summary undefined) + wrong video path
-- [x] Fix: CSV cell moved to after Phase 3; reads from `video_results[-1]['summary']`
-- [x] Fix: cell now skips entirely when no videos were processed (no zero-row pollution)
-- [x] **Verify**: CI run 2026-03-26 — CSV row logged: Dan 21, Sanbo 1, compensation 1 ✅
+### Bug 4 — feeding_log.csv not accumulating (issue #34) ✅ VERIFIED
 
 ---
 
@@ -42,7 +24,7 @@ All 4 bugs fixed in `morning_report.ipynb` (commits `ae49d5c`–`c83fcd4`). Awai
 - [x] Wire into main loop (daemon thread, shares `RecordingController` instance)
 - [ ] **Test on Pi**: send `/status`, `/lastclip`, `/help` from phone and verify replies
 
-### B3 — Morning Kibble Report (GitHub Actions)
+### B3 — Morning Kibble Report (GitHub Actions) ✅
 - [x] Service account auth + Drive sharing
 - [x] CI-compatible notebook (`RUNNING_IN_CI` guard, `tqdm.auto`)
 - [x] Cron schedule running (`45 5 * * *` = 06:45 CET)
@@ -58,20 +40,23 @@ All 4 bugs fixed in `morning_report.ipynb` (commits `ae49d5c`–`c83fcd4`). Awai
 ## Phase C: Data Flywheel — Continuous Model Improvement
 *(spec: `docs/superpowers/specs/2026-03-26-data-flywheel-design.md`)*
 
-### C1 — Auto-flagging + Roboflow upload (daily CI pipeline) ✅ IMPLEMENTED
+### C1 — Auto-flagging + Roboflow upload (daily CI pipeline) ✅ VERIFIED
 - [x] Remove Drive video upload from CI (fixes SA 403 quota issue)
 - [x] Implement Phase 2.5: auto-flag suspicious detections from cache (`flagging.py`)
 - [x] Implement Phase 2.6: upload flagged frames to Roboflow via SDK (`roboflow_upload.py`)
 - [x] Add flag summary to Telegram report
 - [x] Extract flagging + upload into shared modules
 - [x] Add `ROBOFLOW_API_KEY` + `ROBOFLOW_WORKSPACE` to CI workflow env
-- [ ] **User setup**: add `ROBOFLOW_API_KEY` and `ROBOFLOW_WORKSPACE` as GitHub secrets
-- [ ] **User setup**: add same to Colab Secrets (for batch_review.ipynb)
+- [x] **User setup**: GitHub secrets added (ROBOFLOW_API_KEY, ROBOFLOW_WORKSPACE) ✅
+- [x] **User setup**: Colab Secrets added (ROBOFLOW_API_KEY) ✅
 - [x] **Verify**: CI run 2026-03-26 — 42 frames flagged, all uploaded to Roboflow ✅
 
-### C2 — Batch reprocessing notebook ✅ IMPLEMENTED
+### C2 — Batch reprocessing notebook ✅ IN PROGRESS
 - [x] Create `batch_review.ipynb` for Colab (reprocess historical Pi videos)
-- [ ] Reprocess ~20 historical clips, upload flagged frames to Roboflow
+- [x] Add FEEDING_WINDOW_ONLY toggle and MAX_VIDEOS cap
+- [x] Run 1: FEEDING_WINDOW_ONLY=True — 19 feeding-window videos processed, 263 frames flagged
+- [ ] Upload flagged frames to Roboflow from batch_review (in progress)
+- [ ] Run 2: FEEDING_WINDOW_ONLY=False — non-feeding clips for Dan/Sanbo diversity
 
 ### C3 — First retrain cycle
 - [ ] Review flagged frames in Roboflow, correct labels

@@ -1,7 +1,7 @@
 # Data Flywheel — Continuous Model Improvement
 
 **Date**: 2026-03-26
-**Status**: Approved, pending implementation
+**Status**: Implemented — C1 verified in CI, C2 batch reprocessing in progress
 **Scope**: Phase C — auto-flagging, Roboflow upload, batch reprocessing, retraining cycle
 
 ---
@@ -77,7 +77,7 @@ FLAG_CONF_THRESHOLD = 0.40      # Below this = low confidence flag
 FLAG_BLIP_MAX_FRAMES = 2        # Appears for <= this many frames = blip
 FLAG_BLIP_GAP_FRAMES = 5        # Must disappear for >= this many frames after
 FLAG_IOU_CONFLICT = 0.50        # Dan/Sanbo overlap threshold
-FLAG_KIBBLE_JUMP = 5            # Kibble count change threshold
+FLAG_KIBBLE_JUMP = 15           # Kibble count change threshold (5 was too noisy)
 FLAG_DEDUP_WINDOW = 3           # Adjacent flagged frames within this window → keep best
 ```
 
@@ -100,7 +100,7 @@ from roboflow import Roboflow
 import tempfile, os
 
 ROBOFLOW_API_KEY = os.environ["ROBOFLOW_API_KEY"]
-ROBOFLOW_WORKSPACE = "<workspace-slug>"   # from Roboflow URL
+ROBOFLOW_WORKSPACE = "test-7vyqo"         # from Roboflow URL
 ROBOFLOW_PROJECT = "ir-kibble"
 
 rf = Roboflow(api_key=ROBOFLOW_API_KEY)

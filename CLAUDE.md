@@ -155,13 +155,20 @@ fair-feeder/
 - [x] **Correct annotated video sent to Telegram** — Fixed: guarded SOURCE_DIR rescan in CI (issue #32)
 - [x] **feeding_log.csv accumulating** — Fixed: CSV cell moved after Phase 3, zero-row guard added (issue #34)
 - [x] **Duplicate Telegram sends** — Fixed: removed Monday cron + weekly digest job, guarded retry cell
-- [ ] **Drive video upload** — SA has zero quota; `files().create()` fails with 403. Decision: drop Drive uploads from CI, use Colab for archive (issue #33)
+- [x] **Drive video upload** — SA has zero quota; dropped from CI by design. Colab handles archive (issue #33)
 
 ### In progress
 - [ ] **Phase C: Data Flywheel** — see `docs/superpowers/specs/2026-03-26-data-flywheel-design.md`
-  - [ ] Auto-flag suspicious detections + upload to Roboflow
-  - [ ] Batch reprocessing notebook for historical videos
-  - [ ] First retrain cycle (v14)
+  - [x] C1: Auto-flag suspicious detections + upload to Roboflow — verified in CI 2026-03-26
+  - [x] C2: Batch reprocessing notebook — Run 1 (feeding window) processed 19 videos, 263 frames flagged
+  - [ ] C2: Run 2 (non-feeding clips) — in progress
+  - [ ] C3: First retrain cycle (v14) — pending Roboflow labeling
+
+### Known model weaknesses (from batch analysis of 19 feeding-window videos, 2026-03-08 to 2026-03-26)
+- **Sanbo hallucination**: `blip-sanbo` appears in 18/19 videos. Model consistently imagines Sanbo for 1-2 frames when he isn't present. Priority #1 for retraining.
+- **Dan_hand false positives (increasing)**: `no-codetect-dan_hand` count climbed from ~1-2/video (Mar 8–14) to 8-20/video (Mar 20–26). May indicate feeding angle change or model drift.
+- **Dan/Sanbo confusion**: `conflict-dan-sanbo` in ~10/19 videos. Model occasionally draws both boxes on the same cat.
+- **Kibble count instability**: Large jumps (>15) in ~12/19 videos. Partly occlusion (cat blocking view) but jumps >20 suggest real model failures.
 
 ### Planned later
 - [ ] Bowl ROI zone filter in `motion_recorder.py`

@@ -10,12 +10,23 @@ __pycache__/
 # Temporary files
 check_output.txt
 recordings_temp/
+artifacts/
+
+# One-shot scripts (never commit — see docs/guides/git-push-guideline.md)
+fix_*.py
+patch_*.py
+clean_*.py
+list_*.py
+cells.txt
+
+# Large binaries (store on Google Drive)
+*.pt
+*.mp4
 
 # OS files
 Thumbs.db
 .DS_Store
-_update_notebook.py
-motion_recorder.py
-motion_recorder.py
+
+# Secrets and local config
 .env
 .claude/settings.local.json

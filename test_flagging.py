@@ -6,7 +6,8 @@ from flagging import flag_detections, FlaggedFrame
 def _make_det(cls_name, conf, box=None):
     if box is None:
         box = [100, 100, 200, 200]
-    return {'class': cls_name, 'confidence': conf, 'box': box}
+    return {'class_name': cls_name, 'conf': conf,
+            'x1': box[0], 'y1': box[1], 'x2': box[2], 'y2': box[3]}
 
 
 def _make_frame(detections, frame_idx=0, jpeg=b'fake-jpeg'):

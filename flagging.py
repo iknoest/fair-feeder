@@ -37,6 +37,7 @@ def _find_blips(frames, blip_max_frames, blip_gap_frames):
     blip_results = {}  # class -> set of frame indices that are blips
     for cls, indices in class_frames.items():
         indices = sorted(set(indices))
+        indices_set = set(indices)  # Compute once, reuse in loops
         # Split into consecutive runs
         runs = []
         run_start = indices[0]
@@ -57,7 +58,7 @@ def _find_blips(frames, blip_max_frames, blip_gap_frames):
             # Check gap after: no detection for >= blip_gap_frames
             gap_after = True
             for j in range(end + 1, min(end + 1 + blip_gap_frames, len(frames))):
-                if j in set(indices):
+                if j in indices_set:
                     gap_after = False
                     break
             # If run is at end of video, also count as blip (vanished)
@@ -66,7 +67,7 @@ def _find_blips(frames, blip_max_frames, blip_gap_frames):
             # Check gap before as well
             gap_before = True
             for j in range(max(0, start - blip_gap_frames), start):
-                if j in set(indices):
+                if j in indices_set:
                     gap_before = False
                     break
             if start == 0:

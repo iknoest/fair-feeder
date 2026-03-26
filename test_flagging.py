@@ -153,3 +153,10 @@ class TestDeduplication:
         assert len(result) == 1
         assert 'low-conf-dan-20' in result[0].tags
         assert 'low-conf-sanbo-25' in result[0].tags
+
+
+# ---------------------------------------------------------------------------
+# Edge cases
+# ---------------------------------------------------------------------------
+def test_empty_frames_returns_empty():
+    assert flag_detections([]) == []

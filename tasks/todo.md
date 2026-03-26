@@ -9,13 +9,13 @@ All 4 bugs fixed in `morning_report.ipynb` (commits `ae49d5c`–`c83fcd4`). Awai
 ### Bug 1 — FeedingTracker returns 0 (issue #31) ✅ FIXED
 - [x] Root cause: `_find_clear_kibble_count` searches no-cat frames; model only detects kibble with cats present
 - [x] Fix: added `_find_kibble_at_phase_entry` / `_find_kibble_at_phase_exit` fallback methods to FeedingTracker
-- [ ] **Verify**: next morning run shows non-zero kibble start, % per cat
+- [x] **Verify**: CI run 2026-03-26 — Dan 95% (~21 kibble), Sanbo 5% (~1 kibble) ✅
 
 ### Bug 2 — Wrong annotated video sent to Telegram (issue #32) ✅ FIXED
 - [x] Root cause: Phase 1/2 re-scanned SOURCE_DIR overwriting video_paths from stitch cell
 - [x] Fix: guarded re-scan behind `if not RUNNING_IN_CI:` in Cells 12 and 13
 - [x] Fix: merged_names now uses `merged_sources` dict (set by Cell 1)
-- [ ] **Verify**: next morning run sends merged annotated video
+- [x] **Verify**: CI run 2026-03-26 — correct annotated video sent via Telegram ✅
 
 ### Bug 3 — Drive video upload dropped by design (issue #33) ✅ RESOLVED
 - [x] Root cause: SA has zero quota on personal Drive; `files().create()` always fails 403
@@ -27,7 +27,7 @@ All 4 bugs fixed in `morning_report.ipynb` (commits `ae49d5c`–`c83fcd4`). Awai
 - [x] Root cause: CSV cell ran before Phase 1–3 (summary undefined) + wrong video path
 - [x] Fix: CSV cell moved to after Phase 3; reads from `video_results[-1]['summary']`
 - [x] Fix: cell now skips entirely when no videos were processed (no zero-row pollution)
-- [ ] **Verify**: CSV has new row with real kibble values after next morning run
+- [x] **Verify**: CI run 2026-03-26 — CSV row logged: Dan 21, Sanbo 1, compensation 1 ✅
 
 ---
 
@@ -48,7 +48,7 @@ All 4 bugs fixed in `morning_report.ipynb` (commits `ae49d5c`–`c83fcd4`). Awai
 - [x] Cron schedule running (`45 5 * * *` = 06:45 CET)
 - [x] Merged clip detection and stitching working in Phase 1
 - [x] Timeline chart generating correctly from detection cache
-- [ ] **Verify all fixes work on real morning clips** — next scheduled run 06:45 CET
+- [x] **Verify all fixes work on real morning clips** — CI run 2026-03-26 all green ✅
 
 ### B4 — Weekly Trend Digest
 ~~Dropped~~ — user sees no value. Daily report already answers the question. Removed from scope.
@@ -67,7 +67,7 @@ All 4 bugs fixed in `morning_report.ipynb` (commits `ae49d5c`–`c83fcd4`). Awai
 - [x] Add `ROBOFLOW_API_KEY` + `ROBOFLOW_WORKSPACE` to CI workflow env
 - [ ] **User setup**: add `ROBOFLOW_API_KEY` and `ROBOFLOW_WORKSPACE` as GitHub secrets
 - [ ] **User setup**: add same to Colab Secrets (for batch_review.ipynb)
-- [ ] **Verify**: next morning run shows flag summary in Telegram
+- [x] **Verify**: CI run 2026-03-26 — 42 frames flagged, all uploaded to Roboflow ✅
 
 ### C2 — Batch reprocessing notebook ✅ IMPLEMENTED
 - [x] Create `batch_review.ipynb` for Colab (reprocess historical Pi videos)

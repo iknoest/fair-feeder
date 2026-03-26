@@ -17,10 +17,11 @@ All 4 bugs fixed in `morning_report.ipynb` (commits `ae49d5c`–`c83fcd4`). Awai
 - [x] Fix: merged_names now uses `merged_sources` dict (set by Cell 1)
 - [ ] **Verify**: next morning run sends merged annotated video
 
-### Bug 3 — Annotated video not uploaded to Drive (issue #33) ✅ FIXED
-- [x] Root cause: annotated video path used SOURCE_DIR; file is written to OUTPUT_DIR
-- [x] Fix: Cell 14 now uses `OUTPUT_DIR/{stem}_annotated.mp4`
-- [ ] **Verify**: annotated video appears in Drive `Test_postmodel_output/` after next run
+### Bug 3 — Drive video upload dropped by design (issue #33) ✅ RESOLVED
+- [x] Root cause: SA has zero quota on personal Drive; `files().create()` always fails 403
+- [x] Decision: drop Drive uploads from CI entirely; Colab handles archive (user's account)
+- [x] Drive video upload code removed from Cell 14
+- [x] Annotated videos delivered via Telegram (already working)
 
 ### Bug 4 — feeding_log.csv not accumulating (issue #34) ✅ FIXED
 - [x] Root cause: CSV cell ran before Phase 1–3 (summary undefined) + wrong video path
@@ -54,14 +55,34 @@ All 4 bugs fixed in `morning_report.ipynb` (commits `ae49d5c`–`c83fcd4`). Awai
 
 ---
 
-## Phase C: Smarter Recording + Data Flywheel
-*(start only after B3 pipeline is stable and verified for 1–2 weeks)*
+## Phase C: Data Flywheel — Continuous Model Improvement
+*(spec: `docs/superpowers/specs/2026-03-26-data-flywheel-design.md`)*
 
+### C1 — Auto-flagging + Roboflow upload (daily CI pipeline) ✅ IMPLEMENTED
+- [x] Remove Drive video upload from CI (fixes SA 403 quota issue)
+- [x] Implement Phase 2.5: auto-flag suspicious detections from cache (`flagging.py`)
+- [x] Implement Phase 2.6: upload flagged frames to Roboflow via SDK (`roboflow_upload.py`)
+- [x] Add flag summary to Telegram report
+- [x] Extract flagging + upload into shared modules
+- [x] Add `ROBOFLOW_API_KEY` + `ROBOFLOW_WORKSPACE` to CI workflow env
+- [ ] **User setup**: add `ROBOFLOW_API_KEY` and `ROBOFLOW_WORKSPACE` as GitHub secrets
+- [ ] **User setup**: add same to Colab Secrets (for batch_review.ipynb)
+- [ ] **Verify**: next morning run shows flag summary in Telegram
+
+### C2 — Batch reprocessing notebook ✅ IMPLEMENTED
+- [x] Create `batch_review.ipynb` for Colab (reprocess historical Pi videos)
+- [ ] Reprocess ~20 historical clips, upload flagged frames to Roboflow
+
+### C3 — First retrain cycle
+- [ ] Review flagged frames in Roboflow, correct labels
+- [ ] Generate dataset v14, retrain, compare mAP50 vs v13
+- [ ] Deploy improved model if mAP50 improves
+
+### C-later — Nice to have
 - [x] Feeding window filter — `smoketest.ipynb` filters clips to 06:18–06:30; multi-clip stitch via ffmpeg concat
 - [ ] Bowl ROI zone filter in `motion_recorder.py` (`BOWL_ROI` in `config.py`)
 - [ ] Lightweight Dan/Sanbo classifier on Pi — tag clip filenames with identity
-- [ ] `/review` Telegram command — sends flagged low-confidence clips
-- [ ] Auto-copy confirmed clips to `training_candidates/` folder on Drive
+- [ ] Telegram-interactive flagging (reply to report to flag issues)
 
 ---
 

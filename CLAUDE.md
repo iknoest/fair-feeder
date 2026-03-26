@@ -62,7 +62,9 @@ kibble, and send structured feeding reports via Telegram.
 | Secret management | Infisical REST API | Stores Roboflow key, Telegram credentials (ARM64 compatible) |
 | Notifications | Telegram Bot API | Sends summaries, photos, video to owner's phone (two-way) |
 | Storage | Google Drive (rclone bisync) | Persistent storage for models, videos, outputs |
-| Automation | GitHub Actions (cron) | Morning kibble report, weekly digest — runs smoketest.ipynb via papermill |
+| Auto-flagging | Custom Python (flagging.py) | Detects suspicious YOLO predictions for human review |
+| Data flywheel | Roboflow Upload API | Sends flagged frames to Roboflow for relabeling → retrain |
+| Automation | GitHub Actions (cron) | Morning kibble report — runs morning_report.ipynb via papermill |
 | Experiment tracking | Weights & Biases | Training metrics, loss curves, checkpoints |
 
 ### Project structure
@@ -83,7 +85,14 @@ fair-feeder/
 ├── requirements.txt           # Core dependencies
 ├── fair_feeder_v13.ipynb      # Training notebook (Colab/Kaggle)
 ├── smoketest.ipynb            # Inference + feeding analysis (staged pipeline)
+├── morning_report.ipynb       # CI pipeline notebook (papermill, GitHub Actions)
+├── batch_review.ipynb         # Colab notebook for historical video reprocessing
+├── flagging.py                # Auto-flag suspicious YOLO detections
+├── roboflow_upload.py         # Upload flagged frames to Roboflow
+├── test_flagging.py           # Unit tests for flagging module
+├── test_roboflow_upload.py    # Unit tests for upload module
 ├── test_yolo_detection.py     # Utility to debug YOLO on Pi camera
+├── test_notebook_fixes.py     # Unit tests for notebook patch helpers
 ├── sync_cleanup.sh            # Auto-purge cron job to delete old local videos
 └── tasks/
     ├── todo.md                # Current task tracking (checkable items)
@@ -92,7 +101,7 @@ fair-feeder/
 
 ### Key dependencies
 - `ultralytics` — YOLOv11 training & inference
-- `roboflow` — dataset download
+- `roboflow` — dataset download + flagged frame upload (data flywheel)
 - `easyocr` — timestamp OCR
 - `opencv-python` — video/image processing, RTSP frame reading, recording
 - `mediapipe` — real-time detection (main.py, motion_recorder.py cat filter)
@@ -140,19 +149,24 @@ fair-feeder/
 ### Working for Production (GitHub Actions / CI)
 - [x] **Morning kibble report** — `smoketest.ipynb` runs via papermill on cron schedule (06:45 CET / 07:45 CEST)
 - [x] **CI-compatible notebook** — `RUNNING_IN_CI` guard on all Colab-only cells; `tqdm.auto` replaces `tqdm.notebook`
-- [x] **Drive service account integration** — feeds results to `feeding_log.csv` via service account (update-only; file pre-created in Drive UI)
+- [x] **Drive service account integration** — service account auth and file update pattern in place
+- [x] **Merged clip detection** — Phase 1 YOLO inference correctly runs on stitched merged video; timeline chart generated correctly
+- [x] **FeedingTracker analytics** — Fixed: fallback to phase-entry/exit kibble counts (issue #31)
+- [x] **Correct annotated video sent to Telegram** — Fixed: guarded SOURCE_DIR rescan in CI (issue #32)
+- [x] **feeding_log.csv accumulating** — Fixed: CSV cell moved after Phase 3, zero-row guard added (issue #34)
+- [x] **Duplicate Telegram sends** — Fixed: removed Monday cron + weekly digest job, guarded retry cell
+- [ ] **Drive video upload** — SA has zero quota; `files().create()` fails with 403. Decision: drop Drive uploads from CI, use Colab for archive (issue #33)
 
 ### In progress
-- [ ] **Phase B remaining** — see `docs/plans/2026-03-08-system-improvements-design.md`
-  - [ ] Fix hardcoded password in `config.py:48`
-  - [ ] Fix RTSP reconnect to use TCP in `motion_recorder.py:257`
-  - [ ] Long-term trend tracking — weekly digest (B4)
+- [ ] **Phase C: Data Flywheel** — see `docs/superpowers/specs/2026-03-26-data-flywheel-design.md`
+  - [ ] Auto-flag suspicious detections + upload to Roboflow
+  - [ ] Batch reprocessing notebook for historical videos
+  - [ ] First retrain cycle (v14)
 
-### Planned next (Phase C)
-1. ~~Filter videos to last 24h~~ → **Done**: feeding window filter (06:18–06:30) + multi-clip stitch in `smoketest.ipynb`
-2. Bowl ROI zone filter in `motion_recorder.py`
-3. Clip tagging with Dan/Sanbo identity in filename
-4. Data flywheel — flagged low-confidence clips for manual review → training dataset
+### Planned later
+- [ ] Bowl ROI zone filter in `motion_recorder.py`
+- [ ] Lightweight Dan/Sanbo classifier on Pi — tag clip filenames
+- [ ] Telegram-interactive flagging (reply to flag issues)
 
 ---
 
@@ -302,9 +316,14 @@ Google Colab (Daily Batch Analysis)
 | 28 | `IndentationError: unexpected indent` when injecting Python into Jupyter Notebook API | The injected Python multi-line string was aligned at 8-spaces, but the surrounding block in the Notebook JSON arrays was at 4-spaces | Verify the explicit local block indentation level of surrounding syntax before modifying `cell['source']` natively with string replacement scripts | — |
 | 29 | `IndentationError` or magical parsing failures in Papermill | Python `write_to_file` on Windows generates `\r\n` carriage returns. Passing these into Jupyter JSON breaks the IPython lexer | Always explicitly `.replace('\r', '')` when pushing string lists into Jupyter Notebook `source` structures on Windows | — |
 | 30 | Video files requested for `Today` missed morning captures | Datetimes default to UTC. If a file is requested at 07:00 CET, UTC yields the previous day (`23:00 UTC`) | Always strictly establish the target timezone (e.g. `pytz.timezone('Europe/Amsterdam')`) when conducting string datetime queries against APIs | — |
+| 31 | FeedingTracker reports "Start: ~0 kibble / No activity" despite detection timeline showing kibble 0–12, Dan at bowl, and Sanbo at bowl throughout the merged video | `_find_clear_kibble_count` searches no-cat frames; model only detects kibble when cats are present, so "clear" frames always return 0 | Added `_find_kibble_at_phase_entry` / `_find_kibble_at_phase_exit` fallback methods to FeedingTracker | 826bc52 |
+| 32 | Telegram sends unmerged short clip annotated video (`_25s_annotated.mp4`) instead of merged annotated video | Phase 1/2 re-scanned SOURCE_DIR, overwriting `video_paths` set by the stitch cell; `merged_names` used wrong variable | Guarded re-scan behind `if not RUNNING_IN_CI:` in Cells 12/13; `merged_names` reads from `merged_sources` dict | ae49d5c+ |
+| 33 | Annotated output video never appears in Google Drive output folder after CI run | SA has zero storage quota on personal Drive; `files().create()` fails with 403 | Decision: drop Drive uploads from CI entirely; use Colab (user account, no SA issue) for archiving. See data flywheel design. | — |
+| 34 | `feeding_log.csv` still not accumulating data after `98c3a47` fix | CSV cell ran before Phase 1–3 (summary undefined) + wrong video path | CSV cell moved to after Phase 3; reads from `video_results[-1]['summary']`; skips entirely when no videos processed | ee5c70e |
 
 ### Unresolved
-- **Detection model quality on real videos** — only 2 Colab test videos run; need validation on Pi-recorded footage
+- **Detection model quality on real videos** — false positives observed (Sanbo hallucinated). Data flywheel (Phase C) will address via auto-flagging + Roboflow relabeling + retraining
+- **Drive video upload from CI (issue #33)** — dropped by design; Colab handles archive instead
 
 ---
 
@@ -340,6 +359,15 @@ Google Colab (Daily Batch Analysis)
 | `tqdm.auto` over `tqdm.notebook` in all notebooks | `tqdm.notebook` requires ipywidgets; crashes in CI with no widget server. `tqdm.auto` works in both Colab and CI | `tqdm.notebook` (CI incompatible); conditional import (fragile) |
 | `RUNNING_IN_CI` guard for all Colab-only cells | `google.colab`, `infisical_sdk`, and `drive.mount()` all crash in CI; single env-check flag is cleanest isolation | Try/except per-import (hides errors); duplicate notebook (maintenance burden) |
 | Service account uses `update()` not `create()` for Drive files | SA has zero storage quota on personal Drive; `create()` fails with 403. `update()` uses file owner's quota | Granting SA more permissions (unnecessary); skipping logging (loses data) |
+| Stitch clips only if gap ≤ 10 seconds | Pi motion detection sometimes splits one continuous feeding event into multiple clips with tiny gaps; clips further apart are genuinely separate events and must not be merged | Stitch all clips in the feeding window regardless of gap (wrong — merges unrelated events and breaks FeedingTracker attribution) |
+| Clips with gap > 10s are separate feeding events | Each event gets its own FeedingTracker analysis, its own kibble count, its own verdict, and its own Telegram block — not combined | One merged report per morning (loses per-event detail; kibble attribution becomes meaningless across a large time gap) |
+| Weekly digest dropped — no scope | Daily Telegram report already answers the key question (did Dan eat?); weekly summary adds no actionable information on top of that | Weekly digest (B4) — removed from roadmap |
+| CI = morning cron only; manual analysis = Colab smoketest notebook | CI automation handles the daily scheduled run; interactive threshold tuning and ad-hoc checks are done by running smoketest.ipynb manually in Colab | Using CI for manual analysis runs (unnecessary complexity; Colab is faster for interactive use) |
+| Drop Drive uploads from CI; use Colab for archive | SA has zero quota on personal Drive; `files().create()` always fails with 403. Colab mounts Drive as the user — no quota issue. Telegram already delivers daily results. | User OAuth2 token in CI (extra setup, token management); pre-create placeholder files (impractical for daily new files); rclone in CI (same token issue, more moving parts) |
+| Auto-flag suspicious detections + upload to Roboflow | Closes the model improvement loop: low-confidence, single-frame blips, and conflicting detections auto-extracted and sent to Roboflow for relabeling. No manual frame extraction needed. | Manual frame extraction (tedious, error-prone); Drive staging folder (extra review step before Roboflow); Telegram-interactive flagging (more complex, can layer later) |
+| Roboflow SDK for uploads over raw REST API | `roboflow` package already in dependencies; SDK handles retries, auth, tag lists cleanly | Raw `requests.post()` (more code, manual error handling, tag format differences) |
+| Batch by month in Roboflow (`flagged-YYYY-MM`) | Keeps batch count manageable (~12/year) while images appear immediately for review | Daily batches (180/year clutter); no batches (hard to filter by time period) |
+| Separate `batch_review.ipynb` for historical reprocessing | Keeps `smoketest.ipynb` focused on daily CI. Batch notebook has different concerns (no feeding window filter, Drive output, multi-video summary). | Overloading smoketest.ipynb with more modes (complexity); ad-hoc Colab cells (not reproducible) |
 
 ---
 
@@ -359,7 +387,7 @@ Google Colab (Daily Batch Analysis)
 - **Automated scheduling** — Resolved: morning kibble report runs via GitHub Actions cron (`45 5 * * *` = 06:45 CET / 07:45 CEST).
 
 ### Still open (nice-to-have)
-- Weekly digest scheduling (B4) — schema and cron already designed, not yet implemented
+- ~~Weekly digest (B4)~~ — dropped; no value on top of daily report
 
 ---
 
@@ -452,6 +480,7 @@ A resolved issue can appear in both CLAUDE.md's Issues Log (what was fixed + com
   (cannot edit `.ipynb` directly with editor tools)
 - Guard ALL Colab-only imports (`google.colab`, `infisical_sdk`, `drive.mount`) with `if not RUNNING_IN_CI:` — do a full cell audit when adding CI support to any notebook
 - Use `tqdm.auto` not `tqdm.notebook` — the latter crashes in CI (no widget server)
+- Stitch clips only if the gap between end of one clip and start of next is ≤ 10 seconds — clips with a larger gap are separate feeding events and must each have their own FeedingTracker analysis, verdict, and Telegram block
 
 ### Never do
 - Never hardcode API keys, tokens, or passwords in committed code
@@ -474,23 +503,25 @@ A resolved issue can appear in both CLAUDE.md's Issues Log (what was fixed + com
 
 ## 13. SMOKETEST PIPELINE ARCHITECTURE
 
-The `smoketest.ipynb` notebook uses a **3-stage pipeline** for efficient iteration:
+The `morning_report.ipynb` notebook uses a **5-stage pipeline**:
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│  Phase 1    │     │  Phase 2     │     │  Phase 3        │
-│  YOLO +     │────▶│  Analytics   │────▶│  Output +       │
-│  Cache      │     │  (re-run!)   │     │  Telegram       │
-│  (slow)     │     │  (<2s)       │     │  (save & send)  │
-└─────────────┘     └──────────────┘     └─────────────────┘
+┌──────────┐  ┌──────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐
+│ Phase 1  │  │ Phase 2  │  │Phase 2.5  │  │Phase 2.6  │  │ Phase 3   │
+│ YOLO +   │─▶│Analytics │─▶│Auto-flag  │─▶│ Roboflow  │─▶│Output +   │
+│ Cache    │  │(re-run!) │  │suspicious │  │ upload    │  │ Telegram  │
+│ (slow)   │  │ (<2s)    │  │ (<1s)     │  │ (<10s)    │  │(save+send)│
+└──────────┘  └──────────┘  └───────────┘  └───────────┘  └───────────┘
 ```
 
 | Cell | ID | What it does | Speed |
 |------|----|-------------|-------|
 | Phase 1 | `detect-and-cache` | YOLO inference + JPEG frame cache + annotated video | Slow (minutes) |
 | Phase 2 | `analyze-from-cache` | FeedingTracker with tunable params, no video I/O | Fast (<2s) |
-| Phase 3 | `output-and-telegram` | Save summaries, snapshots, timeline; send Telegram | Fast (<5s) |
-| Retry | `discord-notification` | Re-send to Telegram if send failed | Fast |
+| Phase 2.5 | `auto-flag` | Scan cache for suspicious detections (low-conf, blips, conflicts) | Fast (<1s) |
+| Phase 2.6 | `roboflow-upload` | Upload flagged frames to Roboflow with tags | Fast (<10s) |
+| Phase 3 | `output-and-telegram` | Save summaries, snapshots, timeline; send Telegram + flag summary | Fast (<5s) |
+| Retry | `discord-notification` | Re-send to Telegram if send failed (Colab only, skipped in CI) | Fast |
 
 ### Cache format (pickle)
 - `frames[i].detections` — YOLO bounding boxes

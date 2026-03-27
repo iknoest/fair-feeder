@@ -8,6 +8,7 @@ class FlaggedFrame:
     jpeg: bytes
     tags: list = field(default_factory=list)
     max_conf: float = 0.0
+    detections: list = field(default_factory=list)
 
 
 def _det_cls(det):
@@ -161,6 +162,7 @@ def flag_detections(frames, conf_threshold=0.40, blip_max_frames=2,
             jpeg=frames[i].get('jpeg', b''),
             tags=tags,
             max_conf=max_conf,
+            detections=frames[i].get('detections', []),
         ))
 
     # Deduplication: merge adjacent flagged frames within dedup_window
@@ -180,6 +182,7 @@ def flag_detections(frames, conf_threshold=0.40, blip_max_frames=2,
                     jpeg=ff.jpeg,
                     tags=all_tags,
                     max_conf=ff.max_conf,
+                    detections=ff.detections,
                 )
             else:
                 # Keep prev's frame data, merge tags
@@ -189,6 +192,7 @@ def flag_detections(frames, conf_threshold=0.40, blip_max_frames=2,
                     jpeg=prev.jpeg,
                     tags=all_tags,
                     max_conf=prev.max_conf,
+                    detections=prev.detections,
                 )
         else:
             merged.append(ff)

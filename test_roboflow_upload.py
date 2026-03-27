@@ -1,22 +1,32 @@
 """Tests for roboflow_upload module."""
+import io
 import re
 from unittest.mock import MagicMock, patch, call
 from datetime import datetime
 
 import pytest
+from PIL import Image
 
 from flagging import FlaggedFrame
 from roboflow_upload import upload_flagged_frames, format_telegram_flag_summary, UploadResult
 
 
+def _minimal_jpeg(width=64, height=64):
+    """Return bytes of a minimal valid JPEG for testing."""
+    buf = io.BytesIO()
+    Image.new('RGB', (width, height), color=(128, 128, 128)).save(buf, format='JPEG')
+    return buf.getvalue()
+
+
 class TestUploadFlaggedFrames:
 
-    def _make_frame(self, idx=0, tags=None):
+    def _make_frame(self, idx=0, tags=None, detections=None):
         return FlaggedFrame(
             frame_idx=idx,
-            jpeg=b'\xff\xd8fake-jpeg-data',
+            jpeg=_minimal_jpeg(),
             tags=tags or ['low-conf-sanbo-31'],
             max_conf=0.31,
+            detections=detections or [],
         )
 
     @patch('roboflow_upload.Roboflow')

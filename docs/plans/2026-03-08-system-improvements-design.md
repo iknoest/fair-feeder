@@ -68,6 +68,9 @@ GitHub Actions (cron 6:45am)
 5. Add auth cell at top of smoketest.ipynb (detects environment: Colab vs CI)
 6. Add CSV append cell at bottom of smoketest.ipynb
 
+**Clip stitching rule (2026-03-22):**
+Clips are stitched only if the gap between the end of one clip and the start of the next is ≤ 10 seconds. Clips with a larger gap are separate feeding events — each gets its own FeedingTracker analysis, verdict, and Telegram block.
+
 **What does NOT change in smoketest.ipynb:**
 - All analysis cells (YOLOv11, EasyOCR, FeedingTracker)
 - All thresholds and config
@@ -88,23 +91,7 @@ for interactive use.
 
 ### B4 — Long-Term Trend Tracking
 
-**Storage:** `feeding_log.csv` on Google Drive, appended after each GitHub
-Actions run.
-
-**Schema:**
-```
-date, dan_kibble, sanbo_kibble, hand_feeding, compensation, video_count
-```
-
-**Weekly digest:** Second GitHub Actions job, runs every Monday at 7:00am
-Thailand time (`0 0 * * 1` UTC). Reads last 7 rows of CSV, sends Telegram
-summary:
-- Dan avg kibble/day
-- Sanbo avg kibble/day
-- Hand-feeding count this week
-- Lowest eating day (flag for health concern)
-
-Same workflow file as daily run, second job definition.
+~~Dropped 2026-03-22.~~ Weekly Telegram digest has no value on top of the daily report. The daily report already answers the key question. `feeding_log.csv` is kept for potential future use but no weekly digest job will be built.
 
 ---
 

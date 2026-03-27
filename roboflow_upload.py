@@ -48,6 +48,7 @@ def _write_yolo_annotation(detections, width, height, path):
 class UploadResult:
     uploaded: int = 0
     failed: int = 0
+    skipped: int = 0
     tag_counts: dict = None
 
     def __post_init__(self):
@@ -64,9 +65,27 @@ def _strip_trailing_number(tag):
     return re.sub(r'-\d+$', '', tag)
 
 
+def _load_tracking(tracking_file):
+    """Load set of already-uploaded frame IDs from a tracking file."""
+    if tracking_file and os.path.exists(tracking_file):
+        with open(tracking_file, 'r') as f:
+            return set(line.strip() for line in f if line.strip())
+    return set()
+
+
+def _save_tracking(tracking_file, frame_id):
+    """Append a frame ID to the tracking file."""
+    if tracking_file:
+        with open(tracking_file, 'a') as f:
+            f.write(frame_id + '\n')
+
+
 def upload_flagged_frames(flagged_frames, api_key, workspace, project,
-                          video_stem, batch_name=None):
+                          video_stem, batch_name=None, tracking_file=None):
     """Upload flagged frames to Roboflow for human review.
+
+    tracking_file: path to a text file (on Drive) tracking already-uploaded
+    frame IDs. Frames already in this file are skipped to avoid duplicates.
 
     Returns UploadResult with counts of uploaded/failed frames and tag counts.
     """
@@ -78,14 +97,21 @@ def upload_flagged_frames(flagged_frames, api_key, workspace, project,
     if batch_name is None:
         batch_name = f"flagged-{datetime.now().strftime('%Y-%m')}"
 
+    already_uploaded = _load_tracking(tracking_file)
+
     rf = Roboflow(api_key=api_key)
     rf_project = rf.workspace(workspace).project(project)
 
+    skipped = 0
     for ff in flagged_frames:
         tmp_path = None
         ann_path = None
+        frame_id = f"{video_stem}_frame{ff.frame_idx:05d}"
+        if frame_id in already_uploaded:
+            skipped += 1
+            continue
         try:
-            filename = f"{video_stem}_frame{ff.frame_idx:05d}.jpg"
+            filename = f"{frame_id}.jpg"
             tmp_path = os.path.join(tempfile.gettempdir(), filename)
             with open(tmp_path, 'wb') as f:
                 f.write(ff.jpeg)
@@ -107,6 +133,8 @@ def upload_flagged_frames(flagged_frames, api_key, workspace, project,
             )
 
             result.uploaded += 1
+            _save_tracking(tracking_file, frame_id)
+            already_uploaded.add(frame_id)
             for tag in ff.tags:
                 base = _strip_trailing_number(tag)
                 result.tag_counts[base] = result.tag_counts.get(base, 0) + 1
@@ -122,6 +150,7 @@ def upload_flagged_frames(flagged_frames, api_key, workspace, project,
                     except OSError:
                         pass
 
+    result.skipped = skipped
     return result
 
 
@@ -134,11 +163,12 @@ def format_telegram_flag_summary(result):
     sorted_tags = sorted(result.tag_counts.items(), key=lambda x: x[1], reverse=True)
     tag_str = ", ".join(f"{count}x {tag}" for tag, count in sorted_tags)
 
-    if result.failed == 0:
-        header = f"Auto-flagged: {total} frames -> Roboflow"
-    else:
-        header = (f"Auto-flagged: {total} frames -> Roboflow "
-                  f"({result.uploaded} uploaded, {result.failed} failed)")
+    parts = [f"{result.uploaded} uploaded"]
+    if result.skipped:
+        parts.append(f"{result.skipped} skipped (already uploaded)")
+    if result.failed:
+        parts.append(f"{result.failed} failed")
+    header = f"Auto-flagged: {total} frames -> Roboflow ({', '.join(parts)})"
 
     if tag_str:
         return f"{header}\n   {tag_str}"

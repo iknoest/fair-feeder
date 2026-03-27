@@ -22,9 +22,15 @@ def _det_conf(det):
 
 
 def _det_box(det):
-    """Extract [x1,y1,x2,y2] — handles both old ('box' list) and new (x1/y1/x2/y2) formats."""
+    """Extract [x1,y1,x2,y2] — handles all cache formats:
+    - new CI format: x1/y1/x2/y2 keys
+    - old morning_report format: 'box' list
+    - old batch_review format: 'bbox' list
+    """
     if 'x1' in det:
         return [det['x1'], det['y1'], det['x2'], det['y2']]
+    if 'bbox' in det:
+        return det['bbox']
     return det['box']
 
 

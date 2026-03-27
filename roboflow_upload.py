@@ -23,6 +23,8 @@ def _det_cls(det):
 def _det_box(det):
     if 'x1' in det:
         return [det['x1'], det['y1'], det['x2'], det['y2']]
+    if 'bbox' in det:
+        return det['bbox']
     return det['box']
 
 

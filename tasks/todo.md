@@ -51,17 +51,20 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 - [x] **User setup**: Colab Secrets added (ROBOFLOW_API_KEY) ✅
 - [x] **Verify**: CI run 2026-03-26 — 42 frames flagged, all uploaded to Roboflow ✅
 
-### C2 — Batch reprocessing notebook ✅ IN PROGRESS
+### C2 — Batch reprocessing notebook ✅
 - [x] Create `batch_review.ipynb` for Colab (reprocess historical Pi videos)
 - [x] Add FEEDING_WINDOW_ONLY toggle and MAX_VIDEOS cap
 - [x] Run 1: FEEDING_WINDOW_ONLY=True — 19 feeding-window videos processed, 263 frames flagged
-- [ ] Upload flagged frames to Roboflow from batch_review (in progress)
-- [ ] Run 2: FEEDING_WINDOW_ONLY=False — non-feeding clips for Dan/Sanbo diversity
+- [x] Upload flagged frames to Roboflow with pre-annotations — 231 frames uploaded
+- [x] Add EXCLUDE_DATES filter and upload deduplication via tracking file
 
-### C3 — First retrain cycle
-- [ ] Review flagged frames in Roboflow, correct labels
-- [ ] Generate dataset v14, retrain, compare mAP50 vs v13
-- [ ] Deploy improved model if mAP50 improves
+### C3 — First retrain cycle ✅ TRAINED
+- [x] Review flagged frames in Roboflow, correct labels (775 images, 5949 annotations)
+- [x] Generate dataset v14, retrain on Kaggle (YOLOv11s, copy_paste=0.0)
+- [x] Compare: mAP50 0.956→0.957, Sanbo AP50 0.959→0.985, mAP50-95 0.739→0.754
+- [ ] Update `GDRIVE_MODEL_FILE_ID` GitHub secret to point to v14 model
+- [ ] Run morning CI pipeline with v14 and compare real-world flag counts vs v13
+- [ ] If flag counts improved, v14 becomes permanent production model
 
 ### C-later — Nice to have
 - [x] Feeding window filter — `smoketest.ipynb` filters clips to 06:18–06:30; multi-clip stitch via ffmpeg concat
@@ -83,7 +86,7 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 - [x] Raspberry Pi deployment: systemd service with Telegram ping
 - [x] OS path detection (Windows vs Pi)
 - [x] Smoketest pipeline (3-stage: cache → analytics → output)
-- [x] YOLOv11 V13 model trained (mAP50=0.928 for Dan_hand)
+- [x] YOLOv11 V14 model trained (mAP50=0.957, Sanbo AP50=0.985)
 - [x] Telegram bot integration (Colab + CI)
 - [x] Motion-triggered recording (MOG2)
 - [x] RTSP camera connection (TCP transport)

@@ -106,7 +106,7 @@ fair-feeder/
 - `opencv-python` — video/image processing, RTSP frame reading, recording
 - `mediapipe` — real-time detection (main.py, motion_recorder.py cat filter)
 - `onvif-zeep-async` — ONVIF camera event subscription (motion detection)
-- `infisical-sdk` — secret management
+- `infisicalsdk` — secret management (pip package renamed from `infisical-sdk`; import remains `from infisical_sdk`)
 - `requests` — Telegram Bot API calls
 
 ### External services
@@ -140,7 +140,7 @@ fair-feeder/
 - [x] Efficient CPU inference (YOLOv8n runs at ~300ms/frame on Pi 5)
 
 ### Working for Production (Colab Only)
-- [x] YOLOv11 V13 model trained (5 classes, mAP50=0.928 for Dan_hand)
+- [x] YOLOv11 V14 model trained (5 classes, mAP50=0.957 overall, Sanbo AP50=0.985)
 - [x] Smoketest notebook: full video analysis pipeline (requires GPU, runs on Colab)
 - [x] FeedingTracker: phase-based kibble attribution
 - [x] Telegram bot integration with video uploads
@@ -160,15 +160,17 @@ fair-feeder/
 ### In progress
 - [ ] **Phase C: Data Flywheel** — see `docs/superpowers/specs/2026-03-26-data-flywheel-design.md`
   - [x] C1: Auto-flag suspicious detections + upload to Roboflow — verified in CI 2026-03-26
-  - [x] C2: Batch reprocessing notebook — Run 1 (feeding window) processed 19 videos, 263 frames flagged
-  - [ ] C2: Run 2 (non-feeding clips) — in progress
-  - [ ] C3: First retrain cycle (v14) — pending Roboflow labeling
+  - [x] C2: Batch reprocessing notebook — 231 flagged frames uploaded to Roboflow with pre-annotations
+  - [x] C3: First retrain cycle (v14) — 775 images labeled, v14 trained 2026-03-28
+  - [ ] C3: Deploy v14 to CI and verify real-world flag count improvement
+  - [ ] C3: Update `GDRIVE_MODEL_FILE_ID` GitHub secret for v14 model
 
-### Known model weaknesses (from batch analysis of 19 feeding-window videos, 2026-03-08 to 2026-03-26)
-- **Sanbo hallucination**: `blip-sanbo` appears in 18/19 videos. Model consistently imagines Sanbo for 1-2 frames when he isn't present. Priority #1 for retraining.
-- **Dan_hand false positives (increasing)**: `no-codetect-dan_hand` count climbed from ~1-2/video (Mar 8–14) to 8-20/video (Mar 20–26). May indicate feeding angle change or model drift.
-- **Dan/Sanbo confusion**: `conflict-dan-sanbo` in ~10/19 videos. Model occasionally draws both boxes on the same cat.
-- **Kibble count instability**: Large jumps (>15) in ~12/19 videos. Partly occlusion (cat blocking view) but jumps >20 suggest real model failures.
+### V14 model improvements (vs V13, validated on V13 test split)
+- **Sanbo**: AP50 0.959→0.985, recall 0.881→1.000 — blip-sanbo should drop significantly
+- **Dan_hand**: AP50 0.928→0.936, precision→1.000 but recall 0.844→0.716 — fewer false positives, may miss some real events
+- **Dan**: AP50 0.974→0.936 — precision dropped 0.948→0.867, needs monitoring in real-world runs
+- **Kibble**: AP50 0.924→0.931 — slight improvement despite removing copy_paste augmentation
+- **Overall**: mAP50 0.956→0.957, mAP50-95 0.739→0.754 (tighter boxes)
 
 ### Planned later
 - [ ] Bowl ROI zone filter in `motion_recorder.py`
@@ -375,6 +377,11 @@ Google Colab (Daily Batch Analysis)
 | Roboflow SDK for uploads over raw REST API | `roboflow` package already in dependencies; SDK handles retries, auth, tag lists cleanly | Raw `requests.post()` (more code, manual error handling, tag format differences) |
 | Batch by month in Roboflow (`flagged-YYYY-MM`) | Keeps batch count manageable (~12/year) while images appear immediately for review | Daily batches (180/year clutter); no batches (hard to filter by time period) |
 | Separate `batch_review.ipynb` for historical reprocessing | Keeps `smoketest.ipynb` focused on daily CI. Batch notebook has different concerns (no feeding window filter, Drive output, multi-video summary). | Overloading smoketest.ipynb with more modes (complexity); ad-hoc Colab cells (not reproducible) |
+| V14: Disable copy_paste augmentation | Kibble is already the largest class (4015 annotations). copy_paste=0.3 amplified the wrong class and risked hallucinated kibble. Data bottleneck is Sanbo (293) and Dan (438), not Kibble. | Keep copy_paste=0.3 (was helpful in v13 but v14 data balance is different) |
+| V14: Keep YOLOv11s over larger models | 775 training images is too few for YOLOv11m (20M params) — overfitting risk. Small object detection comes from 1280px resolution, not model size. Rule of thumb: ~1000-2000 images per million params. | YOLOv11m (more capacity but overfits on small dataset); YOLOv11l (even worse data-to-param ratio) |
+| Upload pre-annotations to Roboflow with `is_prediction=True` | Reviewer sees what the model predicted (boxes) and corrects them, rather than labeling from scratch. Faster review, fewer missed corrections. | Upload images only (reviewer labels from scratch — slower, may miss subtle errors) |
+| Track uploaded frames in `roboflow_uploaded.txt` on Drive | Prevents duplicate uploads across batch_review sessions. Simple append-only text file, one frame ID per line. | Roboflow API dedup (limited, based on image hash not frame ID); no tracking (risk of flooding Roboflow with duplicates) |
+| pip package `infisicalsdk` (not `infisical-sdk`) | Package renamed upstream; `infisical-sdk` is deprecated. Import name stays `from infisical_sdk import ...` | Keep old package name (will stop receiving updates) |
 
 ---
 

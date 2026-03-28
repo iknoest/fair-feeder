@@ -7,7 +7,8 @@ Each row documents one training run: model ID, performance metrics, training det
 
 | Model ID | mAP50 | Train Date | Colab Commit | Drive Path | Notes |
 |----------|-------|-----------|--------------|-----------|-------|
-| v13-final | 0.928 | 2026-01-25 | a419240 | `/My Drive/fair-feeder-models/yolov11s_v13_final.pt` | Production model; Dan_hand tuned; tested on 2 real videos |
+| v13-final | 0.956 | 2026-01-25 | a419240 | `/My Drive/fair-feeder-models/yolov11s_v13_final.pt` | Dan_hand tuned; tested on 2 real videos |
+| v14 | 0.957 | 2026-03-28 | — | `/My Drive/Fun Project/Cat monitor/model/fair_feeder_v14_yolov11s.pt` | Data flywheel retrain: 775 images (v13 + 231 auto-flagged). Sanbo AP50 0.959→0.985, Dan_hand precision→1.0. copy_paste=0.0 (kibble already largest class) |
 
 ## How to add a new model
 
@@ -24,11 +25,11 @@ Each row documents one training run: model ID, performance metrics, training det
 
 ## Quick access
 
-Use the latest **v13-final** model by default in smoketest.ipynb and training pipelines.
+Use the latest **v14** model by default in all pipelines.
 To use an older model, update the `MODEL_PATH` in the Download/Load cell:
 
 ```python
-MODEL_PATH = '/content/drive/MyDrive/fair-feeder-models/yolov11s_v13_final.pt'
+MODEL_PATH = '/content/drive/MyDrive/Fun Project/Cat monitor/model/fair_feeder_v14_yolov11s.pt'
 ```
 
 ## Metrics explanation

@@ -62,9 +62,9 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 - [x] Review flagged frames in Roboflow, correct labels (775 images, 5949 annotations)
 - [x] Generate dataset v14, retrain on Kaggle (YOLOv11s, copy_paste=0.0)
 - [x] Compare: mAP50 0.956→0.957, Sanbo AP50 0.959→0.985, mAP50-95 0.739→0.754
+- [x] V14 deployed to CI — first run 2026-03-28: 6 flags (vs 10-20+ with v13), zero blip-sanbo
 - [ ] Update `GDRIVE_MODEL_FILE_ID` GitHub secret to point to v14 model
-- [ ] Run morning CI pipeline with v14 and compare real-world flag counts vs v13
-- [ ] If flag counts improved, v14 becomes permanent production model
+- [ ] Monitor v14 daily flag counts for 3-4 weeks before next retrain cycle (v15)
 
 ### C-later — Nice to have
 - [x] Feeding window filter — `smoketest.ipynb` filters clips to 06:18–06:30; multi-clip stitch via ffmpeg concat

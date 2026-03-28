@@ -330,8 +330,11 @@ Google Colab (Daily Batch Analysis)
 | 33 | Annotated output video never appears in Google Drive output folder after CI run | SA has zero storage quota on personal Drive; `files().create()` fails with 403 | Decision: drop Drive uploads from CI entirely; use Colab (user account, no SA issue) for archiving. See data flywheel design. | — |
 | 34 | `feeding_log.csv` still not accumulating data after `98c3a47` fix | CSV cell ran before Phase 1–3 (summary undefined) + wrong video path | CSV cell moved to after Phase 3; reads from `video_results[-1]['summary']`; skips entirely when no videos processed | ee5c70e |
 
+| 35 | OCR timestamp shows `6:20|:0` — pipe character in timestamp | EasyOCR misreads `:1` as `|:` from Tapo's thin OSD font | Replace `|:` with `:1` then remaining `|` with `1` before regex parsing; order matters | 34f7e86 |
+| 36 | Kibble Y-axis on timeline chart hard to read at high counts | No explicit Y-axis limit; matplotlib auto-scaled without padding | Added `set_ylim(0, max_k * 1.15)` with `max N` text annotation | e5ea2ae |
+| 37 | Dan ate ~40 kibble but chart shows max 26 visible | Double-counting guard skipped when video ends mid-feeding (`last_clear=None`); also `first_clear` underestimated starting kibble due to cat occlusion | Guard now uses `peak_kibble = max(kibble_counts)` as starting estimate; added `last_clear` fallback via `_find_kibble_at_phase_exit` | 3a6ba77 |
+
 ### Unresolved
-- **Detection model quality on real videos** — false positives observed (Sanbo hallucinated). Data flywheel (Phase C) will address via auto-flagging + Roboflow relabeling + retraining
 - **Drive video upload from CI (issue #33)** — dropped by design; Colab handles archive instead
 
 ---
@@ -382,6 +385,8 @@ Google Colab (Daily Batch Analysis)
 | Upload pre-annotations to Roboflow with `is_prediction=True` | Reviewer sees what the model predicted (boxes) and corrects them, rather than labeling from scratch. Faster review, fewer missed corrections. | Upload images only (reviewer labels from scratch — slower, may miss subtle errors) |
 | Track uploaded frames in `roboflow_uploaded.txt` on Drive | Prevents duplicate uploads across batch_review sessions. Simple append-only text file, one frame ID per line. | Roboflow API dedup (limited, based on image hash not frame ID); no tracking (risk of flooding Roboflow with duplicates) |
 | pip package `infisicalsdk` (not `infisical-sdk`) | Package renamed upstream; `infisical-sdk` is deprecated. Import name stays `from infisical_sdk import ...` | Keep old package name (will stop receiving updates) |
+| `peak_kibble` (max visible) for double-counting guard, not `first_clear` | `first_clear` measures kibble when cat just arrived — body already occludes some. `max(kibble_counts)` is the best camera angle with most kibble simultaneously visible, closest to true bowl count | `first_clear` (underestimates by 30-40% due to occlusion); phase_entry median (still measured with cat present) |
+| OCR: replace `\|:` with `:1` before `\|` with `1` | Tapo OSD font causes EasyOCR to read `:1` as `\|:`. Replacing `\|` alone gives `6:201:0` (extra colon). Must replace `\|:` → `:1` first | Single `\|` → `1` replacement (wrong when followed by colon) |
 
 ---
 

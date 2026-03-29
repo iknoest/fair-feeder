@@ -486,7 +486,7 @@ class TelegramCommandListener:
                 
                 # 在這裡可以加入群組的 Chat ID (格式為字串，包含負號)
                 # 例如 allowed_chats = [self.chat_id, "-1001234567"]
-                allowed_chats = [self.chat_id]
+                allowed_chats = [self.chat_id, "-1003701186018"]
                 
                 if sender_id in allowed_chats:
                     self._handle_command(cmd)

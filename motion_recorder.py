@@ -475,12 +475,44 @@ class TelegramCommandListener:
             self._last_update_id = update['update_id']
             msg = update.get('message', {})
             text = msg.get('text', '').strip()
+            if not text:
+                continue
+                
             sender_id = str(msg.get('chat', {}).get('id', ''))
-            if sender_id == self.chat_id and text.startswith('/'):
-                self._handle_command(text.split()[0].lower())
+            
+            if text.startswith('/'):
+                # 處理群組中帶有 @botname 的指令 (例: /status@FeederBot -> /status)
+                cmd = text.split()[0].lower().split('@')[0]
+                
+                # 在這裡可以加入群組的 Chat ID (格式為字串，包含負號)
+                # 例如 allowed_chats = [self.chat_id, "-1001234567"]
+                allowed_chats = [self.chat_id]
+                
+                if sender_id in allowed_chats:
+                    self._handle_command(cmd)
+                else:
+                    log.info(f"⚠️ 收到來自未授權 Chat ID 的指令: {sender_id} (訊息: {text})")
+                    # 收到未白名單的 Chat ID 呼叫時，主動在該聊天室回覆告知 ID
+                    try:
+                        reply_msg = (
+                            f"🛑 存取被拒\n\n"
+                            f"要在這裡使用 Bot，請將這個 Chat ID 加入 `motion_recorder.py` 的白名單內：\n\n"
+                            f"`{sender_id}`\n\n"
+                            f"(您可以複製上面這串數字)"
+                        )
+                        requests.post(f"https://api.telegram.org/bot{self.bot_token}/sendMessage", 
+                                      json={'chat_id': sender_id, 'text': reply_msg}, timeout=5)
+                    except Exception as e:
+                        log.warning(f"無法回覆未授權 Chat ID ({sender_id}): {e}")
 
     def _handle_command(self, cmd):
-        dispatch = {'/status': self._cmd_status, '/lastclip': self._cmd_lastclip, '/syncstatus': self._cmd_syncstatus, '/help': self._cmd_help}
+        dispatch = {
+            '/status': self._cmd_status, 
+            '/lastclip': self._cmd_lastclip, 
+            '/syncstatus': self._cmd_syncstatus, 
+            '/help': self._cmd_help,
+            '/start': self._cmd_help  # 新增 /start 支援
+        }
         handler = dispatch.get(cmd)
         if handler:
             handler()

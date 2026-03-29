@@ -489,7 +489,7 @@ class TelegramCommandListener:
                 allowed_chats = [self.chat_id, "-1003701186018"]
                 
                 if sender_id in allowed_chats:
-                    self._handle_command(cmd)
+                    self._handle_command(cmd, sender_id=sender_id)
                 else:
                     log.info(f"⚠️ 收到來自未授權 Chat ID 的指令: {sender_id} (訊息: {text})")
                     # 收到未白名單的 Chat ID 呼叫時，主動在該聊天室回覆告知 ID
@@ -505,7 +505,7 @@ class TelegramCommandListener:
                     except Exception as e:
                         log.warning(f"無法回覆未授權 Chat ID ({sender_id}): {e}")
 
-    def _handle_command(self, cmd):
+    def _handle_command(self, cmd, sender_id=None):
         dispatch = {
             '/status': self._cmd_status, 
             '/lastclip': self._cmd_lastclip, 
@@ -515,9 +515,9 @@ class TelegramCommandListener:
         }
         handler = dispatch.get(cmd)
         if handler:
-            handler()
+            handler(sender_id=sender_id)
 
-    def _cmd_status(self):
+    def _cmd_status(self, sender_id=None):
         uptime_secs = int(time.time() - START_TIME)
         h, rem = divmod(uptime_secs, 3600)
         m = rem // 60
@@ -538,30 +538,32 @@ class TelegramCommandListener:
             f'Clips saved: {saved}\n'
             f'Clips deleted: {deleted}\n'
             f'Drive space: {disk_str}\n'
-            f'Last motion: {motion_str}'
+            f'Last motion: {motion_str}',
+            sender_id=sender_id
         )
 
-    def _cmd_lastclip(self):
+    def _cmd_lastclip(self, sender_id=None):
+        target_id = sender_id if sender_id else self.chat_id
         clips = sorted(DRIVE_OUTPUT_DIR.glob('*.mp4'), key=lambda p: p.stat().st_mtime)
         if not clips:
-            self._send('No clips saved yet.')
+            self._send('No clips saved yet.', sender_id=sender_id)
             return
         latest = clips[-1]
         size_mb = latest.stat().st_size / (1024 * 1024)
         if size_mb > 50:
-            self._send(f'Latest clip too large to send ({size_mb:.0f} MB): {latest.name}')
+            self._send(f'Latest clip too large to send ({size_mb:.0f} MB): {latest.name}', sender_id=sender_id)
             return
         url = f'https://api.telegram.org/bot{self.bot_token}/sendVideo'
         try:
             with open(latest, 'rb') as f:
-                resp = requests.post(url, data={'chat_id': self.chat_id}, files={'video': f}, timeout=60)
+                resp = requests.post(url, data={'chat_id': target_id}, files={'video': f}, timeout=60)
             if resp.status_code != 200:
-                self._send(f'Telegram rejected clip (HTTP {resp.status_code}): {latest.name}')
+                self._send(f'Telegram rejected clip (HTTP {resp.status_code}): {latest.name}', sender_id=sender_id)
         except Exception as e:
-            self._send(f'Failed to send clip: {e}')
+            self._send(f'Failed to send clip: {e}', sender_id=sender_id)
 
-    def _cmd_syncstatus(self):
-        self._send("🔄 Checking sync status (this takes a few seconds)...")
+    def _cmd_syncstatus(self, sender_id=None):
+        self._send("🔄 Checking sync status (this takes a few seconds)...", sender_id=sender_id)
         import subprocess
         try:
             # Check local files
@@ -581,31 +583,34 @@ class TelegramCommandListener:
                         f"☁️ Sync Status\n"
                         f"Pi Local Files: {local_count}\n"
                         f"Google Drive Files: {remote_count}\n\n"
-                        f"Connection to Google Drive is Active! ✅"
+                        f"Connection to Google Drive is Active! ✅",
+                        sender_id=sender_id
                     )
                 except Exception as je:
                     log.warning(f"JSON Parse error in syncstatus: {je}\nOutput: {result.stdout}")
-                    self._send(f"⚠️ Could not parse Google Drive stats. Local total is {local_count}.")
+                    self._send(f"⚠️ Could not parse Google Drive stats. Local total is {local_count}.", sender_id=sender_id)
             else:
-                self._send(f"⚠️ Error reaching Google Drive: {result.stderr.strip()[:100]}")
+                self._send(f"⚠️ Error reaching Google Drive: {result.stderr.strip()[:100]}", sender_id=sender_id)
         except subprocess.TimeoutExpired:
-            self._send("⚠️ Sync check timed out. Google Drive is slow to respond.")
+            self._send("⚠️ Sync check timed out. Google Drive is slow to respond.", sender_id=sender_id)
         except Exception as e:
-            self._send(f"⚠️ Failed to check sync: {e}")
+            self._send(f"⚠️ Failed to check sync: {e}", sender_id=sender_id)
 
-    def _cmd_help(self):
+    def _cmd_help(self, sender_id=None):
         self._send(
             '🐱 Fair Feeder Commands\n'
             '/status — uptime, clips, disk space\n'
             '/lastclip — send most recent cat clip\n'
             '/syncstatus — check Google Drive connection and file count\n'
-            '/help — this message'
+            '/help — this message',
+            sender_id=sender_id
         )
 
-    def _send(self, text):
+    def _send(self, text, sender_id=None):
+        target = sender_id if sender_id else self.chat_id
         url = f'https://api.telegram.org/bot{self.bot_token}/sendMessage'
         try:
-            requests.post(url, json={'chat_id': self.chat_id, 'text': text}, timeout=5)
+            requests.post(url, json={'chat_id': target, 'text': text}, timeout=5)
         except Exception as e:
             log.warning(f'Telegram reply failed: {e}')
 

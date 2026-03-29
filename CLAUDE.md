@@ -502,7 +502,7 @@ A resolved issue can appear in both CLAUDE.md's Issues Log (what was fixed + com
 - Stitch clips only if the gap between end of one clip and start of next is ≤ 10 seconds — clips with a larger gap are separate feeding events and must each have their own FeedingTracker analysis, verdict, and Telegram block
 
 ### Never do
-- Never hardcode API keys, tokens, or passwords in committed code
+- Never hardcode any environment-specific identifiers (Chat IDs, Folder IDs) or secrets (Tokens, Passwords) in source code. All external identifiers MUST be loaded via `os.getenv()` or Infisical.
 - Never use `show_label=True` in the video output writer (annotated video)
 - Never assume class index 0 = first class in data.yaml (YOLO reorders alphabetically)
 - Never use `imgsz` as a tuple — always pass a single int (e.g., `imgsz=1280`)

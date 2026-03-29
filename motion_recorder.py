@@ -484,9 +484,11 @@ class TelegramCommandListener:
                 # 處理群組中帶有 @botname 的指令 (例: /status@FeederBot -> /status)
                 cmd = text.split()[0].lower().split('@')[0]
                 
-                # 在這裡可以加入群組的 Chat ID (格式為字串，包含負號)
-                # 例如 allowed_chats = [self.chat_id, "-1001234567"]
-                allowed_chats = [self.chat_id, "-1003701186018"]
+                # 若需授權群組，請在 .env 中加入 ALLOWED_GROUP_ID=-100XXXXXXXXX
+                allowed_chats = [self.chat_id]
+                group_id = os.getenv("ALLOWED_GROUP_ID")
+                if group_id:
+                    allowed_chats.append(group_id)
                 
                 if sender_id in allowed_chats:
                     self._handle_command(cmd, sender_id=sender_id)

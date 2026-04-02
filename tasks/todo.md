@@ -27,7 +27,7 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 ### B3 — Morning Kibble Report (GitHub Actions) ✅
 - [x] Service account auth + Drive sharing
 - [x] CI-compatible notebook (`RUNNING_IN_CI` guard, `tqdm.auto`)
-- [x] Cron schedule running (`45 5 * * *` = 06:45 CET)
+- [x] Cron schedule running (06:35 `Europe/Amsterdam` local time)
 - [x] Merged clip detection and stitching working in Phase 1
 - [x] Timeline chart generating correctly from detection cache
 - [x] **Verify all fixes work on real morning clips** — CI run 2026-03-26 all green ✅

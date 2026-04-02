@@ -158,7 +158,7 @@ fair-feeder/
 ├── morning_report.ipynb     # Daily CI pipeline (GitHub Actions)
 ├── smoketest.ipynb          # Interactive analysis (Colab)
 ├── batch_review.ipynb       # Historical video reprocessing
-├── fair_feeder_v13.ipynb    # Model training notebook
+├── fair_feeder_v14.ipynb    # Current model training notebook
 ├── flagging.py              # Auto-flag suspicious detections
 ├── roboflow_upload.py       # Upload flagged frames to Roboflow
 ├── motion_recorder.py       # Pi 5: 24/7 motion + cat filter

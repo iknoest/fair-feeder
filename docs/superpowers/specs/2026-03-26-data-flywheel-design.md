@@ -246,7 +246,7 @@ ROBOFLOW_PROJECT = "ir-kibble"
 2. Review and correct labels for flagged images
 3. Assign corrected images to training split
 4. Generate new dataset version (v14, v15, ...)
-5. Open `fair_feeder_v13.ipynb` in Colab → change version number → train
+5. Open `fair_feeder_v14.ipynb` in Colab → change version number → train
 6. Compare mAP50 against previous version
 7. If improved: upload new weights to Drive, update `GDRIVE_MODEL_FILE_ID` secret
 

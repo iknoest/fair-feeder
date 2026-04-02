@@ -1372,7 +1372,7 @@ print("1. Open Roboflow -> Annotate tab -> filter by flagged batch")
 print("2. Review and correct labels for flagged images")
 print("3. Assign corrected images to training split")
 print("4. When ~50-100 corrections accumulate: generate new dataset version")
-print("5. Retrain with fair_feeder_v13.ipynb")""")
+print("5. Retrain with fair_feeder_v14.ipynb")""")
 
 notebook = {
     "nbformat": 4,

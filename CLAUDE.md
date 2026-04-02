@@ -83,7 +83,7 @@ fair-feeder/
 ├── test_env.py                # Environment validation
 ├── data.yaml                  # YOLO dataset config (5 classes)
 ├── requirements.txt           # Core dependencies
-├── fair_feeder_v13.ipynb      # Training notebook (Colab/Kaggle)
+├── fair_feeder_v14.ipynb      # Current training notebook (Colab/Kaggle)
 ├── smoketest.ipynb            # Inference + feeding analysis (staged pipeline)
 ├── morning_report.ipynb       # CI pipeline notebook (papermill, GitHub Actions)
 ├── batch_review.ipynb         # Colab notebook for historical video reprocessing

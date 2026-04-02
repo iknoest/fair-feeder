@@ -2,7 +2,8 @@ name: Fair Feeder Morning Report
 
 on:
   schedule:
-    - cron: '45 5 * * *'   # 06:45 Amsterdam CET (UTC+1) / 07:45 CEST (UTC+2)
+    - cron: '35 6 * * *'
+      timezone: 'Europe/Amsterdam'   # 06:35 Amsterdam local time year-round
   workflow_dispatch:         # Manual trigger for testing
 
 concurrency:

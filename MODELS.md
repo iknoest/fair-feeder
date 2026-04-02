@@ -12,7 +12,7 @@ Each row documents one training run: model ID, performance metrics, training det
 
 ## How to add a new model
 
-1. Train in `fair_feeder_v13.ipynb` on Colab
+1. Train in `fair_feeder_v14.ipynb` on Colab
 2. After training, note down:
    - Model name (e.g., `v13-1` or `v14-improved`)
    - Final mAP50 (from `model.val()` output)

@@ -76,11 +76,9 @@ fair-feeder/
 ├── download_dataset.py        # Roboflow dataset downloader
 ├── polygon_to_bbox.py         # Convert polygon annotations → YOLO bbox
 ├── verify_labels.py           # Visual label verification grid
-├── tapo_check.py              # RTSP connection tester
 ├── motion_recorder.py         # 24/7 Motion-triggered recording + YOLO cat filter
 ├── README_GIT_PULL.md         # Setup guide for credentials after git pull
 ├── README_RPI_SERVICE.md      # Pi 5 deployment guide
-├── test_env.py                # Environment validation
 ├── data.yaml                  # YOLO dataset config (5 classes)
 ├── requirements.txt           # Core dependencies
 ├── fair_feeder_v14.ipynb      # Current training notebook (Colab/Kaggle)
@@ -104,7 +102,6 @@ fair-feeder/
 - `roboflow` — dataset download + flagged frame upload (data flywheel)
 - `easyocr` — timestamp OCR
 - `opencv-python` — video/image processing, RTSP frame reading, recording
-- `mediapipe` — real-time detection (main.py, motion_recorder.py cat filter)
 - `onvif-zeep-async` — ONVIF camera event subscription (motion detection)
 - `infisicalsdk` — secret management (pip package renamed from `infisical-sdk`; import remains `from infisical_sdk`)
 - `requests` — Telegram Bot API calls
@@ -127,7 +124,7 @@ fair-feeder/
 
 ### Completed on Raspberry Pi 5
 - [x] **RTSP camera connection** - Tapo C210 connects via TCP transport (UDP too unreliable)
-- [x] **Motion detection (MOG2)** - Frame-based background subtraction working in `test_motion_pi.py`
+- [x] **Motion detection (MOG2)** - Frame-based background subtraction logic validated and folded into `motion_recorder.py`
 - [x] **Video recording** - Captures motion videos with 3s pre-buffer
 - [x] **Google Drive sync** - `rclone bisync` uploads videos in background (fire-and-forget)
 - [x] **Automatic storage cleanup** - Deletes no-cat videos to save space
@@ -277,7 +274,7 @@ Output:           Google Drive via rclone
 
 ```
 Raspberry Pi 5 (24/7 Motion Recorder)
-├─ test_motion_pi.py OR motion_recorder.py
+├─ motion_recorder.py
 ├─ Detects motion + records video
 ├─ Uploads to Google Drive instantly (rclone copy)
 └─ sync_cleanup.sh (cron) deletes local videos > 3 days old
@@ -401,7 +398,7 @@ Google Colab (Daily Batch Analysis)
 ### Resolved ✓
 - **Infisical secret names for Telegram** — `TelegramBotToken` and `TelegramChatId` confirmed.
 - **Tapo camera credentials** — `TAPO_IP`, `TAPO_USER`, `TAPO_PASS` moved to Infisical with
-  fallback to env vars for local use (main.py). Updated `config.py` to load from Infisical
+  fallback to env vars for local use in `motion_recorder.py` and related scripts. Updated `config.py` to load from Infisical
   when available.
 - **Automated scheduling** — Owner wants automatic video processing pipeline; smoketest runs
   manually in notebook. Next phase: schedule Drive uploads or integrate trigger system.

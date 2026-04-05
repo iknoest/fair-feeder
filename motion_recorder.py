@@ -33,7 +33,7 @@ HOW TO RUN FROM TERMINAL:
 CONFIGURATION:
 ===============
 Edit /home/pi5/Feeder/fair-feeder/config.py to change:
-  - TAPO_IP: Camera IP address (default: 192.168.1.246)
+  - TAPO_IP: Camera IP address (default: <YOUR_CAMERA_IP>)
   - TAPO_USER: Camera username
   - TAPO_PASS: Camera password
   - DRIVE_OUTPUT_DIR: Where to save videos

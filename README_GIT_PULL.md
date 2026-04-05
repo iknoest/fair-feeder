@@ -21,7 +21,7 @@ You should prefer environment variables. If you need to verify the connection lo
 After setting your credentials, run the check script to ensure everything is working:
 
 ```powershell
-python test_yolo_detection.py
+python debug_yolo_detection.py
 ```
 
 ## Security Reminder

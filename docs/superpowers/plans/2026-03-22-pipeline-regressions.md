@@ -27,7 +27,7 @@
 | File | Action | Purpose |
 |------|--------|---------|
 | `morning_report.ipynb` | Modify cells 1, 9, 10, 12, 13 | All 5 fixes live here |
-| `test_notebook_fixes.py` | Create | Unit tests for gap-grouping logic and kibble attribution |
+| `tests/legacy_notebook/test_notebook_fixes.py` | Create | Unit tests for gap-grouping logic and kibble attribution |
 | `fix_cell_01_stitch_gap.py` | Create | Update script for Task 1 |
 | `fix_cell_12_13_rescan.py` | Create | Update script for Task 2 |
 | `fix_cell_10_kibble.py` | Create | Update script for Task 3 |
@@ -42,7 +42,7 @@ All update scripts are run once and then deleted (or kept in `artifacts/` for re
 **Files:**
 - Modify: `morning_report.ipynb` cell 1
 - Create: `fix_cell_01_stitch_gap.py`
-- Test: `test_notebook_fixes.py` (new, `TestGroupByGap` class)
+- Test: `tests/legacy_notebook/test_notebook_fixes.py` (new, `TestGroupByGap` class)
 
 The stitch cell must parse clip start/end times from filenames, group consecutive clips by gap ≤ 10s, and produce one `video_paths` entry per event group (merged if >1 clip in group, raw if single). It must also populate `merged_sources = {merged_filename: [clip1, clip2, ...]}` for use in Phase 2.
 
@@ -50,7 +50,7 @@ Filename format: `motion_YYYYMMDD_HHMMSS_Xm_Ys.mp4` (minutes optional).
 
 - [ ] **Step 1: Write failing tests for gap-grouping logic**
 
-Create `test_notebook_fixes.py`:
+Create `tests/legacy_notebook/test_notebook_fixes.py`:
 
 ```python
 from pathlib import Path
@@ -167,7 +167,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Run tests — expect FAIL (functions not yet implemented in notebook)**
 
 ```
-python test_notebook_fixes.py
+python tests/legacy_notebook/test_notebook_fixes.py
 ```
 Expected: tests run but the functions are defined inline in the test file, so they should PASS already (this validates the function design before putting it in the notebook).
 
@@ -284,7 +284,7 @@ Expected: first lines start with `# ── Stitch feeding-window clips` and cont
 - [ ] **Step 6: Commit**
 
 ```bash
-git add morning_report.ipynb test_notebook_fixes.py fix_cell_01_stitch_gap.py
+git add morning_report.ipynb tests/legacy_notebook/test_notebook_fixes.py fix_cell_01_stitch_gap.py
 git commit -m "fix(notebook): stitch only clips within 10s gap, separate events independently"
 ```
 
@@ -410,7 +410,7 @@ git commit -m "fix(notebook): preserve CI video_paths in Phase 1/2, fix merged_n
 **Files:**
 - Modify: `morning_report.ipynb` cell 10 (FeedingTracker class)
 - Create: `fix_cell_10_kibble.py`
-- Test: `test_notebook_fixes.py` (add `TestKibbleAttribution` class)
+- Test: `tests/legacy_notebook/test_notebook_fixes.py` (add `TestKibbleAttribution` class)
 
 **The problem:** `_find_clear_kibble_count` requires frames where no cats are at the bowl. In Pi IR footage, kibble is only detected when cats ARE at the bowl. Clear frames have `kibble_count=0` always. Attribution fails.
 
@@ -425,9 +425,9 @@ Update `summarize()`:
 2. In phase loop: if `kb_after is None`, use `_find_kibble_at_phase_exit`
 3. For `start_kibble`: if `first_clear == 0` and phases exist, use entry of first phase
 
-- [ ] **Step 1: Add kibble attribution tests to `test_notebook_fixes.py`**
+- [ ] **Step 1: Add kibble attribution tests to `tests/legacy_notebook/test_notebook_fixes.py`**
 
-Append to `test_notebook_fixes.py`:
+Append to `tests/legacy_notebook/test_notebook_fixes.py`:
 
 ```python
 # ── Minimal FeedingTracker stub for testing attribution logic ──
@@ -500,7 +500,7 @@ def test_phase_entry_empty_phase():
 - [ ] **Step 2: Run new tests**
 
 ```
-python test_notebook_fixes.py
+python tests/legacy_notebook/test_notebook_fixes.py
 ```
 Expected: all PASS (the functions are defined in the test stub — confirms the logic before writing to notebook).
 
@@ -632,7 +632,7 @@ print('✅ All patches verified')
 - [ ] **Step 6: Commit**
 
 ```bash
-git add morning_report.ipynb test_notebook_fixes.py fix_cell_10_kibble.py
+git add morning_report.ipynb tests/legacy_notebook/test_notebook_fixes.py fix_cell_10_kibble.py
 git commit -m "fix(tracker): fall back to phase-entry/exit kibble when clear frames return 0"
 ```
 

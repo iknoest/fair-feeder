@@ -1466,7 +1466,7 @@ Check:
 
 - [ ] **Step 1: Run all unit tests**
 
-Run: `cd C:/Users/AVAVAVA/.gemini/antigravity/scratch/fair-feeder && python -m pytest test_flagging.py test_roboflow_upload.py test_notebook_fixes.py -v`
+Run: `cd C:/Users/AVAVAVA/.gemini/antigravity/scratch/fair-feeder && python -m pytest test_flagging.py test_roboflow_upload.py tests/legacy_notebook/test_notebook_fixes.py -v`
 Expected: All tests pass
 
 - [ ] **Step 2: Verify notebook cells are correctly injected**

@@ -10,6 +10,16 @@
 
 I have two cats: **Dan** (picky eater) and **Sanbo** (food thief). Every morning I hand-feed Dan, but Sanbo steals his food the moment I look away. I needed to know: *did Dan actually eat enough today?*
 
+## Repo Guide
+
+If you're new to the project, read the files in this order:
+
+- `motion_recorder.py`, `morning_report.ipynb`, `flagging.py`, `roboflow_upload.py` for the production path
+- `fair_feeder_v14.ipynb`, `train.py`, `download_dataset.py`, `verify_labels.py`, `polygon_to_bbox.py` for training and dataset work
+- `smoketest.ipynb`, `batch_review.ipynb` for interactive analysis and historical review
+- `test_flagging.py`, `test_roboflow_upload.py` for the main tests that protect current production code
+- `tests/legacy_notebook/test_notebook_fixes.py` for older notebook-specific regression coverage
+
 ## How It Works
 
 ```mermaid

@@ -92,7 +92,7 @@ fair-feeder/
 ├── test_flagging.py           # Unit tests for flagging module
 ├── test_roboflow_upload.py    # Unit tests for upload module
 ├── debug_yolo_detection.py    # Manual utility to debug YOLO on Pi camera
-├── test_notebook_fixes.py     # Unit tests for notebook patch helpers
+├── tests/legacy_notebook/     # Legacy notebook regression tests
 ├── sync_cleanup.sh            # Auto-purge cron job to delete old local videos
 └── tasks/
     ├── todo.md                # Current task tracking (checkable items)
@@ -253,6 +253,12 @@ Output:           Google Drive via rclone
 - ✅ Google Drive upload working (`rclone`)
 - ✅ Cat filtering enabled (YOLOv8n)
 - **Best for**: 24/7 autonomous monitoring with storage optimization (deletes non-cat motion automatically).
+
+### Repo orientation
+- Production path: `motion_recorder.py`, `morning_report.ipynb`, `flagging.py`, `roboflow_upload.py`
+- Current training path: `fair_feeder_v14.ipynb`, `train.py`, `download_dataset.py`, `verify_labels.py`
+- Core tests worth keeping green: `test_flagging.py`, `test_roboflow_upload.py`
+- Legacy notebook regression tests: `tests/legacy_notebook/test_notebook_fixes.py`
 
 ### Realistic Expectations: Pi 5 vs Colab
 

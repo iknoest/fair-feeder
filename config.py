@@ -43,8 +43,8 @@ def _load_tapo_credentials():
     except Exception:
         # Fallback to environment variables (local, non-Colab use)
         return (
-            os.getenv('TAPO_IP', '192.168.1.246'),
-            os.getenv('TAPO_USER', 'c210RTSP'),
+            os.getenv('TAPO_IP', '<YOUR_CAMERA_IP>'),
+            os.getenv('TAPO_USER', '<YOUR_CAMERA_USER>'),
             os.getenv('TAPO_PASS', '<YOUR_CAMERA_PASSWORD>'),
         )
 

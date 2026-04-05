@@ -91,7 +91,7 @@ fair-feeder/
 ├── roboflow_upload.py         # Upload flagged frames to Roboflow
 ├── test_flagging.py           # Unit tests for flagging module
 ├── test_roboflow_upload.py    # Unit tests for upload module
-├── test_yolo_detection.py     # Utility to debug YOLO on Pi camera
+├── debug_yolo_detection.py    # Manual utility to debug YOLO on Pi camera
 ├── test_notebook_fixes.py     # Unit tests for notebook patch helpers
 ├── sync_cleanup.sh            # Auto-purge cron job to delete old local videos
 └── tasks/

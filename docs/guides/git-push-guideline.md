@@ -7,6 +7,7 @@
 | **Core production code** | `motion_recorder.py`, `config.py`, `flagging.py`, `roboflow_upload.py` | Runs on Pi, CI, or Colab — must be version-controlled |
 | **Notebooks** | `morning_report.ipynb`, `batch_review.ipynb`, `smoketest.ipynb`, `fair_feeder_v14.ipynb` | Shared across CI and Colab; changes must propagate |
 | **Unit tests for production modules** | `test_flagging.py`, `test_roboflow_upload.py` | Guard production code; run before merging changes |
+| **Legacy regression tests** | `tests/legacy_notebook/test_notebook_fixes.py` | Keep if notebook logic still changes; useful, but not core production coverage |
 | **CI workflows** | `.github/workflows/morning-report.yml` | Controls automated pipeline |
 | **Training/dataset tools** | `train.py`, `download_dataset.py`, `verify_labels.py`, `polygon_to_bbox.py` | Reproducible model training |
 | **Configuration** | `data.yaml`, `requirements.txt`, `sync_cleanup.sh` | Deployment-critical config |

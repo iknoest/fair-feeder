@@ -22,7 +22,9 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 ### B2 — Pi ↔ Telegram Two-Way Health Check
 - [x] Add `TelegramCommandListener` class to `motion_recorder.py`
 - [x] Wire into main loop (daemon thread, shares `RecordingController` instance)
-- [ ] **Test on Pi**: send `/status`, `/lastclip`, `/help` from phone and verify replies
+- [x] `/weight` inline menu with Log/History/Edit buttons; weight chart X-axis fixed (integer ticks + MM-DD labels)
+- [x] `/syncstatus` merged into `/status` — Drive file count appended inline
+- [ ] **Test on Pi**: send `/status`, `/lastclip`, `/weight`, `/help` from phone and verify replies
 
 ### B3 — Morning Kibble Report (GitHub Actions) ✅
 - [x] Service account auth + Drive sharing

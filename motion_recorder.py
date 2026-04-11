@@ -452,6 +452,7 @@ class TelegramCommandListener:
         self.controller = controller
         self.running = False
         self._last_update_id = 0
+        self._pending = {}  # sender_id -> {'cmd': str, 'step': str, 'data': dict}
 
     def start(self):
         self.running = True
@@ -491,6 +492,7 @@ class TelegramCommandListener:
                     allowed_chats.append(group_id)
                 
                 if sender_id in allowed_chats:
+                    self._pending.pop(sender_id, None)  # new command resets dialog
                     self._handle_command(cmd, sender_id=sender_id)
                 else:
                     log.info(f"⚠️ 收到來自未授權 Chat ID 的指令: {sender_id} (訊息: {text})")
@@ -506,14 +508,134 @@ class TelegramCommandListener:
                                       json={'chat_id': sender_id, 'text': reply_msg}, timeout=5)
                     except Exception as e:
                         log.warning(f"無法回覆未授權 Chat ID ({sender_id}): {e}")
+            elif sender_id in allowed_chats and sender_id in self._pending:
+                self._handle_dialog(text, sender_id)
+
+    def _weight_file(self):
+        return DRIVE_OUTPUT_DIR / 'weight_log.csv'
+
+    def _load_weights(self):
+        import csv as _csv
+        wf = self._weight_file()
+        if not wf.exists():
+            return []
+        with open(wf, newline='', encoding='utf-8') as f:
+            return list(_csv.DictReader(f))
+
+    def _save_weights(self, rows):
+        import csv as _csv
+        wf = self._weight_file()
+        with open(wf, 'w', newline='', encoding='utf-8') as f:
+            w = _csv.DictWriter(f, fieldnames=['date', 'cat', 'weight_kg'])
+            w.writeheader()
+            w.writerows(rows)
+        # Sync to Drive
+        try:
+            import subprocess as _sp
+            _sp.Popen(
+                ['rclone', 'copy', str(wf), 'gdrive-randomdice:'],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL
+            )
+        except Exception as e:
+            log.warning(f'rclone sync weight_log.csv failed: {e}')
+
+    def _handle_dialog(self, text, sender_id):
+        state = self._pending.get(sender_id)
+        if not state:
+            return
+        cmd  = state['cmd']
+        step = state['step']
+
+        if cmd == '/weight':
+            if step == 'cat':
+                cat = text.strip().lower()
+                if cat not in ('dan', 'sanbo'):
+                    self._send('Please reply with dan or sanbo.', sender_id=sender_id)
+                    return
+                state['data']['cat'] = cat
+                state['step'] = 'value'
+                self._send(f'Enter {cat.capitalize()} weight in kg (e.g. 5.2):', sender_id=sender_id)
+
+            elif step == 'value':
+                try:
+                    kg = float(text.strip().replace(',', '.'))
+                    if not (0.5 <= kg <= 20):
+                        raise ValueError('out of range')
+                except ValueError:
+                    self._send('Invalid number. Enter kg as a decimal (e.g. 5.2):', sender_id=sender_id)
+                    return
+                cat = state['data']['cat']
+                today = __import__('datetime').date.today().isoformat()
+                rows = self._load_weights()
+                rows.append({'date': today, 'cat': cat, 'weight_kg': str(kg)})
+                self._save_weights(rows)
+                self._pending.pop(sender_id, None)
+                self._send(
+                    f'Saved: {cat.capitalize()} = {kg} kg on {today}',
+                    sender_id=sender_id
+                )
+
+        elif cmd == '/weight-edit':
+            if step == 'select':
+                try:
+                    idx = int(text.strip()) - 1
+                    entries = state['data']['entries']
+                    if not (0 <= idx < len(entries)):
+                        raise ValueError
+                except ValueError:
+                    self._send('Enter a number from the list:', sender_id=sender_id)
+                    return
+                state['data']['idx'] = idx
+                e = entries[idx]
+                state['step'] = 'value'
+                self._send(
+                    f'Current: {e["cat"].capitalize()} {e["weight_kg"]} kg on {e["date"]}\n'
+                    f'Enter new weight in kg (or "delete" to remove):',
+                    sender_id=sender_id
+                )
+
+            elif step == 'value':
+                entries = state['data']['entries']
+                idx     = state['data']['idx']
+                rows    = self._load_weights()
+                entry   = entries[idx]
+                if text.strip().lower() == 'delete':
+                    rows = [
+                        r for r in rows
+                        if not (r['date'] == entry['date'] and r['cat'] == entry['cat'])
+                    ]
+                    self._save_weights(rows)
+                    self._pending.pop(sender_id, None)
+                    self._send(f'Deleted {entry["cat"].capitalize()} entry for {entry["date"]}.', sender_id=sender_id)
+                    return
+                try:
+                    kg = float(text.strip().replace(',', '.'))
+                    if not (0.5 <= kg <= 20):
+                        raise ValueError('out of range')
+                except ValueError:
+                    self._send('Invalid number. Enter kg or "delete":', sender_id=sender_id)
+                    return
+                for r in rows:
+                    if r['date'] == entry['date'] and r['cat'] == entry['cat']:
+                        r['weight_kg'] = str(kg)
+                        break
+                self._save_weights(rows)
+                self._pending.pop(sender_id, None)
+                self._send(
+                    f'Updated {entry["cat"].capitalize()} on {entry["date"]} to {kg} kg.',
+                    sender_id=sender_id
+                )
 
     def _handle_command(self, cmd, sender_id=None):
         dispatch = {
-            '/status': self._cmd_status, 
-            '/lastclip': self._cmd_lastclip, 
-            '/syncstatus': self._cmd_syncstatus, 
-            '/help': self._cmd_help,
-            '/start': self._cmd_help  # 新增 /start 支援
+            '/status':         self._cmd_status,
+            '/lastclip':       self._cmd_lastclip,
+            '/syncstatus':     self._cmd_syncstatus,
+            '/weight':         self._cmd_weight,
+            '/weight-history': self._cmd_weight_history,
+            '/weight-edit':    self._cmd_weight_edit,
+            '/help':           self._cmd_help,
+            '/start':          self._cmd_help,
         }
         handler = dispatch.get(cmd)
         if handler:
@@ -598,12 +720,113 @@ class TelegramCommandListener:
         except Exception as e:
             self._send(f"⚠️ Failed to check sync: {e}", sender_id=sender_id)
 
+    def _cmd_weight(self, sender_id=None):
+        self._pending[sender_id] = {'cmd': '/weight', 'step': 'cat', 'data': {}}
+        self._send('Which cat? Reply: dan or sanbo', sender_id=sender_id)
+
+    def _cmd_weight_history(self, sender_id=None):
+        rows = self._load_weights()
+        if not rows:
+            self._send('No weight entries yet. Use /weight to log.', sender_id=sender_id)
+            return
+
+        # Text summary (most recent 10 per cat)
+        from datetime import datetime as _dt
+        dan_rows   = sorted([r for r in rows if r['cat'] == 'dan'],   key=lambda r: r['date'])
+        sanbo_rows = sorted([r for r in rows if r['cat'] == 'sanbo'], key=lambda r: r['date'])
+
+        lines = ['Weight history:']
+        lines.append('Dan:')
+        for r in dan_rows[-5:]:
+            lines.append(f"  {r['date']}  {r['weight_kg']} kg")
+        lines.append('Sanbo:')
+        for r in sanbo_rows[-5:]:
+            lines.append(f"  {r['date']}  {r['weight_kg']} kg")
+
+        self._send('\n'.join(lines), sender_id=sender_id)
+
+        # Chart
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            import matplotlib.dates as mdates
+            import numpy as np
+            from datetime import datetime as _dt
+            import tempfile
+
+            def _to_xy(rs):
+                xs = [_dt.strptime(r['date'], '%Y-%m-%d') for r in rs]
+                ys = [float(r['weight_kg']) for r in rs]
+                return xs, ys
+
+            fig, ax = plt.subplots(figsize=(8, 4))
+            # Dan = black (#1a1a1a), Sanbo = orange (#f5a623) — matches kibble chart colors
+            if len(dan_rows) >= 1:
+                dx, dy = _to_xy(dan_rows)
+                ax.plot(dx, dy, 'o-', color='#1a1a1a', label='Dan', linewidth=2)
+                if len(dan_rows) >= 2:
+                    xn = mdates.date2num(dx)
+                    xi = np.linspace(xn[0], xn[-1], 200)
+                    ax.plot_date(xi, np.interp(xi, xn, dy), '-', color='#1a1a1a', alpha=0.3, linewidth=1)
+
+            if len(sanbo_rows) >= 1:
+                sx, sy = _to_xy(sanbo_rows)
+                ax.plot(sx, sy, 'o-', color='#f5a623', label='Sanbo', linewidth=2)
+                if len(sanbo_rows) >= 2:
+                    xn = mdates.date2num(sx)
+                    xi = np.linspace(xn[0], xn[-1], 200)
+                    ax.plot_date(xi, np.interp(xi, xn, sy), '-', color='#f5a623', alpha=0.3, linewidth=1)
+
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+            fig.autofmt_xdate()
+            ax.set_ylabel('kg')
+            ax.set_title('Dan & Sanbo Weight')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                fig.savefig(tmp.name, dpi=120, bbox_inches='tight')
+                tmp_path = tmp.name
+            plt.close(fig)
+
+            url = f'https://api.telegram.org/bot{self.bot_token}/sendPhoto'
+            target = sender_id if sender_id else self.chat_id
+            with open(tmp_path, 'rb') as img:
+                requests.post(url, data={'chat_id': target}, files={'photo': img}, timeout=30)
+            import os as _os
+            _os.unlink(tmp_path)
+
+        except ImportError:
+            self._send('(Chart requires matplotlib+scipy on Pi)', sender_id=sender_id)
+        except Exception as e:
+            self._send(f'Chart error: {e}', sender_id=sender_id)
+
+    def _cmd_weight_edit(self, sender_id=None):
+        rows = self._load_weights()
+        if not rows:
+            self._send('No weight entries to edit.', sender_id=sender_id)
+            return
+        recent = sorted(rows, key=lambda r: r['date'])[-10:]
+        lines = ['Recent weight entries (reply with number to edit):']
+        for i, r in enumerate(recent, 1):
+            lines.append(f"{i}. {r['date']}  {r['cat'].capitalize()}  {r['weight_kg']} kg")
+        self._send('\n'.join(lines), sender_id=sender_id)
+        self._pending[sender_id] = {
+            'cmd': '/weight-edit', 'step': 'select', 'data': {'entries': recent}
+        }
+
     def _cmd_help(self, sender_id=None):
         self._send(
-            '🐱 Fair Feeder Commands\n'
+            'Fair Feeder Commands\n'
             '/status — uptime, clips, disk space\n'
             '/lastclip — send most recent cat clip\n'
-            '/syncstatus — check Google Drive connection and file count\n'
+            '/syncstatus — check Google Drive connection\n'
+            '/weight — log weight for Dan or Sanbo\n'
+            '/weight-history — show weight chart + history\n'
+            '/weight-edit — edit or delete a weight entry\n'
             '/help — this message',
             sender_id=sender_id
         )

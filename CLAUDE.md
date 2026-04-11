@@ -136,9 +136,9 @@ fair-feeder/
 
 **Production stack:** `motion_recorder.py` on systemd → MOG2 → YOLOv8n cat filter → rclone to Drive → `sync_cleanup.sh` cron deletes > 3 days old.
 
-**Telegram commands:** `/status`, `/lastclip`, `/syncstatus`, `/weight`, `/weight-history`, `/weight-edit`, `/help`
+**Telegram commands:** `/status`, `/lastclip`, `/weight`, `/help`
 
-**Weight tracking:** `/weight` multi-step dialog (which cat → kg value) writes to `weight_log.csv` in `DRIVE_OUTPUT_DIR`, synced to Drive via rclone. `/weight-history` shows last 5 entries per cat + matplotlib chart (falls back to text-only if matplotlib not on Pi — only numpy is installed). 30-day reminder sent via Telegram by morning_report.ipynb if no weight logged in 30 days.
+**Weight tracking:** `/weight` shows inline menu — `[Log Weight] [History] [Edit]`. Log saves to `weight_log.csv` in `DRIVE_OUTPUT_DIR`, synced to Drive via rclone. History shows last 5 entries per cat + matplotlib chart (integer x-axis with MM-DD labels; falls back to text-only on ImportError). 30-day reminder sent via Telegram by morning_report.ipynb if no weight logged in 30 days. `/syncstatus` merged into `/status` — Drive file count appended via `rclone size` (8s timeout).
 
 ### Live constraints
 - RTSP **must** use TCP transport (UDP unreliable on Pi 5)

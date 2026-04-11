@@ -61,33 +61,59 @@ kibble, and send structured feeding reports via Telegram.
 | Experiment tracking | Weights & Biases |
 
 ### Project structure
+
+**Root — files that must stay here (hard dependencies):**
 ```
 fair-feeder/
 ├── CLAUDE.md                  # This file
-├── config.py                  # Camera, detection, identification settings
+├── README.md                  # Project overview
+├── requirements.txt           # Core dependencies
+├── data.yaml                  # YOLO dataset config (5 classes) — referenced by train scripts
+├── config.py                  # Camera/detection settings — imported by motion_recorder.py
+├── motion_recorder.py         # 24/7 Pi daemon — path hardcoded in systemd service + SCP
+├── morning_report.ipynb       # CI pipeline notebook — path hardcoded in GitHub Actions workflow
+├── flagging.py                # Shared module — imported by morning_report.ipynb
+└── roboflow_upload.py         # Shared module — imported by morning_report.ipynb
+```
+
+**Subfolders:**
+```
+notebooks/                     # Interactive / training notebooks (run in Colab/Kaggle)
+├── fair_feeder_v14.ipynb      # Current training notebook
+├── smoketest.ipynb            # Inference + feeding analysis (threshold tuning)
+└── batch_review.ipynb         # Historical video reprocessing
+
+scripts/                       # One-off CLI tools (dataset prep, training, debugging)
 ├── train.py                   # YOLOv11 training CLI
 ├── download_dataset.py        # Roboflow dataset downloader
 ├── polygon_to_bbox.py         # Convert polygon annotations → YOLO bbox
 ├── verify_labels.py           # Visual label verification grid
-├── motion_recorder.py         # 24/7 Motion-triggered recording + YOLO cat filter
-├── data.yaml                  # YOLO dataset config (5 classes)
-├── requirements.txt           # Core dependencies
-├── fair_feeder_v14.ipynb      # Current training notebook (Colab/Kaggle)
-├── smoketest.ipynb            # Inference + feeding analysis (staged pipeline)
-├── morning_report.ipynb       # CI pipeline notebook (papermill, GitHub Actions)
-├── batch_review.ipynb         # Historical video reprocessing
-├── flagging.py                # Auto-flag suspicious YOLO detections
-├── roboflow_upload.py         # Upload flagged frames to Roboflow
-├── test_flagging.py           # Unit tests for flagging
-├── test_roboflow_upload.py    # Unit tests for upload
-├── tests/legacy_notebook/     # Legacy notebook regression tests
-├── sync_cleanup.sh            # Auto-purge cron to delete old local videos
-├── docs/
-│   └── MOTION_RECORDER_GUIDE.ipynb  # Pi operation + troubleshooting guide
-└── tasks/
-    ├── todo.md                # Current task tracking
-    └── lessons.md             # Self-improvement log
+└── debug_yolo_detection.py    # Debug YOLO detection output
+
+deploy/                        # Pi deployment files
+├── cat-monitor.service        # systemd service definition
+└── sync_cleanup.sh            # Cron script to purge old local videos
+
+tests/                         # Unit + regression tests
+├── test_flagging.py           # Tests for flagging.py
+├── test_roboflow_upload.py    # Tests for roboflow_upload.py
+└── legacy_notebook/           # Legacy notebook regression tests
+
+docs/                          # All documentation
+├── MOTION_RECORDER_GUIDE.ipynb
+├── MODELS.md                  # Model version history
+├── README_RPI_SERVICE.md      # systemd setup guide
+├── README_GIT_PULL.md         # Git update guide for Pi
+├── blog/                      # Blog posts (EN + ZH-TW)
+├── guides/                    # Pi SSH, git push guides
+└── plans/                     # Design specs and implementation plans
+
+tasks/                         # Project tracking (not code)
+├── todo.md
+└── lessons.md
 ```
+
+**Rule:** If a file is imported by `morning_report.ipynb` or `motion_recorder.py`, or its path is hardcoded in a config/workflow, it stays at root. Everything else goes in the appropriate subfolder.
 
 ### Key dependencies
 - `ultralytics` — YOLOv11 training & inference

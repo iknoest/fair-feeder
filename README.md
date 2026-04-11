@@ -14,11 +14,10 @@ I have two cats: **Dan** (picky eater) and **Sanbo** (food thief). Every morning
 
 If you're new to the project, read the files in this order:
 
-- `motion_recorder.py`, `morning_report.ipynb`, `flagging.py`, `roboflow_upload.py` for the production path
-- `fair_feeder_v14.ipynb`, `train.py`, `download_dataset.py`, `verify_labels.py`, `polygon_to_bbox.py` for training and dataset work
-- `smoketest.ipynb`, `batch_review.ipynb` for interactive analysis and historical review
-- `test_flagging.py`, `test_roboflow_upload.py` for the main tests that protect current production code
-- `tests/legacy_notebook/test_notebook_fixes.py` for older notebook-specific regression coverage
+- `motion_recorder.py`, `morning_report.ipynb`, `flagging.py`, `roboflow_upload.py` — production path (root, hardcoded dependencies)
+- `notebooks/fair_feeder_v14.ipynb`, `scripts/train.py`, `scripts/download_dataset.py` — training and dataset work
+- `notebooks/smoketest.ipynb`, `notebooks/batch_review.ipynb` — interactive analysis and historical review
+- `tests/test_flagging.py`, `tests/test_roboflow_upload.py` — unit tests for production modules
 
 ## How It Works
 
@@ -165,24 +164,44 @@ flowchart TB
 
 ```
 fair-feeder/
-├── morning_report.ipynb     # Daily CI pipeline (GitHub Actions)
-├── smoketest.ipynb          # Interactive analysis (Colab)
-├── batch_review.ipynb       # Historical video reprocessing
-├── fair_feeder_v14.ipynb    # Current model training notebook
-├── flagging.py              # Auto-flag suspicious detections
-├── roboflow_upload.py       # Upload flagged frames to Roboflow
-├── motion_recorder.py       # Pi 5: 24/7 motion + cat filter
-├── config.py                # Camera & detection settings
-├── train.py                 # YOLOv11 training CLI
+├── motion_recorder.py       # Pi 5: 24/7 motion + cat filter  ← stays at root (systemd)
+├── morning_report.ipynb     # Daily CI pipeline               ← stays at root (GitHub Actions)
+├── flagging.py              # Auto-flag suspicious detections  ← stays at root (imported by CI)
+├── roboflow_upload.py       # Upload flagged frames            ← stays at root (imported by CI)
+├── config.py                # Camera & detection settings      ← stays at root (imported by Pi)
 ├── data.yaml                # YOLO dataset config (5 classes)
+│
+├── notebooks/
+│   ├── fair_feeder_v14.ipynb    # Model training (Colab/Kaggle)
+│   ├── smoketest.ipynb          # Interactive analysis
+│   └── batch_review.ipynb       # Historical reprocessing
+│
+├── scripts/
+│   ├── train.py                 # YOLOv11 training CLI
+│   ├── download_dataset.py      # Roboflow dataset downloader
+│   ├── polygon_to_bbox.py       # Annotation format converter
+│   ├── verify_labels.py         # Label verification grid
+│   └── debug_yolo_detection.py  # Detection debugging
+│
+├── deploy/
+│   ├── cat-monitor.service      # systemd service definition
+│   └── sync_cleanup.sh          # Cron: purge old local videos
+│
+├── tests/
+│   ├── test_flagging.py
+│   ├── test_roboflow_upload.py
+│   └── legacy_notebook/
+│
 └── docs/
-    └── blog/                # Blog post & presentation materials
+    ├── blog/                    # Blog posts (EN + ZH-TW)
+    ├── guides/                  # Pi SSH, git guides
+    └── plans/                   # Design specs
 ```
 
 ## Setup
 
-See [README_GIT_PULL.md](README_GIT_PULL.md) for credentials setup after cloning.
-See [README_RPI_SERVICE.md](README_RPI_SERVICE.md) for Raspberry Pi 5 deployment.
+See [docs/README_GIT_PULL.md](docs/README_GIT_PULL.md) for credentials setup after cloning.
+See [docs/README_RPI_SERVICE.md](docs/README_RPI_SERVICE.md) for Raspberry Pi 5 deployment.
 
 ## Blog Post
 

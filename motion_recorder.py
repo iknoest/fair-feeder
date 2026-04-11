@@ -474,29 +474,62 @@ class TelegramCommandListener:
             return
         for update in r.json().get('result', []):
             self._last_update_id = update['update_id']
-            msg = update.get('message', {})
-            text = msg.get('text', '').strip()
-            if not text:
-                continue
-                
-            sender_id = str(msg.get('chat', {}).get('id', ''))
-            
-            if text.startswith('/'):
-                # 處理群組中帶有 @botname 的指令 (例: /status@FeederBot -> /status)
-                cmd = text.split()[0].lower().split('@')[0]
-                
-                # 若需授權群組，請在 .env 中加入 ALLOWED_GROUP_ID=-100XXXXXXXXX
+
+            # ── Inline keyboard callback ──────────────────────────
+            cq = update.get('callback_query', {})
+            if cq:
+                cq_id      = cq['id']
+                cq_data    = cq.get('data', '')
+                cq_chat_id = str(cq.get('message', {}).get('chat', {}).get('id', ''))
                 allowed_chats = [self.chat_id]
                 group_id = os.getenv("ALLOWED_GROUP_ID")
                 if group_id:
                     allowed_chats.append(group_id)
-                
+                # Always answer to remove spinner
+                try:
+                    requests.post(
+                        f'https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery',
+                        json={'callback_query_id': cq_id}, timeout=5
+                    )
+                except Exception:
+                    pass
+                if cq_chat_id in allowed_chats:
+                    if cq_data == 'weight_menu_log':
+                        self._pending[cq_chat_id] = {'cmd': '/weight', 'step': 'cat', 'data': {}}
+                        self._send('Which cat?', sender_id=cq_chat_id, reply_markup={'inline_keyboard': [[
+                            {'text': 'Dan', 'callback_data': 'dan'},
+                            {'text': 'Sanbo', 'callback_data': 'sanbo'},
+                        ]]})
+                    elif cq_data == 'weight_menu_history':
+                        self._cmd_weight_history(sender_id=cq_chat_id)
+                    elif cq_data == 'weight_menu_edit':
+                        self._cmd_weight_edit(sender_id=cq_chat_id)
+                    elif cq_chat_id in self._pending:
+                        self._handle_dialog(cq_data, cq_chat_id)
+                continue
+
+            # ── Regular message ───────────────────────────────────
+            msg = update.get('message', {})
+            text = msg.get('text', '').strip()
+            if not text:
+                continue
+
+            sender_id = str(msg.get('chat', {}).get('id', ''))
+
+            # 若需授權群組，請在 .env 中加入 ALLOWED_GROUP_ID=-100XXXXXXXXX
+            allowed_chats = [self.chat_id]
+            group_id = os.getenv("ALLOWED_GROUP_ID")
+            if group_id:
+                allowed_chats.append(group_id)
+
+            if text.startswith('/'):
+                # 處理群組中帶有 @botname 的指令 (例: /status@FeederBot -> /status)
+                cmd = text.split()[0].lower().split('@')[0]
                 if sender_id in allowed_chats:
                     self._pending.pop(sender_id, None)  # new command resets dialog
                     self._handle_command(cmd, sender_id=sender_id)
                 else:
                     log.info(f"⚠️ 收到來自未授權 Chat ID 的指令: {sender_id} (訊息: {text})")
-                    # 收到未白名單的 Chat ID 呼叫時，主動在該聊天室回覆告知 ID
                     try:
                         reply_msg = (
                             f"🛑 存取被拒\n\n"
@@ -504,7 +537,7 @@ class TelegramCommandListener:
                             f"`{sender_id}`\n\n"
                             f"(您可以複製上面這串數字)"
                         )
-                        requests.post(f"https://api.telegram.org/bot{self.bot_token}/sendMessage", 
+                        requests.post(f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
                                       json={'chat_id': sender_id, 'text': reply_msg}, timeout=5)
                     except Exception as e:
                         log.warning(f"無法回覆未授權 Chat ID ({sender_id}): {e}")
@@ -567,7 +600,7 @@ class TelegramCommandListener:
                 cat = state['data']['cat']
                 today = __import__('datetime').date.today().isoformat()
                 rows = self._load_weights()
-                rows.append({'date': today, 'cat': cat, 'weight_kg': str(kg)})
+                rows.append({'date': today, 'cat': cat, 'weight_kg': f'{kg:.2f}'})
                 self._save_weights(rows)
                 self._pending.pop(sender_id, None)
                 self._send(
@@ -575,7 +608,7 @@ class TelegramCommandListener:
                     sender_id=sender_id
                 )
 
-        elif cmd == '/weight-edit':
+        elif cmd == '/weight_edit':
             if step == 'select':
                 try:
                     idx = int(text.strip()) - 1
@@ -617,7 +650,7 @@ class TelegramCommandListener:
                     return
                 for r in rows:
                     if r['date'] == entry['date'] and r['cat'] == entry['cat']:
-                        r['weight_kg'] = str(kg)
+                        r['weight_kg'] = f'{kg:.2f}'
                         break
                 self._save_weights(rows)
                 self._pending.pop(sender_id, None)
@@ -628,14 +661,11 @@ class TelegramCommandListener:
 
     def _handle_command(self, cmd, sender_id=None):
         dispatch = {
-            '/status':         self._cmd_status,
-            '/lastclip':       self._cmd_lastclip,
-            '/syncstatus':     self._cmd_syncstatus,
-            '/weight':         self._cmd_weight,
-            '/weight-history': self._cmd_weight_history,
-            '/weight-edit':    self._cmd_weight_edit,
-            '/help':           self._cmd_help,
-            '/start':          self._cmd_help,
+            '/status':   self._cmd_status,
+            '/lastclip': self._cmd_lastclip,
+            '/weight':   self._cmd_weight,
+            '/help':     self._cmd_help,
+            '/start':    self._cmd_help,
         }
         handler = dispatch.get(cmd)
         if handler:
@@ -656,13 +686,29 @@ class TelegramCommandListener:
         with self.controller._clips_lock:
             saved = self.controller.clips_saved
             deleted = self.controller.clips_deleted
+        # Quick Drive sync check
+        try:
+            import subprocess as _sp, json as _json
+            _res = _sp.run(
+                ['rclone', 'size', 'gdrive-randomdice:', '--json'],
+                capture_output=True, text=True, timeout=8
+            )
+            if _res.returncode == 0:
+                _rdata = _json.loads(_res.stdout)
+                sync_str = f'Drive: {_rdata.get("count", "?")} files ✅'
+            else:
+                sync_str = f'Drive: unreachable ⚠️'
+        except Exception:
+            sync_str = 'Drive: check skipped'
+
         self._send(
             f'✅ Fair Feeder Status\n'
             f'Uptime: {h}h {m}m\n'
             f'Clips saved: {saved}\n'
             f'Clips deleted: {deleted}\n'
-            f'Drive space: {disk_str}\n'
-            f'Last motion: {motion_str}',
+            f'Local space: {disk_str}\n'
+            f'Last motion: {motion_str}\n'
+            f'{sync_str}',
             sender_id=sender_id
         )
 
@@ -686,43 +732,16 @@ class TelegramCommandListener:
         except Exception as e:
             self._send(f'Failed to send clip: {e}', sender_id=sender_id)
 
-    def _cmd_syncstatus(self, sender_id=None):
-        self._send("🔄 Checking sync status (this takes a few seconds)...", sender_id=sender_id)
-        import subprocess
-        try:
-            # Check local files
-            local_count = len(list(DRIVE_OUTPUT_DIR.glob('*.mp4')))
-            
-            # Check remote files using rclone size
-            result = subprocess.run(
-                ["rclone", "size", "gdrive-randomdice:", "--json"], 
-                capture_output=True, text=True, timeout=15
-            )
-            if result.returncode == 0:
-                import json
-                try:
-                    data = json.loads(result.stdout)
-                    remote_count = data.get("count", "unknown")
-                    self._send(
-                        f"☁️ Sync Status\n"
-                        f"Pi Local Files: {local_count}\n"
-                        f"Google Drive Files: {remote_count}\n\n"
-                        f"Connection to Google Drive is Active! ✅",
-                        sender_id=sender_id
-                    )
-                except Exception as je:
-                    log.warning(f"JSON Parse error in syncstatus: {je}\nOutput: {result.stdout}")
-                    self._send(f"⚠️ Could not parse Google Drive stats. Local total is {local_count}.", sender_id=sender_id)
-            else:
-                self._send(f"⚠️ Error reaching Google Drive: {result.stderr.strip()[:100]}", sender_id=sender_id)
-        except subprocess.TimeoutExpired:
-            self._send("⚠️ Sync check timed out. Google Drive is slow to respond.", sender_id=sender_id)
-        except Exception as e:
-            self._send(f"⚠️ Failed to check sync: {e}", sender_id=sender_id)
-
     def _cmd_weight(self, sender_id=None):
-        self._pending[sender_id] = {'cmd': '/weight', 'step': 'cat', 'data': {}}
-        self._send('Which cat? Reply: dan or sanbo', sender_id=sender_id)
+        self._send(
+            'Weight menu:',
+            sender_id=sender_id,
+            reply_markup={'inline_keyboard': [[
+                {'text': 'Log Weight', 'callback_data': 'weight_menu_log'},
+                {'text': 'History',    'callback_data': 'weight_menu_history'},
+                {'text': 'Edit',       'callback_data': 'weight_menu_edit'},
+            ]]}
+        )
 
     def _cmd_weight_history(self, sender_id=None):
         rows = self._load_weights()
@@ -750,37 +769,47 @@ class TelegramCommandListener:
             import matplotlib
             matplotlib.use('Agg')
             import matplotlib.pyplot as plt
-            import matplotlib.dates as mdates
             import numpy as np
-            from datetime import datetime as _dt
             import tempfile
 
+            # Unified sorted date list → integer X positions (avoids matplotlib.dates Jan-01 bug)
+            all_dates = sorted(set(r['date'] for r in rows))
+            date_to_x = {d: i for i, d in enumerate(all_dates)}
+
             def _to_xy(rs):
-                xs = [_dt.strptime(r['date'], '%Y-%m-%d') for r in rs]
+                xs = [date_to_x[r['date']] for r in rs]
                 ys = [float(r['weight_kg']) for r in rs]
                 return xs, ys
 
             fig, ax = plt.subplots(figsize=(8, 4))
-            # Dan = black (#1a1a1a), Sanbo = orange (#f5a623) — matches kibble chart colors
+            all_y = []
+
+            # Dan = black (#1a1a1a), Sanbo = orange (#f5a623)
             if len(dan_rows) >= 1:
                 dx, dy = _to_xy(dan_rows)
+                all_y.extend(dy)
                 ax.plot(dx, dy, 'o-', color='#1a1a1a', label='Dan', linewidth=2)
                 if len(dan_rows) >= 2:
-                    xn = mdates.date2num(dx)
-                    xi = np.linspace(xn[0], xn[-1], 200)
-                    ax.plot_date(xi, np.interp(xi, xn, dy), '-', color='#1a1a1a', alpha=0.3, linewidth=1)
+                    xi = np.linspace(dx[0], dx[-1], 200)
+                    ax.plot(xi, np.interp(xi, dx, dy), '-', color='#1a1a1a', alpha=0.3, linewidth=1)
 
             if len(sanbo_rows) >= 1:
                 sx, sy = _to_xy(sanbo_rows)
+                all_y.extend(sy)
                 ax.plot(sx, sy, 'o-', color='#f5a623', label='Sanbo', linewidth=2)
                 if len(sanbo_rows) >= 2:
-                    xn = mdates.date2num(sx)
-                    xi = np.linspace(xn[0], xn[-1], 200)
-                    ax.plot_date(xi, np.interp(xi, xn, sy), '-', color='#f5a623', alpha=0.3, linewidth=1)
+                    xi = np.linspace(sx[0], sx[-1], 200)
+                    ax.plot(xi, np.interp(xi, sx, sy), '-', color='#f5a623', alpha=0.3, linewidth=1)
 
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
-            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-            fig.autofmt_xdate()
+            # Y axis: variable range padded around actual data, not starting from 0
+            if all_y:
+                y_min, y_max = min(all_y), max(all_y)
+                y_pad = max(0.15, (y_max - y_min) * 0.2) if y_max > y_min else 0.15
+                ax.set_ylim(y_min - y_pad, y_max + y_pad)
+
+            # X axis: integer ticks with MM-DD string labels
+            ax.set_xticks(range(len(all_dates)))
+            ax.set_xticklabels([d[5:] for d in all_dates], rotation=45, ha='right')
             ax.set_ylabel('kg')
             ax.set_title('Dan & Sanbo Weight')
             ax.legend()
@@ -800,7 +829,7 @@ class TelegramCommandListener:
             _os.unlink(tmp_path)
 
         except ImportError:
-            self._send('(Chart requires matplotlib+scipy on Pi)', sender_id=sender_id)
+            self._send('(Chart requires matplotlib on Pi)', sender_id=sender_id)
         except Exception as e:
             self._send(f'Chart error: {e}', sender_id=sender_id)
 
@@ -815,27 +844,27 @@ class TelegramCommandListener:
             lines.append(f"{i}. {r['date']}  {r['cat'].capitalize()}  {r['weight_kg']} kg")
         self._send('\n'.join(lines), sender_id=sender_id)
         self._pending[sender_id] = {
-            'cmd': '/weight-edit', 'step': 'select', 'data': {'entries': recent}
+            'cmd': '/weight_edit', 'step': 'select', 'data': {'entries': recent}
         }
 
     def _cmd_help(self, sender_id=None):
         self._send(
             'Fair Feeder Commands\n'
-            '/status — uptime, clips, disk space\n'
+            '/status — uptime, clips, disk, Drive sync\n'
             '/lastclip — send most recent cat clip\n'
-            '/syncstatus — check Google Drive connection\n'
-            '/weight — log weight for Dan or Sanbo\n'
-            '/weight-history — show weight chart + history\n'
-            '/weight-edit — edit or delete a weight entry\n'
+            '/weight — log, view history, or edit weights\n'
             '/help — this message',
             sender_id=sender_id
         )
 
-    def _send(self, text, sender_id=None):
+    def _send(self, text, sender_id=None, reply_markup=None):
         target = sender_id if sender_id else self.chat_id
         url = f'https://api.telegram.org/bot{self.bot_token}/sendMessage'
+        payload = {'chat_id': target, 'text': text}
+        if reply_markup:
+            payload['reply_markup'] = reply_markup
         try:
-            requests.post(url, json={'chat_id': target, 'text': text}, timeout=5)
+            requests.post(url, json=payload, timeout=5)
         except Exception as e:
             log.warning(f'Telegram reply failed: {e}')
 

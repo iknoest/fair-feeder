@@ -335,6 +335,8 @@ Full history in git log. These are the ones whose pattern keeps catching us:
 | Stitch clips only if gap ≤ 10s | Larger gaps are genuinely separate feeding events; merging breaks FeedingTracker attribution |
 | Each distinct event gets its own report | Per-event kibble / verdict / Telegram block, not combined |
 | `_fmt_time()` strips date when same as video start | Redundant dates clutter mobile Telegram bubble; date is in the header |
+| Compensation verdict is the first line of the Telegram message | Telegram push notification shows the first line — owner needs to know instantly whether action is required without opening the message. Format: `✅ No compensation needed` or `⚠️ Sanbo came at HH:MM — compensate Dan ~N kibble` |
+| Episode numbers are continuous across clips (day-wide offset) | Each `FeedingTracker` receives an `episode_offset` = sum of confirmed episodes from all prior clips. Snapshot keys `dan_hand_epN` / `kibble_dispensed_epN` use day-wide N, not per-clip N. |
 | Compensation = `sanbo_kibble_eaten` | Directly answers "how much extra does Dan need?" |
 | ffmpeg compression (crf=28, 720p) for Telegram | Most feeding videos fit under 50 MB inline; preserves inline playback |
 | `RUNNING_IN_CI` guard for Colab-only cells | Single env-check flag is cleaner than try/except per-import or duplicate notebooks |

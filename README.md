@@ -55,7 +55,9 @@ graph LR
 ## Sample Report
 
 ```
-Fair Feeder Report
+✅ No compensation needed
+
+🐾 Fair Feeder Report
 2026-03-28  ·  06:20:10 -> 06:22:02  ·  2m 30s
 
 ── Kibble ──
@@ -67,6 +69,8 @@ At bowl:  Dan 1m 46s  ·  Sanbo 0m 00s
 ── Verdict ──
 Dan ate well — no compensation needed
 ```
+
+The first line appears in the Telegram push notification so you can see the verdict without opening the message. When compensation is needed it shows: `⚠️ Sanbo came at 06:21 — compensate Dan ~5 kibble`
 
 <!-- PHOTO: timeline chart showing kibble count, cat presence over time -->
 

@@ -337,6 +337,7 @@ Full history in git log. These are the ones whose pattern keeps catching us:
 | `_fmt_time()` strips date when same as video start | Redundant dates clutter mobile Telegram bubble; date is in the header |
 | Compensation verdict is the first line of the Telegram message | Telegram push notification shows the first line — owner needs to know instantly whether action is required without opening the message. Format: `✅ No compensation needed` or `⚠️ Sanbo came at HH:MM — compensate Dan ~N kibble` |
 | Episode numbers are continuous across clips (day-wide offset) | Each `FeedingTracker` receives an `episode_offset` = sum of confirmed episodes from all prior clips. Snapshot keys `dan_hand_epN` / `kibble_dispensed_epN` use day-wide N, not per-clip N. |
+| `kibble_dispensed` snapshot taken at first clear frame within 3s, fallback to best-kibble in 5s | Waiting for 3 stable identical clear frames causes a minutes-late snapshot after Dan has eaten most kibble — he goes straight to the bowl after hand feeding. Take the first clear frame immediately; if Dan stays at bowl, take the highest kibble-count frame within 5s. |
 | Compensation = `sanbo_kibble_eaten` | Directly answers "how much extra does Dan need?" |
 | ffmpeg compression (crf=28, 720p) for Telegram | Most feeding videos fit under 50 MB inline; preserves inline playback |
 | `RUNNING_IN_CI` guard for Colab-only cells | Single env-check flag is cleaner than try/except per-import or duplicate notebooks |

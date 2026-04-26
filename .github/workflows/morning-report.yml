@@ -17,10 +17,10 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -59,11 +59,12 @@ jobs:
             --no-progress-bar \
             --kernel python3
 
-      - name: Upload output notebook (always, for debugging)
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Upload output notebook (only when analysis fails)
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
         with:
           name: smoketest-output-${{ github.run_id }}
           path: /tmp/smoketest_output.ipynb
-          retention-days: 7
+          retention-days: 3
 

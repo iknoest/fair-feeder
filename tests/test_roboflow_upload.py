@@ -143,16 +143,16 @@ class TestFormatTelegramSummary:
 
     def test_zero_flags(self):
         result = UploadResult(uploaded=0, failed=0)
-        assert format_telegram_flag_summary(result) == "No suspicious detections flagged"
+        assert format_telegram_flag_summary(result) == "Flags: none"
 
     def test_all_uploaded(self):
         result = UploadResult(uploaded=3, failed=0, tag_counts={
             'low-conf-sanbo': 2, 'blip-dan': 1
         })
         text = format_telegram_flag_summary(result)
-        assert "Auto-flagged: 3 frames -> Roboflow" in text
-        assert "2x low-conf-sanbo" in text
-        assert "1x blip-dan" in text
+        assert "Flags: 3 frames -> Roboflow" in text
+        assert "low-conf-sanbo 2" in text
+        assert "blip-dan 1" in text
         # No failure count in output
         assert "failed" not in text.lower()
 
@@ -162,7 +162,7 @@ class TestFormatTelegramSummary:
         })
         text = format_telegram_flag_summary(result)
         assert "3 frames" in text
-        assert "2 uploaded" in text
+        assert "2 sent" in text
         assert "1 failed" in text
 
     def test_tags_sorted_by_frequency(self):

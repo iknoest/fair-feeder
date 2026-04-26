@@ -160,18 +160,18 @@ def format_telegram_flag_summary(result):
     """Format an UploadResult into a Telegram-friendly summary string."""
     total = result.uploaded + result.failed
     if total == 0:
-        return "No suspicious detections flagged"
+        return "Flags: none"
 
     sorted_tags = sorted(result.tag_counts.items(), key=lambda x: x[1], reverse=True)
-    tag_str = ", ".join(f"{count}x {tag}" for tag, count in sorted_tags)
+    tag_str = ", ".join(f"{tag} {count}" for tag, count in sorted_tags[:3])
 
-    parts = [f"{result.uploaded} uploaded"]
+    parts = [f"{result.uploaded} sent"]
     if result.skipped:
-        parts.append(f"{result.skipped} skipped (already uploaded)")
+        parts.append(f"{result.skipped} skipped")
     if result.failed:
         parts.append(f"{result.failed} failed")
-    header = f"Auto-flagged: {total} frames -> Roboflow ({', '.join(parts)})"
+    header = f"Flags: {total} frames -> Roboflow ({', '.join(parts)})"
 
     if tag_str:
-        return f"{header}\n   {tag_str}"
+        return f"{header}; top: {tag_str}"
     return header

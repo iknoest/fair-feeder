@@ -2,8 +2,7 @@ name: Fair Feeder Morning Report
 
 on:
   schedule:
-    - cron: '30 5 * * *'
-      timezone: 'Europe/Amsterdam'   # 05:30 Amsterdam → job starts ~06:35–07:11 after GH delay
+    - cron: '45 4 * * *'    # GitHub cron is UTC; 06:45 Amsterdam during summer time
   workflow_dispatch:         # Manual trigger for testing
 
 concurrency:

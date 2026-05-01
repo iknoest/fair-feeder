@@ -76,7 +76,8 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 ### C4 — V15 candidate review
 - [x] Train V15 candidate with 155 manually revised April flagged images
 - [x] Compare V15 against pasted V13 validation metrics
-- [ ] Re-run V14 and V15 with the same validation command/dataset before deployment decision
+- [x] Re-run V14 in `smoketest.ipynb` and document that historical metrics differ from current validation
+- [ ] Re-run V14 and V15 on the same fixed holdout dataset before deployment decision
 - [ ] Decide whether to deploy V15 or keep V14 and monitor May flags
 
 ### C-later — Nice to have

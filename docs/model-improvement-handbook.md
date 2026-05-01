@@ -139,13 +139,14 @@ Improvement-rate formulas:
 
 ### V13 -> V14 -> V15 Snapshot
 
-The V13/V14 values below come from the historical project notes. The V15 values come from the May 2026 validation output after adding 155 manually revised April flagged images.
+The historical V13/V14 rows come from project notes and training artifacts. The smoketest rows come from fresh `model.val()` runs in `smoketest.ipynb`, so use the smoketest rows for current candidate decisions.
 
 | Model | Dataset | Images | mAP50 | mAP50-95 | Precision | Recall | Notes |
 |-------|---------|--------|-------|----------|-----------|--------|-------|
 | v13 | Roboflow v13 | 54 validation images in pasted run | 0.421 in pasted validation; 0.956 in earlier project baseline | 0.360 in pasted validation; 0.739 in earlier baseline | 0.524 | 0.503 | The pasted V13 run appears to use a small validation set and is not directly comparable with the old baseline row. |
-| v14 | Roboflow v14 | 775 training images | 0.957 | 0.754 | 0.941 | 0.897 | Added 231 corrected auto-flagged frames. First deployed run dropped flags from 10-20+ to ~6 and removed `blip-sanbo`. |
-| v15 | Roboflow v15 | 139 validation images | 0.741 in pasted standalone validation | 0.594 | 0.815 | 0.780 | Added 155 manually revised April flagged images. Strong improvement versus the pasted V13 validation, but not directly comparable with V14 unless run on the same validation setup. |
+| v14 historical | Roboflow v14 | 775 training images | 0.957 | 0.754 | 0.941 | 0.897 | Added 231 corrected auto-flagged frames. First deployed run dropped flags from 10-20+ to ~6 and removed `blip-sanbo`. |
+| v14 smoketest rerun | Roboflow v14 | 109 validation images | 0.690 | 0.564 | 0.768 | 0.743 | Fresh `smoketest.ipynb` validation on 2026-05-02. This is lower than the historical row because it is a different validation context/artifact. |
+| v15 smoketest/standalone | Roboflow v15 | 139 validation images | 0.741 | 0.594 | 0.815 | 0.780 | Added 155 manually revised April flagged images. Better than the v14 smoketest rerun on overall metrics, but still not a perfect same-dataset comparison because v14 and v15 have different validation splits. |
 
 V15 versus pasted V13 validation:
 
@@ -158,15 +159,17 @@ V15 versus pasted V13 validation:
 
 Per-class AP50 snapshot:
 
-| Class | V13 pasted val | V14 historical | V15 pasted val | Read |
-|-------|----------------|----------------|----------------|------|
-| Bowl | 0.349 | 0.995 | 0.688 | V15 is much better than pasted V13, but below the V14 historical validation. |
-| Dan | 0.522 | 0.936 | 0.804 | Good recovery versus pasted V13; still needs fixed V14/V15 validation before deployment. |
-| Dan_hand | 0.113 | 0.936 | 0.606 | Largest practical gap; keep collecting hand-feeding examples. |
-| Kibble | 0.354 | 0.931 | 0.772 | Better than pasted V13, still sensitive to occlusion and tiny-object noise. |
-| Sanbo | 0.769 | 0.985 | 0.837 | Production-usable in V15 pasted val, but V14 historical remains stronger. |
+Use the class rows in the Ultralytics table as the source of truth. If a custom notebook prints a separate "Per-class AP50" list, confirm it uses `model.names` order; a wrong class order can shift the labels.
 
-V15 caveat: the uploaded `results.csv`/`results.png` show training-run validation peaking around `mAP50=0.949` and `mAP50-95=0.743` near epoch 41, while the pasted standalone validation shows `mAP50=0.741` and `mAP50-95=0.594`. Treat this as an artifact mismatch until the exact validation command and model weights are confirmed.
+| Class | V13 pasted val | V14 historical | V14 smoketest rerun | V15 smoketest/standalone | Read |
+|-------|----------------|----------------|---------------------|--------------------------|------|
+| Bowl | 0.349 | 0.995 | 0.674 | 0.688 | V15 is slightly higher than the v14 smoketest rerun, but far below the historical V14 row. |
+| Dan | 0.522 | 0.936 | 0.724 | 0.804 | V15 improves Dan versus the v14 smoketest rerun. |
+| Dan_hand | 0.113 | 0.936 | 0.545 | 0.606 | Still the main weakness; keep collecting hand-feeding examples. |
+| Kibble | 0.354 | 0.931 | 0.693 | 0.772 | V15 improves Kibble, but it remains sensitive to occlusion and tiny-object noise. |
+| Sanbo | 0.769 | 0.985 | 0.817 | 0.837 | V15 is a small improvement over the v14 smoketest rerun. |
+
+V15 caveat: the uploaded `results.csv`/`results.png` show training-run validation peaking around `mAP50=0.949` and `mAP50-95=0.743` near epoch 41, while the pasted standalone validation shows `mAP50=0.741` and `mAP50-95=0.594`. The V14 rerun confirms that historical training metrics and current smoketest metrics should be tracked separately.
 
 ### V15 Performance Notes
 

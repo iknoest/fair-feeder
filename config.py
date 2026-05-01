@@ -57,11 +57,6 @@ RTSP_URL = f"rtsp://{TAPO_USER}:{TAPO_PASS}@{TAPO_IP}:554/stream1"
 CONFIDENCE_THRESHOLD = 0.4
 MODEL_PATH = 'efficientdet_lite2.tflite'  # Larger model, better accuracy
 
-# Optional Pi 24/7 bowl-position monitor.
-# Set to a local Fair Feeder YOLO model path (for example v14/v15 best.pt)
-# to enable Telegram alerts when the bowl is missing/off-center for 10 minutes.
-BOWL_MODEL_PATH = os.getenv('BOWL_MODEL_PATH', '')
-
 # Identification Settings
 # Thresholds for Histogram analysis to distinguish Dan (B&W) from Sanbo (Calico)
 # These may need tuning.

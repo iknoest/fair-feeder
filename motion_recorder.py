@@ -78,7 +78,6 @@ try:
     CAMERA_IP   = _cfg.TAPO_IP
     CAMERA_USER = _cfg.TAPO_USER
     CAMERA_PASS = _cfg.TAPO_PASS
-    BOWL_MODEL_PATH = getattr(_cfg, 'BOWL_MODEL_PATH', os.getenv('BOWL_MODEL_PATH', ''))
 except Exception:
     # Manual Fallback
     # NOTE: Set these environment variables or edit these locally after pulling from git.
@@ -86,7 +85,6 @@ except Exception:
     CAMERA_IP   = os.getenv('TAPO_IP',   '<YOUR_CAMERA_IP>')
     CAMERA_USER = os.getenv('TAPO_USER', '<YOUR_CAMERA_USER>')
     CAMERA_PASS = os.getenv('TAPO_PASS', '<YOUR_CAMERA_PASSWORD>')
-    BOWL_MODEL_PATH = os.getenv('BOWL_MODEL_PATH', '')
 
 RTSP_PORT  = 554
 RTSP_STREAM = 'stream1' 
@@ -452,18 +450,18 @@ class RecordingController:
             )
 
 class BowlPositionMonitor:
-    """Periodically checks whether the custom Bowl class is framed."""
+    """Periodically checks whether the COCO bowl class is framed."""
 
-    def __init__(self, reader, bowl_model=None):
+    def __init__(self, reader, yolo_model=None):
         self.reader = reader
-        self.bowl_model = bowl_model
+        self.yolo_model = yolo_model
         self._last_check = 0
         self._bad_since = None
         self._last_alert = 0
         self._alert_active = False
 
     def tick(self):
-        if not self.bowl_model:
+        if not self.yolo_model:
             return
 
         now = time.time()
@@ -504,7 +502,7 @@ class BowlPositionMonitor:
 
     def _check_bowl(self, frame):
         try:
-            results = self.bowl_model(frame, imgsz=640, conf=BOWL_CONF, verbose=False)
+            results = self.yolo_model(frame, imgsz=640, conf=BOWL_CONF, verbose=False)
             height, width = frame.shape[:2]
             best = None
             best_area = 0
@@ -512,7 +510,7 @@ class BowlPositionMonitor:
             for r in results:
                 for box in r.boxes:
                     cls_id = int(box.cls[0])
-                    name = str(self.bowl_model.names[cls_id])
+                    name = str(self.yolo_model.names[cls_id])
                     if name.lower() != 'bowl':
                         continue
                     x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
@@ -988,11 +986,17 @@ if __name__ == "__main__":
     
     # Initialize YOLO detectors
     yolo_model = None
-    bowl_model = None
+    bowl_monitor_model = None
     try:
         from ultralytics import YOLO
         yolo_model = YOLO('yolov8n.pt')
-        log.info('Cat detector loaded (YOLOv8n)')
+        names = getattr(yolo_model, 'names', {})
+        has_bowl = any(str(name).lower() == 'bowl' for name in names.values())
+        log.info(f'YOLOv8n detector loaded (cat filter, bowl monitor: {"on" if has_bowl else "off"})')
+        if has_bowl:
+            bowl_monitor_model = yolo_model
+        else:
+            log.warning('Bowl position monitor disabled: YOLOv8n class list has no bowl class')
     except ImportError as e:
         YOLO = None
         log.warning(f'ultralytics not found: {e}')
@@ -1003,15 +1007,6 @@ if __name__ == "__main__":
         log.warning(f'YOLO not available ({e})')
         log.info('   Falling back to: all clips will be kept (no cat filtering)')
 
-    if BOWL_MODEL_PATH and 'YOLO' in locals() and YOLO is not None:
-        try:
-            bowl_model = YOLO(BOWL_MODEL_PATH)
-            log.info(f'Bowl position monitor loaded: {BOWL_MODEL_PATH}')
-        except Exception as e:
-            log.warning(f'Bowl position monitor disabled ({e})')
-    elif not BOWL_MODEL_PATH:
-        log.info('Bowl position monitor disabled: set BOWL_MODEL_PATH to a Fair Feeder model with Bowl class')
-
     listener = FrameMotionDetector(None, threshold_percent=2.0)
     reader = RTSPFrameReader(RTSP_URL, buffer_seconds=PRE_BUFFER_SECONDS, fps=VIDEO_FPS)
     listener.reader = reader  # Wire the reader into the detector
@@ -1020,7 +1015,7 @@ if __name__ == "__main__":
         listener.start()
         reader.start()
         controller = RecordingController(reader, listener, yolo_model=yolo_model)
-        bowl_monitor = BowlPositionMonitor(reader, bowl_model=bowl_model)
+        bowl_monitor = BowlPositionMonitor(reader, yolo_model=bowl_monitor_model)
         log.info('')
         log.info('\ud83d\ude80 Monitoring... Press Ctrl+C to stop.')
         

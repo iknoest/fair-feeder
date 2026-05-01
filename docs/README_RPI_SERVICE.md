@@ -23,11 +23,9 @@ Environment="TAPO_PASS=YOUR_CAMERA_PASSWORD"
 ```
 *(Save and exit `nano` by pressing `Ctrl+X`, then `Y`, then `Enter`)*
 
-Optional bowl-position alert:
-```ini
-Environment="BOWL_MODEL_PATH=/home/pi5/Feeder/models/fair_feeder_v15_yolov11s.pt"
-```
-This enables a 24/7 Telegram warning if the custom Fair Feeder model cannot see the `Bowl` class in the center area for 10 minutes. The default `yolov8n.pt` cat filter cannot detect `Bowl`, so this is disabled unless `BOWL_MODEL_PATH` points to a local Fair Feeder model file.
+Bowl-position alert:
+
+The recorder uses the existing `yolov8n.pt` COCO `bowl` class for the 24/7 camera-position check. Keep `yolov8n.pt` in the recorder working directory on the Pi. No custom Fair Feeder model is required for this alert.
 
 ## 3. Reload and Enable the Service
 Tell systemd about the new file, then set it to launch at boot:

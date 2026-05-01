@@ -24,7 +24,7 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 - [x] Wire into main loop (daemon thread, shares `RecordingController` instance)
 - [x] `/weight` inline menu with Log/History/Edit buttons; weight chart X-axis fixed (integer ticks + MM-DD labels)
 - [x] `/syncstatus` merged into `/status` — Drive file count appended inline
-- [x] Add optional 24/7 bowl-position alert via `BOWL_MODEL_PATH`
+- [x] Add 24/7 bowl-position alert using YOLOv8n COCO `bowl`
 - [ ] **Test on Pi**: send `/status`, `/lastclip`, `/weight`, `/help` from phone and verify replies
 
 ### B3 — Morning Kibble Report (GitHub Actions) ✅

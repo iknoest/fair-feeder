@@ -157,6 +157,9 @@ def send_telegram_alert(message):
     """Sends a ping to the user's Telegram."""
     try:
         bot_token, chat_id = get_telegram_credentials()
+        group_id = os.getenv('ALLOWED_GROUP_ID')
+        if group_id:
+            chat_id = group_id
         
         if bot_token and chat_id:
             url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -496,6 +499,7 @@ class BowlPositionMonitor:
 
         if self._bad_since is None:
             self._bad_since = now
+            log.warning(f'Bowl position bad: {reason}')
 
         bad_seconds = now - self._bad_since
         if bad_seconds < BOWL_BAD_SECONDS:
@@ -505,6 +509,7 @@ class BowlPositionMonitor:
             return
 
         minutes = round(bad_seconds / 60)
+        log.warning(f'Bowl position alert firing after {minutes} min: {reason}')
         send_telegram_alert(
             f'Camera position alert\n'
             f'Bowl has been {reason} for ~{minutes} min.\n'
@@ -531,11 +536,14 @@ class BowlPositionMonitor:
         center_str = 'none'
         if center:
             center_str = f'{center[0]:.0%},{center[1]:.0%}'
+        bad_str = ''
+        if self._bad_since and not status.get('ok', True):
+            bad_str = f'; bad for {int((time.time() - self._bad_since) / 60)}m'
 
         return (
             f'Bowl: {status["count"]} detected, '
             f'{status["centered_count"]} centered '
-            f'(best center {center_str}; {age})'
+            f'(best center {center_str}{bad_str}; {age})'
         )
 
     def _set_status(self, status):

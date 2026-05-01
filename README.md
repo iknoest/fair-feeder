@@ -75,16 +75,19 @@ The first line appears in the Telegram push notification so you can see the verd
 
 ## Model Performance
 
-Current production baseline is V14, trained on 775 images with [Roboflow](https://roboflow.com) dataset management. V15 has been trained from 155 manually revised April flagged images, but should be validated against V14 with the same fixed validation command before deployment.
+Current production baseline is V14. V15 has been trained from 155 manually revised April flagged images and looks better than the fresh V14 smoketest rerun, but V14 and V15 still use different Roboflow validation splits. Use a fixed holdout set before deciding whether to deploy V15.
 
-| Class | AP50 | Precision | Recall |
-|-------|------|-----------|--------|
-| Bowl | 0.995 | 0.990 | 1.000 |
-| Dan | 0.936 | 0.867 | 0.897 |
-| Dan_hand | 0.936 | 1.000 | 0.716 |
-| Kibble | 0.931 | 0.949 | 0.872 |
-| Sanbo | 0.985 | 0.899 | 1.000 |
-| **Overall** | **0.957** | **0.941** | **0.897** |
+| Model | Validation context | mAP50 | mAP50-95 | Precision | Recall | Read |
+|-------|--------------------|-------|----------|-----------|--------|------|
+| V13 | pasted standalone val, 54 images | 0.421 | 0.360 | 0.524 | 0.503 | Weak baseline from the recent comparison run |
+| V14 | smoketest rerun, 109 images | 0.690 | 0.564 | 0.768 | 0.743 | Large recovery from V13 |
+| V15 | standalone/smoketest-style val, 139 images | 0.741 | 0.594 | 0.815 | 0.780 | Incremental gain over V14 rerun |
+
+Improvement:
+
+- V13 -> V14: mAP50 +0.269, mAP50-95 +0.204, precision +0.244, recall +0.240.
+- V14 -> V15: mAP50 +0.051, mAP50-95 +0.030, precision +0.047, recall +0.037.
+- V15 improves every class versus the V14 smoketest rerun, especially Dan (+0.080 AP50), Kibble (+0.079), and Dan_hand (+0.061).
 
 ## Data Flywheel
 

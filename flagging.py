@@ -48,6 +48,28 @@ def _bbox_iou(box_a, box_b):
     return inter / union
 
 
+def _largest_box(detections, class_name):
+    boxes = [d for d in detections if _det_cls(d) == class_name]
+    if not boxes:
+        return None
+    return max(
+        boxes,
+        key=lambda d: (_det_box(d)[2] - _det_box(d)[0]) * (_det_box(d)[3] - _det_box(d)[1]),
+    )
+
+
+def _clear_bowl_frame(detections):
+    bowl = _largest_box(detections, 'Bowl')
+    if bowl is None:
+        return False
+    bowl_box = _det_box(bowl)
+    for det in detections:
+        if _det_cls(det) in ('Dan', 'Sanbo', 'Dan_hand'):
+            if _bbox_iou(_det_box(det), bowl_box) > 0.10:
+                return False
+    return True
+
+
 def _find_blips(frames, blip_max_frames, blip_gap_frames):
     """Find classes that appear for <= blip_max_frames then vanish."""
     # Build per-class list of frame indices where detected
@@ -147,9 +169,13 @@ def flag_detections(frames, conf_threshold=0.40, blip_max_frames=2,
                     _add_tag(i, 'conflict-dan-sanbo')
 
     # 5. Kibble count jump
+    # Only compare clear bowl frames. During eating, cats occlude kibble and
+    # normal movement can look like a large count jump.
     prev_kibble = None
     for i, frame in enumerate(frames):
         dets = frame.get('detections', [])
+        if not _clear_bowl_frame(dets):
+            continue
         kibble_count = sum(1 for d in dets if _det_cls(d) == 'Kibble')
         if prev_kibble is not None:
             delta = abs(kibble_count - prev_kibble)

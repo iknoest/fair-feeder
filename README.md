@@ -108,6 +108,14 @@ Auto-flagging catches: single-frame hallucinations, contradicting detections, im
 
 Daily flag counts are included in Telegram and logged to `feeding_log.csv` (`flagged_frames`, Roboflow upload/skipped/failed counts, and top flag tags). At retraining time, the monthly trend shows which failure modes are still common.
 
+Monthly retraining checklist: [docs/monthly-retraining-procedure.md](docs/monthly-retraining-procedure.md)
+
+## 24/7 Camera Position Alert
+
+The Pi recorder can optionally monitor whether the bowl stays framed while running 24/7. Set `BOWL_MODEL_PATH` to a local Fair Feeder YOLO model path on the Pi. The existing `yolov8n.pt` cat filter cannot detect the custom `Bowl` class, so this alert is disabled unless the custom model is configured.
+
+Default behavior: check every 30 seconds; send Telegram if the bowl is missing or outside the center area for 10 continuous minutes; cooldown 6 hours.
+
 ## Morning Report Scheduling
 
 The workflow cron is intentionally early: `0 3 * * *` UTC. GitHub Actions scheduled jobs have shown multi-hour trigger delays, so the job compensates by scheduling early and then waiting until `06:35 Europe/Amsterdam` if GitHub happens to start promptly.

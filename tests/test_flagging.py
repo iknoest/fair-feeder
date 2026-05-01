@@ -130,13 +130,25 @@ class TestConflict:
 class TestKibbleJump:
     def test_large_kibble_count_change(self):
         # Frame 0: 2 kibble, Frame 1: 10 kibble => delta 8
+        bowl = _make_det('Bowl', 0.95, [500, 250, 800, 550])
         frames = [
-            _make_frame([_make_det('Kibble', 0.90)] * 2, frame_idx=0),
-            _make_frame([_make_det('Kibble', 0.90)] * 10, frame_idx=1),
+            _make_frame([bowl] + [_make_det('Kibble', 0.90)] * 2, frame_idx=0),
+            _make_frame([bowl] + [_make_det('Kibble', 0.90)] * 10, frame_idx=1),
         ]
         result = flag_detections(frames, kibble_jump=5)
         jump_tags = [t for r in result for t in r.tags if 'kibble-jump' in t]
         assert 'kibble-jump-8' in jump_tags
+
+    def test_ignores_kibble_jump_when_cat_occludes_bowl(self):
+        bowl = _make_det('Bowl', 0.95, [500, 250, 800, 550])
+        cat_on_bowl = _make_det('Dan', 0.90, [520, 260, 780, 540])
+        frames = [
+            _make_frame([bowl] + [_make_det('Kibble', 0.90)] * 2, frame_idx=0),
+            _make_frame([bowl, cat_on_bowl] + [_make_det('Kibble', 0.90)] * 10, frame_idx=1),
+        ]
+        result = flag_detections(frames, kibble_jump=5)
+        jump_tags = [t for r in result for t in r.tags if 'kibble-jump' in t]
+        assert jump_tags == []
 
 
 # ---------------------------------------------------------------------------

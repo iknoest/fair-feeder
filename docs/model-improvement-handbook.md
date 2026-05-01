@@ -157,6 +157,15 @@ V15 versus pasted V13 validation:
 | Precision | 0.524 | 0.815 | +0.291 | +55.5% |
 | Recall | 0.503 | 0.780 | +0.277 | +55.1% |
 
+Current smoketest-style improvement chain:
+
+| Metric | V13 pasted val | V14 smoketest rerun | V15 smoketest/standalone | V13 -> V14 | V14 -> V15 |
+|--------|----------------|---------------------|--------------------------|------------|------------|
+| mAP50 | 0.421 | 0.690 | 0.741 | +0.269 | +0.051 |
+| mAP50-95 | 0.360 | 0.564 | 0.594 | +0.204 | +0.030 |
+| Precision | 0.524 | 0.768 | 0.815 | +0.244 | +0.047 |
+| Recall | 0.503 | 0.743 | 0.780 | +0.240 | +0.037 |
+
 Per-class AP50 snapshot:
 
 Use the class rows in the Ultralytics table as the source of truth. If a custom notebook prints a separate "Per-class AP50" list, confirm it uses `model.names` order; a wrong class order can shift the labels.

@@ -144,8 +144,8 @@ tasks/                         # Project tracking (not code)
 - **GitHub Actions** → `morning_report.ipynb` via papermill, runs ~06:45 Amsterdam daily
   - Cron is `0 3 * * *` UTC to compensate observed GitHub schedule delay; workflow waits until 06:35 Europe/Amsterdam if it starts early and reports scheduler heartbeat in Telegram + GitHub summary.
 - **Colab** → `smoketest.ipynb` for interactive threshold tuning; `batch_review.ipynb` for historical reprocessing
-- **V14 model** → deployed baseline, mAP50 0.957, Sanbo AP50 0.985, Dan_hand precision 1.000 (recall 0.716)
-- **V15 candidate** → trained from 155 manually revised April flagged images; validate with the same command/dataset as V14 before deployment
+- **V14 model** → deployed baseline; historical mAP50 0.957, fresh smoketest rerun mAP50 0.690
+- **V15 candidate** → trained from 155 manually revised April flagged images; fresh standalone/smoketest-style mAP50 0.741, but validate on a fixed holdout before deployment
 
 ### In progress
 - [ ] **Phase C: Data Flywheel** — `docs/superpowers/specs/2026-03-26-data-flywheel-design.md`

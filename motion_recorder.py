@@ -166,6 +166,8 @@ def send_telegram_alert(message):
             payload = {"chat_id": chat_id, "text": message}
             try:
                 requests.post(url, json=payload, timeout=5)
+                first_line = message.splitlines()[0] if message else 'message'
+                log.info(f'Telegram sent: {first_line}')
                 log.info("📲 Telegram startup message sent.")
             except Exception as e:
                 log.warning(f"⚠️ Failed to send Telegram: {e}")

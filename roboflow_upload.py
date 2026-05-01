@@ -156,9 +156,9 @@ def upload_flagged_frames(flagged_frames, api_key, workspace, project,
     return result
 
 
-def format_telegram_flag_summary(result):
+def format_telegram_flag_summary(result, flagged_count=None):
     """Format an UploadResult into a Telegram-friendly summary string."""
-    total = result.uploaded + result.failed
+    total = flagged_count if flagged_count is not None else result.uploaded + result.skipped + result.failed
     if total == 0:
         return "Flags: none"
 

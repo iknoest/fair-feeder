@@ -140,6 +140,7 @@ tasks/                         # Project tracking (not code)
 
 ### Active surfaces
 - **Pi 5** → `motion_recorder.py` (MOG2 + YOLOv8n cat filter, rclone upload, 24/7 systemd)
+  - Optional bowl-position Telegram alert requires `BOWL_MODEL_PATH` pointing to a custom Fair Feeder YOLO model; `yolov8n.pt` only detects generic cats and cannot detect `Bowl`.
 - **GitHub Actions** → `morning_report.ipynb` via papermill, runs ~06:45 Amsterdam daily
   - Cron is `0 3 * * *` UTC to compensate observed GitHub schedule delay; workflow waits until 06:35 Europe/Amsterdam if it starts early and reports scheduler heartbeat in Telegram + GitHub summary.
 - **Colab** → `smoketest.ipynb` for interactive threshold tuning; `batch_review.ipynb` for historical reprocessing

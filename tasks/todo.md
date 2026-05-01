@@ -24,6 +24,7 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 - [x] Wire into main loop (daemon thread, shares `RecordingController` instance)
 - [x] `/weight` inline menu with Log/History/Edit buttons; weight chart X-axis fixed (integer ticks + MM-DD labels)
 - [x] `/syncstatus` merged into `/status` — Drive file count appended inline
+- [x] Add optional 24/7 bowl-position alert via `BOWL_MODEL_PATH`
 - [ ] **Test on Pi**: send `/status`, `/lastclip`, `/weight`, `/help` from phone and verify replies
 
 ### B3 — Morning Kibble Report (GitHub Actions) ✅
@@ -73,6 +74,7 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 
 ### C-later — Nice to have
 - [x] Feeding window filter — `smoketest.ipynb` filters clips to 06:18–06:30; multi-clip stitch via ffmpeg concat
+- [x] Reduce noisy `kibble-jump-*` flags by only comparing clear bowl frames
 - [ ] Bowl ROI zone filter in `motion_recorder.py` (`BOWL_ROI` in `config.py`)
 - [ ] Lightweight Dan/Sanbo classifier on Pi — tag clip filenames with identity
 - [ ] Telegram-interactive flagging (reply to report to flag issues)

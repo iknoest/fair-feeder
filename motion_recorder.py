@@ -78,6 +78,7 @@ try:
     CAMERA_IP   = _cfg.TAPO_IP
     CAMERA_USER = _cfg.TAPO_USER
     CAMERA_PASS = _cfg.TAPO_PASS
+    BOWL_MODEL_PATH = getattr(_cfg, 'BOWL_MODEL_PATH', os.getenv('BOWL_MODEL_PATH', ''))
 except Exception:
     # Manual Fallback
     # NOTE: Set these environment variables or edit these locally after pulling from git.
@@ -85,6 +86,7 @@ except Exception:
     CAMERA_IP   = os.getenv('TAPO_IP',   '<YOUR_CAMERA_IP>')
     CAMERA_USER = os.getenv('TAPO_USER', '<YOUR_CAMERA_USER>')
     CAMERA_PASS = os.getenv('TAPO_PASS', '<YOUR_CAMERA_PASSWORD>')
+    BOWL_MODEL_PATH = os.getenv('BOWL_MODEL_PATH', '')
 
 RTSP_PORT  = 554
 RTSP_STREAM = 'stream1' 
@@ -97,6 +99,13 @@ PRE_BUFFER_SECONDS  = 3
 COOLDOWN_SECONDS    = 5      
 MAX_RECORDING_SECS  = 150    
 VIDEO_FPS           = 15     
+
+BOWL_CHECK_INTERVAL_SECONDS = int(os.getenv('BOWL_CHECK_INTERVAL_SECONDS', '30'))
+BOWL_BAD_SECONDS = int(os.getenv('BOWL_BAD_SECONDS', '600'))
+BOWL_ALERT_COOLDOWN_SECONDS = int(os.getenv('BOWL_ALERT_COOLDOWN_SECONDS', '21600'))
+BOWL_CENTER_MIN = float(os.getenv('BOWL_CENTER_MIN', '0.25'))
+BOWL_CENTER_MAX = float(os.getenv('BOWL_CENTER_MAX', '0.75'))
+BOWL_CONF = float(os.getenv('BOWL_CONF', '0.25'))
 
 import platform
 
@@ -441,6 +450,90 @@ class RecordingController:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
+
+class BowlPositionMonitor:
+    """Periodically checks whether the custom Bowl class is framed."""
+
+    def __init__(self, reader, bowl_model=None):
+        self.reader = reader
+        self.bowl_model = bowl_model
+        self._last_check = 0
+        self._bad_since = None
+        self._last_alert = 0
+        self._alert_active = False
+
+    def tick(self):
+        if not self.bowl_model:
+            return
+
+        now = time.time()
+        if now - self._last_check < BOWL_CHECK_INTERVAL_SECONDS:
+            return
+        self._last_check = now
+
+        frame = self.reader.get_latest_frame()
+        if frame is None:
+            return
+
+        ok, reason = self._check_bowl(frame)
+        if ok:
+            if self._alert_active:
+                send_telegram_alert('Bowl position recovered. Camera sees the bowl in frame again.')
+            self._bad_since = None
+            self._alert_active = False
+            return
+
+        if self._bad_since is None:
+            self._bad_since = now
+
+        bad_seconds = now - self._bad_since
+        if bad_seconds < BOWL_BAD_SECONDS:
+            return
+
+        if now - self._last_alert < BOWL_ALERT_COOLDOWN_SECONDS:
+            return
+
+        minutes = round(bad_seconds / 60)
+        send_telegram_alert(
+            f'Camera position alert\n'
+            f'Bowl has been {reason} for ~{minutes} min.\n'
+            f'Please check the Tapo camera position.'
+        )
+        self._last_alert = now
+        self._alert_active = True
+
+    def _check_bowl(self, frame):
+        try:
+            results = self.bowl_model(frame, imgsz=640, conf=BOWL_CONF, verbose=False)
+            height, width = frame.shape[:2]
+            best = None
+            best_area = 0
+
+            for r in results:
+                for box in r.boxes:
+                    cls_id = int(box.cls[0])
+                    name = str(self.bowl_model.names[cls_id])
+                    if name.lower() != 'bowl':
+                        continue
+                    x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
+                    area = max(0, x2 - x1) * max(0, y2 - y1)
+                    if area > best_area:
+                        best_area = area
+                        best = (x1, y1, x2, y2)
+
+            if best is None:
+                return False, 'not detected'
+
+            x1, y1, x2, y2 = best
+            cx = ((x1 + x2) / 2) / max(width, 1)
+            cy = ((y1 + y2) / 2) / max(height, 1)
+            if BOWL_CENTER_MIN <= cx <= BOWL_CENTER_MAX and BOWL_CENTER_MIN <= cy <= BOWL_CENTER_MAX:
+                return True, ''
+            return False, 'outside the center area'
+        except Exception as e:
+            log.warning(f'Bowl position check failed: {e}')
+            return True, ''
+
 
 class TelegramCommandListener:
     """Polls Telegram Bot API for commands and replies with live Pi stats."""
@@ -893,19 +986,31 @@ if __name__ == "__main__":
     log.info('  Fair Feeder — Motion Recorder with Cat Detection')
     log.info('='*60)
     
-    # Initialize YOLO cat detector
+    # Initialize YOLO detectors
     yolo_model = None
+    bowl_model = None
     try:
         from ultralytics import YOLO
         yolo_model = YOLO('yolov8n.pt')
-        log.info('🐱 Cat detector loaded (YOLOv8n)')
+        log.info('Cat detector loaded (YOLOv8n)')
     except ImportError as e:
-        log.warning(f'⚠️  ultralytics not found: {e}')
+        YOLO = None
+        log.warning(f'ultralytics not found: {e}')
         log.warning('   Try: pip install ultralytics')
         log.info('   Falling back to: all clips will be kept (no cat filtering)')
     except Exception as e:
-        log.warning(f'⚠️  YOLO not available ({e})')
+        YOLO = None
+        log.warning(f'YOLO not available ({e})')
         log.info('   Falling back to: all clips will be kept (no cat filtering)')
+
+    if BOWL_MODEL_PATH and 'YOLO' in locals() and YOLO is not None:
+        try:
+            bowl_model = YOLO(BOWL_MODEL_PATH)
+            log.info(f'Bowl position monitor loaded: {BOWL_MODEL_PATH}')
+        except Exception as e:
+            log.warning(f'Bowl position monitor disabled ({e})')
+    elif not BOWL_MODEL_PATH:
+        log.info('Bowl position monitor disabled: set BOWL_MODEL_PATH to a Fair Feeder model with Bowl class')
 
     listener = FrameMotionDetector(None, threshold_percent=2.0)
     reader = RTSPFrameReader(RTSP_URL, buffer_seconds=PRE_BUFFER_SECONDS, fps=VIDEO_FPS)
@@ -915,6 +1020,7 @@ if __name__ == "__main__":
         listener.start()
         reader.start()
         controller = RecordingController(reader, listener, yolo_model=yolo_model)
+        bowl_monitor = BowlPositionMonitor(reader, bowl_model=bowl_model)
         log.info('')
         log.info('\ud83d\ude80 Monitoring... Press Ctrl+C to stop.')
         
@@ -936,6 +1042,7 @@ if __name__ == "__main__":
 
         while True:
             controller.tick()
+            bowl_monitor.tick()
 
             if time.time() - last_status >= status_interval:
                 state = '\ud83d\udd34 REC' if controller.is_recording else '\u23f8\ufe0f  Idle'
@@ -952,4 +1059,3 @@ if __name__ == "__main__":
         if controller.is_recording:
             controller._stop_recording()
         log.info(f'Total saved: {controller.clips_saved}, deleted: {controller.clips_deleted}')
-

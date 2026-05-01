@@ -112,7 +112,7 @@ Monthly retraining checklist: [docs/monthly-retraining-procedure.md](docs/monthl
 
 ## 24/7 Camera Position Alert
 
-The Pi recorder can optionally monitor whether the bowl stays framed while running 24/7. Set `BOWL_MODEL_PATH` to a local Fair Feeder YOLO model path on the Pi. The existing `yolov8n.pt` cat filter cannot detect the custom `Bowl` class, so this alert is disabled unless the custom model is configured.
+The Pi recorder monitors whether the bowl stays framed while running 24/7 using the existing `yolov8n.pt` COCO `bowl` class. Keep `yolov8n.pt` available in the recorder working directory on the Pi so the same lightweight model can handle both cat filtering and bowl-position checks.
 
 Default behavior: check every 30 seconds; send Telegram if the bowl is missing or outside the center area for 10 continuous minutes; cooldown 6 hours.
 

@@ -165,6 +165,16 @@ class TestFormatTelegramSummary:
         assert "2 sent" in text
         assert "1 failed" in text
 
+    def test_flagged_count_includes_skipped(self):
+        result = UploadResult(uploaded=2, skipped=4, failed=1, tag_counts={
+            'blip-kibble': 4, 'low-conf-sanbo': 2
+        })
+        text = format_telegram_flag_summary(result, flagged_count=7)
+        assert "Flags: 7 frames -> Roboflow" in text
+        assert "2 sent" in text
+        assert "4 skipped" in text
+        assert "1 failed" in text
+
     def test_tags_sorted_by_frequency(self):
         result = UploadResult(uploaded=5, failed=0, tag_counts={
             'blip-dan': 1, 'low-conf-sanbo': 3, 'conflict-dan-sanbo': 2

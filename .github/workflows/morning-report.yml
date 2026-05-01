@@ -2,7 +2,7 @@ name: Fair Feeder Morning Report
 
 on:
   schedule:
-    - cron: '45 4 * * *'    # GitHub cron is UTC; 06:45 Amsterdam during summer time
+    - cron: '35 4 * * *'    # GitHub cron is UTC; earliest safe run after 06:18-06:30 Amsterdam feeding window
   workflow_dispatch:         # Manual trigger for testing
 
 concurrency:

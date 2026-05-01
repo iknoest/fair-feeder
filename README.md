@@ -25,7 +25,7 @@ If you're new to the project, read the files in this order:
 graph LR
     CAM[Tapo C210<br/>IR Camera] -->|RTSP| PI[Raspberry Pi 5<br/>24/7 Recording]
     PI -->|rclone| DRIVE[Google Drive]
-    DRIVE --> CI[GitHub Actions<br/>Daily 6:45am]
+    DRIVE --> CI[GitHub Actions<br/>Daily cron + heartbeat]
     CI --> YOLO[YOLOv11s<br/>5-class Detection]
     YOLO --> TG[Telegram Bot<br/>Morning Report]
 
@@ -40,7 +40,7 @@ graph LR
 1. **Pi 5** runs 24/7 — detects motion, records clips, uploads to Google Drive
 2. **GitHub Actions** picks up clips every morning, runs YOLOv11 inference
 3. **FeedingTracker** analyzes detections: who was at the bowl, how long, how many kibble eaten
-4. **Telegram bot** sends the report with summary, timeline chart, and annotated video
+4. **Telegram bot** sends the report with summary, timeline chart, snapshots, and annotated video
 
 ## Detection Classes
 
@@ -55,22 +55,21 @@ graph LR
 ## Sample Report
 
 ```
-✅ No compensation needed
-
-🐾 Fair Feeder Report
-2026-03-28  ·  06:20:10 -> 06:22:02  ·  2m 30s
-
-── Kibble ──
+OK: No extra kibble needed
+2026-03-28
+06:20:10-06:22:02 (2m 30s)
 Start: ~26 kibble
-Dan   ████████ 100%  (~24)
-Sanbo ░░░░░░░░ 0%  (~0)
-At bowl:  Dan 1m 46s  ·  Sanbo 0m 00s
-
-── Verdict ──
-Dan ate well — no compensation needed
+Dan   [########] 100% (~24)
+      bowl 1m 46s; first 06:20:15
+Sanbo [........] 0% (~0)
+      bowl 0m 00s; first unknown
+Hand: none
+Schedule: cron 0 3 * * *; start 07:16:00 UTC; delay +256m
+Why: Dan got the detected kibble share.
+Flags: 6 frames -> Roboflow (6 sent); top: blip-kibble 3, low-conf-sanbo 2
 ```
 
-The first line appears in the Telegram push notification so you can see the verdict without opening the message. When compensation is needed it shows: `⚠️ Sanbo came at 06:21 — compensate Dan ~5 kibble`
+The first line appears in the Telegram push notification so you can see the verdict without opening the message. When compensation is needed it starts with `ACTION: Give Dan ~N kibble`. Timestamps in the report use seconds because a bowl can be emptied within a minute.
 
 <!-- PHOTO: timeline chart showing kibble count, cat presence over time -->
 
@@ -106,6 +105,16 @@ flowchart LR
 ```
 
 Auto-flagging catches: single-frame hallucinations, contradicting detections, impossible scenarios (hand without cat), kibble count jumps.
+
+Daily flag counts are included in Telegram and logged to `feeding_log.csv` (`flagged_frames`, Roboflow upload/skipped/failed counts, and top flag tags). At retraining time, the monthly trend shows which failure modes are still common.
+
+## Morning Report Scheduling
+
+The workflow cron is intentionally early: `0 3 * * *` UTC. GitHub Actions scheduled jobs have shown multi-hour trigger delays, so the job compensates by scheduling early and then waiting until `06:35 Europe/Amsterdam` if GitHub happens to start promptly.
+
+Each Telegram report includes a scheduler heartbeat line with cron, actual UTC start time, and scheduler delay. The GitHub Actions run summary also records scheduled time, actual start time, scheduler delay, and runtime so late reports can be diagnosed as GitHub queue delay versus slow notebook execution.
+
+The CI report filters to the morning feeding window, stitches adjacent clips only when their gap is at most 10 seconds, sends one report for a merged event, and stops processing later clips once a real feeding event has been captured.
 
 ## Architecture
 

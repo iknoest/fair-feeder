@@ -29,8 +29,10 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 ### B3 — Morning Kibble Report (GitHub Actions) ✅
 - [x] Service account auth + Drive sharing
 - [x] CI-compatible notebook (`RUNNING_IN_CI` guard, `tqdm.auto`)
-- [x] Cron schedule running (06:35 `Europe/Amsterdam` local time)
+- [x] Cron schedule running with early UTC compensation (`0 3 * * *`) plus wait-until-06:35 Amsterdam guard
+- [x] Scheduler heartbeat added to Telegram + GitHub Actions summary
 - [x] Merged clip detection and stitching working in Phase 1
+- [x] Merged CI clips send one report set; later clips skipped once a real feeding event is captured
 - [x] Timeline chart generating correctly from detection cache
 - [x] **Verify all fixes work on real morning clips** — CI run 2026-03-26 all green ✅
 
@@ -47,6 +49,7 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 - [x] Implement Phase 2.5: auto-flag suspicious detections from cache (`flagging.py`)
 - [x] Implement Phase 2.6: upload flagged frames to Roboflow via SDK (`roboflow_upload.py`)
 - [x] Add flag summary to Telegram report
+- [x] Log daily flag trend fields to `feeding_log.csv` for monthly retraining direction
 - [x] Extract flagging + upload into shared modules
 - [x] Add `ROBOFLOW_API_KEY` + `ROBOFLOW_WORKSPACE` to CI workflow env
 - [x] **User setup**: GitHub secrets added (ROBOFLOW_API_KEY, ROBOFLOW_WORKSPACE) ✅

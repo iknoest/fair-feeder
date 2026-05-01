@@ -141,6 +141,7 @@ tasks/                         # Project tracking (not code)
 ### Active surfaces
 - **Pi 5** → `motion_recorder.py` (MOG2 + YOLOv8n cat filter, rclone upload, 24/7 systemd)
 - **GitHub Actions** → `morning_report.ipynb` via papermill, runs ~06:45 Amsterdam daily
+  - Cron is `0 3 * * *` UTC to compensate observed GitHub schedule delay; workflow waits until 06:35 Europe/Amsterdam if it starts early and reports scheduler heartbeat in Telegram + GitHub summary.
 - **Colab** → `smoketest.ipynb` for interactive threshold tuning; `batch_review.ipynb` for historical reprocessing
 - **V14 model** → mAP50 0.957, Sanbo AP50 0.985, Dan_hand precision 1.000 (recall 0.716)
 
@@ -282,7 +283,7 @@ When a CI run fails, list **every** likely failure mode before pushing — fix t
 
 Archive pipeline outputs **per-run with timestamped filenames**, never overwrite a single file. Previous mistake: proposing overwrite-the-canonical-file, which loses history on every run.
 
-**Exception:** `feeding_log.csv` — always download current file from Drive (`get_media()`), remove today's row if present (dedup), append fresh row, then `update()`. Do **not** call `create()` from CI (service account has zero quota). Columns: `date, dan_kibble, sanbo_kibble, hand_feeding, compensation, video_count, dan_first_arrival, sanbo_first_arrival, dan_weight, sanbo_weight`. Weight columns are backfilled from `weight_log.csv` (Pi-generated, lives in `GDRIVE_UPLOAD_FOLDER_ID`).
+**Exception:** `feeding_log.csv` — always download current file from Drive (`get_media()`), remove today's row if present (dedup), append fresh row, then `update()`. Do **not** call `create()` from CI (service account has zero quota). Columns: `date, dan_kibble, sanbo_kibble, hand_feeding, compensation, video_count, dan_first_arrival, sanbo_first_arrival, flagged_frames, roboflow_uploaded, roboflow_skipped, roboflow_failed, flag_top_tags, dan_weight, sanbo_weight`. Weight columns are backfilled from `weight_log.csv` (Pi-generated, lives in `GDRIVE_UPLOAD_FOLDER_ID`).
 
 **CI Drive upload policy:** Large binary outputs (videos, archives) are **not** uploaded from CI — the service account has no storage quota. Colab (user account) handles archive. Telegram already delivers daily results.
 
@@ -306,6 +307,7 @@ Full history in git log. These are the ones whose pattern keeps catching us:
 | # | Issue | Root cause | Fix |
 |---|-------|-----------|-----|
 | 34 | `feeding_log.csv` not accumulating / wrong kibble count / duplicates on manual trigger | CSV only read last event; no dedup for same-day runs | Aggregate all `video_results`; dedup by removing today's row before appending; new columns: arrivals + weight |
+| 35 | GitHub Actions scheduled workflows may start hours after cron | Runs scheduled at 04:45 UTC were actually starting around 09:08-09:19 Amsterdam. Cron time alone is not reliable. | Schedule early (`0 3 * * *` UTC), wait until feeding window close if the runner starts early, and report scheduler heartbeat in Telegram and GitHub summaries. |
 | 33 | Annotated video never appears in Drive from CI | SA has zero storage quota; `files().create()` 403 | Dropped Drive uploads from CI; Colab archives |
 | 32 | Telegram sent unmerged short clip instead of merged | Phase 1/2 re-scanned `SOURCE_DIR`, overwriting stitch output | Guarded rescan behind `if not RUNNING_IN_CI:` |
 | 31 | FeedingTracker reports "0 kibble / no activity" despite timeline showing kibble | `_find_clear_kibble_count` searches no-cat frames; model only detects kibble when cats present | Added phase-entry/exit fallback methods |

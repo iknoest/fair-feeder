@@ -102,6 +102,7 @@ tests/                         # Unit + regression tests
 docs/                          # All documentation
 ├── MOTION_RECORDER_GUIDE.ipynb
 ├── MODELS.md                  # Model version history
+├── model-improvement-handbook.md # Monthly model maintenance decision guide
 ├── README_RPI_SERVICE.md      # systemd setup guide
 ├── README_GIT_PULL.md         # Git update guide for Pi
 ├── blog/                      # Blog posts (EN + ZH-TW)
@@ -136,21 +137,23 @@ tasks/                         # Project tracking (not code)
 
 ## 4. CURRENT PROJECT STATUS
 
-**Stage: Production pipeline running. V14 model trained. Data flywheel active.**
+**Stage: Production pipeline running. V14 deployed. V15 candidate trained; validate against V14 before deployment. Data flywheel active.**
 
 ### Active surfaces
 - **Pi 5** → `motion_recorder.py` (MOG2 + YOLOv8n cat filter, COCO bowl-position alert, rclone upload, 24/7 systemd)
 - **GitHub Actions** → `morning_report.ipynb` via papermill, runs ~06:45 Amsterdam daily
   - Cron is `0 3 * * *` UTC to compensate observed GitHub schedule delay; workflow waits until 06:35 Europe/Amsterdam if it starts early and reports scheduler heartbeat in Telegram + GitHub summary.
 - **Colab** → `smoketest.ipynb` for interactive threshold tuning; `batch_review.ipynb` for historical reprocessing
-- **V14 model** → mAP50 0.957, Sanbo AP50 0.985, Dan_hand precision 1.000 (recall 0.716)
+- **V14 model** → deployed baseline, mAP50 0.957, Sanbo AP50 0.985, Dan_hand precision 1.000 (recall 0.716)
+- **V15 candidate** → trained from 155 manually revised April flagged images; validate with the same command/dataset as V14 before deployment
 
 ### In progress
 - [ ] **Phase C: Data Flywheel** — `docs/superpowers/specs/2026-03-26-data-flywheel-design.md`
   - [x] C1: Auto-flag + Roboflow upload (verified in CI 2026-03-26)
   - [x] C2: Batch reprocessing (231 frames uploaded with pre-annotations)
   - [x] C3: V14 trained 2026-03-28 (775 images)
-  - [ ] Deploy V14 to CI, update `GDRIVE_MODEL_FILE_ID` secret
+  - [x] Deploy V14 to CI, update `GDRIVE_MODEL_FILE_ID` secret
+  - [ ] V15 deployment decision after fixed V14/V15 validation comparison
 
 ### Planned later
 - Bowl ROI zone filter in `motion_recorder.py`

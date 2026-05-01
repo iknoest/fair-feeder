@@ -73,9 +73,9 @@ The first line appears in the Telegram push notification so you can see the verd
 
 <!-- PHOTO: timeline chart showing kibble count, cat presence over time -->
 
-## Model Performance (V14)
+## Model Performance
 
-Trained on 775 images with [Roboflow](https://roboflow.com) dataset management.
+Current production baseline is V14, trained on 775 images with [Roboflow](https://roboflow.com) dataset management. V15 has been trained from 155 manually revised April flagged images, but should be validated against V14 with the same fixed validation command before deployment.
 
 | Class | AP50 | Precision | Recall |
 |-------|------|-----------|--------|
@@ -108,7 +108,7 @@ Auto-flagging catches: single-frame hallucinations, contradicting detections, im
 
 Daily flag counts are included in Telegram and logged to `feeding_log.csv` (`flagged_frames`, Roboflow upload/skipped/failed counts, and top flag tags). At retraining time, the monthly trend shows which failure modes are still common.
 
-Monthly retraining checklist: [docs/monthly-retraining-procedure.md](docs/monthly-retraining-procedure.md)
+Model maintenance handbook: [docs/model-improvement-handbook.md](docs/model-improvement-handbook.md)
 
 ## 24/7 Camera Position Alert
 

@@ -25,7 +25,8 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 - [x] `/weight` inline menu with Log/History/Edit buttons; weight chart X-axis fixed (integer ticks + MM-DD labels)
 - [x] `/syncstatus` merged into `/status` — Drive file count appended inline
 - [x] Add 24/7 bowl-position alert using YOLOv8n COCO `bowl`
-- [ ] **Test on Pi**: send `/status`, `/lastclip`, `/weight`, `/help` from phone and verify replies
+- [x] **Test on Pi**: `/status` verified with bowl count/centered state after Pi deployment
+- [ ] Verify `/lastclip`, `/weight`, `/help` from phone after latest Pi deployment
 
 ### B3 — Morning Kibble Report (GitHub Actions) ✅
 - [x] Service account auth + Drive sharing
@@ -64,18 +65,25 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 - [x] Upload flagged frames to Roboflow with pre-annotations — 231 frames uploaded
 - [x] Add EXCLUDE_DATES filter and upload deduplication via tracking file
 
-### C3 — First retrain cycle ✅ TRAINED
+### C3 — First retrain cycle ✅ DEPLOYED
 - [x] Review flagged frames in Roboflow, correct labels (775 images, 5949 annotations)
 - [x] Generate dataset v14, retrain on Kaggle (YOLOv11s, copy_paste=0.0)
 - [x] Compare: mAP50 0.956→0.957, Sanbo AP50 0.959→0.985, mAP50-95 0.739→0.754
 - [x] V14 deployed to CI — first run 2026-03-28: 6 flags (vs 10-20+ with v13), zero blip-sanbo
-- [ ] Update `GDRIVE_MODEL_FILE_ID` GitHub secret to point to v14 model
-- [ ] Monitor v14 daily flag counts for 3-4 weeks before next retrain cycle (v15)
+- [x] Update `GDRIVE_MODEL_FILE_ID` GitHub secret to point to v14 model
+- [x] Monitor v14 daily flag counts before next retrain cycle; April flagged frames reviewed for V15 candidate
+
+### C4 — V15 candidate review
+- [x] Train V15 candidate with 155 manually revised April flagged images
+- [x] Compare V15 against pasted V13 validation metrics
+- [ ] Re-run V14 and V15 with the same validation command/dataset before deployment decision
+- [ ] Decide whether to deploy V15 or keep V14 and monitor May flags
 
 ### C-later — Nice to have
 - [x] Feeding window filter — `smoketest.ipynb` filters clips to 06:18–06:30; multi-clip stitch via ffmpeg concat
 - [x] Reduce noisy `kibble-jump-*` flags by only comparing clear bowl frames
-- [ ] Bowl ROI zone filter in `motion_recorder.py` (`BOWL_ROI` in `config.py`)
+- [x] 24/7 bowl-position alert in `motion_recorder.py` using YOLOv8n COCO `bowl`
+- [ ] Optional Bowl ROI zone tuning in `motion_recorder.py` if YOLOv8n centered-count is noisy
 - [ ] Lightweight Dan/Sanbo classifier on Pi — tag clip filenames with identity
 - [ ] Telegram-interactive flagging (reply to report to flag issues)
 
@@ -84,7 +92,7 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 ## Ongoing
 - [ ] Monitor rclone uploads via log file
 - [ ] Monitor disk usage: `df -h /home/pi5/Pictures/gdrive-randomdice-sync/`
-- [ ] B2 Pi test: verify Telegram commands work from phone
+- [ ] B2 Pi test: verify `/lastclip`, `/weight`, `/help` from phone
 
 ---
 

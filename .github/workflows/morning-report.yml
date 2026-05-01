@@ -2,7 +2,7 @@ name: Fair Feeder Morning Report
 
 on:
   schedule:
-    - cron: '35 4 * * *'    # GitHub cron is UTC; earliest safe run after 06:18-06:30 Amsterdam feeding window
+    - cron: '0 3 * * *'     # GitHub cron is UTC; intentionally early to compensate observed 2h+ schedule delay
   workflow_dispatch:         # Manual trigger for testing
 
 concurrency:
@@ -12,9 +12,50 @@ concurrency:
 jobs:
   morning-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
 
     steps:
+      - name: Record scheduler heartbeat
+        env:
+          SCHEDULED_CRON: ${{ github.event.schedule }}
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import os
+          from datetime import datetime, timezone
+
+          now = datetime.now(timezone.utc)
+          cron = os.environ.get("SCHEDULED_CRON", "")
+          scheduled = ""
+          delay = ""
+          if cron:
+              minute, hour, *_ = cron.split()
+              scheduled_dt = now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+              scheduled = scheduled_dt.isoformat().replace("+00:00", "Z")
+              delay = str(max(0, round((now - scheduled_dt).total_seconds() / 60)))
+
+          print(f"GHA_JOB_STARTED_AT_UTC={now.isoformat().replace('+00:00', 'Z')}")
+          print(f"GHA_SCHEDULE_CRON={cron}")
+          print(f"GHA_SCHEDULED_AT_UTC={scheduled}")
+          print(f"GHA_SCHEDULE_DELAY_MIN={delay}")
+          PY
+
+      - name: Wait until feeding window is complete
+        run: |
+          python - <<'PY'
+          from datetime import datetime, time
+          from zoneinfo import ZoneInfo
+          import time as sleep_time
+
+          tz = ZoneInfo("Europe/Amsterdam")
+          now = datetime.now(tz)
+          target = datetime.combine(now.date(), time(6, 35), tzinfo=tz)
+          wait_sec = max(0, int((target - now).total_seconds()))
+          if wait_sec:
+              print(f"Scheduler started early ({now:%H:%M:%S}); waiting {wait_sec//60}m {wait_sec%60}s until {target:%H:%M:%S} Amsterdam.")
+              sleep_time.sleep(wait_sec)
+          else:
+              print(f"Scheduler started after feeding window close ({now:%H:%M:%S} Amsterdam); no wait needed.")
+          PY
       - name: Checkout repo
         uses: actions/checkout@v6
 
@@ -66,4 +107,28 @@ jobs:
           name: smoketest-output-${{ github.run_id }}
           path: /tmp/smoketest_output.ipynb
           retention-days: 3
+
+      - name: Report scheduler heartbeat
+        if: always()
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import os
+          from datetime import datetime, timezone
+
+          def parse_z(value):
+              if not value:
+                  return None
+              return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+          started = parse_z(os.environ.get("GHA_JOB_STARTED_AT_UTC", ""))
+          now = datetime.now(timezone.utc)
+          runtime = round((now - started).total_seconds() / 60) if started else "unknown"
+
+          print("## Scheduler heartbeat")
+          print(f"- Cron: `{os.environ.get('GHA_SCHEDULE_CRON') or 'manual'}`")
+          print(f"- Scheduled UTC: `{os.environ.get('GHA_SCHEDULED_AT_UTC') or 'manual'}`")
+          print(f"- Job started UTC: `{os.environ.get('GHA_JOB_STARTED_AT_UTC') or 'unknown'}`")
+          print(f"- Scheduler delay: `{os.environ.get('GHA_SCHEDULE_DELAY_MIN') or 'n/a'} min`")
+          print(f"- Job runtime so far: `{runtime} min`")
+          PY
 

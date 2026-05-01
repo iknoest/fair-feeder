@@ -459,6 +459,16 @@ class BowlPositionMonitor:
         self._bad_since = None
         self._last_alert = 0
         self._alert_active = False
+        self._status_lock = threading.Lock()
+        self._last_status = {
+            'enabled': bool(yolo_model),
+            'checked_at': None,
+            'count': 0,
+            'centered_count': 0,
+            'best_center': None,
+            'ok': bool(yolo_model),
+            'reason': 'not checked yet' if yolo_model else 'monitor off',
+        }
 
     def tick(self):
         if not self.yolo_model:
@@ -473,7 +483,10 @@ class BowlPositionMonitor:
         if frame is None:
             return
 
-        ok, reason = self._check_bowl(frame)
+        status = self._detect_bowls(frame)
+        self._set_status(status)
+        ok = status['ok']
+        reason = status['reason']
         if ok:
             if self._alert_active:
                 send_telegram_alert('Bowl position recovered. Camera sees the bowl in frame again.')
@@ -500,12 +513,43 @@ class BowlPositionMonitor:
         self._last_alert = now
         self._alert_active = True
 
-    def _check_bowl(self, frame):
+    def status_text(self, force_check=False):
+        if force_check and self.yolo_model:
+            frame = self.reader.get_latest_frame()
+            if frame is not None:
+                self._set_status(self._detect_bowls(frame))
+
+        with self._status_lock:
+            status = dict(self._last_status)
+
+        if not status['enabled']:
+            return 'Bowl: monitor off'
+
+        checked_at = status['checked_at']
+        age = 'never' if checked_at is None else f'{int(time.time() - checked_at)}s ago'
+        center = status.get('best_center')
+        center_str = 'none'
+        if center:
+            center_str = f'{center[0]:.0%},{center[1]:.0%}'
+
+        return (
+            f'Bowl: {status["count"]} detected, '
+            f'{status["centered_count"]} centered '
+            f'(best center {center_str}; {age})'
+        )
+
+    def _set_status(self, status):
+        with self._status_lock:
+            self._last_status = status
+
+    def _detect_bowls(self, frame):
         try:
             results = self.yolo_model(frame, imgsz=640, conf=BOWL_CONF, verbose=False)
             height, width = frame.shape[:2]
             best = None
             best_area = 0
+            count = 0
+            centered_count = 0
 
             for r in results:
                 for box in r.boxes:
@@ -513,34 +557,60 @@ class BowlPositionMonitor:
                     name = str(self.yolo_model.names[cls_id])
                     if name.lower() != 'bowl':
                         continue
+                    count += 1
                     x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
+                    cx = ((x1 + x2) / 2) / max(width, 1)
+                    cy = ((y1 + y2) / 2) / max(height, 1)
+                    if BOWL_CENTER_MIN <= cx <= BOWL_CENTER_MAX and BOWL_CENTER_MIN <= cy <= BOWL_CENTER_MAX:
+                        centered_count += 1
                     area = max(0, x2 - x1) * max(0, y2 - y1)
                     if area > best_area:
                         best_area = area
-                        best = (x1, y1, x2, y2)
+                        best = (cx, cy)
 
             if best is None:
-                return False, 'not detected'
+                return {
+                    'enabled': True,
+                    'checked_at': time.time(),
+                    'count': count,
+                    'centered_count': 0,
+                    'best_center': None,
+                    'ok': False,
+                    'reason': 'not detected',
+                }
 
-            x1, y1, x2, y2 = best
-            cx = ((x1 + x2) / 2) / max(width, 1)
-            cy = ((y1 + y2) / 2) / max(height, 1)
-            if BOWL_CENTER_MIN <= cx <= BOWL_CENTER_MAX and BOWL_CENTER_MIN <= cy <= BOWL_CENTER_MAX:
-                return True, ''
-            return False, 'outside the center area'
+            ok = centered_count > 0
+            return {
+                'enabled': True,
+                'checked_at': time.time(),
+                'count': count,
+                'centered_count': centered_count,
+                'best_center': best,
+                'ok': ok,
+                'reason': '' if ok else 'outside the center area',
+            }
         except Exception as e:
             log.warning(f'Bowl position check failed: {e}')
-            return True, ''
+            return {
+                'enabled': bool(self.yolo_model),
+                'checked_at': time.time(),
+                'count': 0,
+                'centered_count': 0,
+                'best_center': None,
+                'ok': True,
+                'reason': 'check failed',
+            }
 
 
 class TelegramCommandListener:
     """Polls Telegram Bot API for commands and replies with live Pi stats."""
     POLL_INTERVAL = 2  # seconds between polls
 
-    def __init__(self, bot_token, chat_id, controller):
+    def __init__(self, bot_token, chat_id, controller, bowl_monitor=None):
         self.bot_token = bot_token
         self.chat_id = str(chat_id)
         self.controller = controller
+        self.bowl_monitor = bowl_monitor
         self.running = False
         self._last_update_id = 0
         self._pending = {}  # sender_id -> {'cmd': str, 'step': str, 'data': dict}
@@ -791,6 +861,7 @@ class TelegramCommandListener:
                 sync_str = f'Drive: unreachable ⚠️'
         except Exception:
             sync_str = 'Drive: check skipped'
+        bowl_str = self.bowl_monitor.status_text(force_check=True) if self.bowl_monitor else 'Bowl: monitor off'
 
         self._send(
             f'✅ Fair Feeder Status\n'
@@ -799,6 +870,7 @@ class TelegramCommandListener:
             f'Clips deleted: {deleted}\n'
             f'Local space: {disk_str}\n'
             f'Last motion: {motion_str}\n'
+            f'{bowl_str}\n'
             f'{sync_str}',
             sender_id=sender_id
         )
@@ -1025,7 +1097,7 @@ if __name__ == "__main__":
         # Start Telegram command listener (two-way health check)
         cmd_bot_token, cmd_chat_id = get_telegram_credentials()
         if cmd_bot_token and cmd_chat_id:
-            cmd_listener = TelegramCommandListener(cmd_bot_token, cmd_chat_id, controller)
+            cmd_listener = TelegramCommandListener(cmd_bot_token, cmd_chat_id, controller, bowl_monitor=bowl_monitor)
             cmd_listener.start()
         else:
             log.info('No Telegram credentials — command listener disabled')

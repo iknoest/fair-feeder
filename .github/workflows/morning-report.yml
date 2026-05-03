@@ -94,6 +94,7 @@ jobs:
           TelegramChatId: ${{ secrets.TELEGRAM_CHAT_ID }}
           ROBOFLOW_API_KEY: ${{ secrets.ROBOFLOW_API_KEY }}
           ROBOFLOW_WORKSPACE: ${{ secrets.ROBOFLOW_WORKSPACE }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           papermill morning_report.ipynb /tmp/smoketest_output.ipynb \
             --no-progress-bar \
@@ -131,4 +132,3 @@ jobs:
           print(f"- Scheduler delay: `{os.environ.get('GHA_SCHEDULE_DELAY_MIN') or 'n/a'} min`")
           print(f"- Job runtime so far: `{runtime} min`")
           PY
-

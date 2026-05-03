@@ -14,7 +14,7 @@ I have two cats: **Dan** (picky eater) and **Sanbo** (food thief). Every morning
 
 If you're new to the project, read the files in this order:
 
-- `motion_recorder.py`, `morning_report.ipynb`, `flagging.py`, `roboflow_upload.py` — production path (root, hardcoded dependencies)
+- `motion_recorder.py`, `morning_report.ipynb`, `flagging.py`, `roboflow_upload.py`, `schedule_log.py` — production path (root, hardcoded dependencies)
 - `notebooks/fair_feeder_v14.ipynb`, `scripts/train.py`, `scripts/download_dataset.py` — training and dataset work
 - `notebooks/smoketest.ipynb`, `notebooks/batch_review.ipynb` — interactive analysis and historical review
 - `tests/test_flagging.py`, `tests/test_roboflow_upload.py` — unit tests for production modules
@@ -55,21 +55,19 @@ graph LR
 ## Sample Report
 
 ```
-OK: No extra kibble needed
+😸 Dan finished breakfast
 2026-03-28
 06:20:10-06:22:02 (2m 30s)
 Start: ~26 kibble
 Dan   [########] 100% (~24)
-      bowl 1m 46s; first 06:20:15
+      bowl 1m 46s; bowl from ~06:20:15
 Sanbo [........] 0% (~0)
-      bowl 0m 00s; first unknown
+      bowl 0m 00s; bowl from unknown
 Hand: none
-Schedule: cron 0 3 * * *; start 07:16:00 UTC; delay +256m
-Why: Dan got the detected kibble share.
 Flags: 6 frames -> Roboflow (6 sent); top: blip-kibble 3, low-conf-sanbo 2
 ```
 
-The first line appears in the Telegram push notification so you can see the verdict without opening the message. When compensation is needed it starts with `ACTION: Give Dan ~N kibble`. Timestamps in the report use seconds because a bowl can be emptied within a minute.
+The first line appears in the Telegram push notification so you can see the verdict without opening the message: `😸 Dan finished breakfast`, `😿 Give Dan ~N kibble`, or `🍽️? Feeding machine not working?`. Timestamps in the report use seconds because a bowl can be emptied within a minute. Scheduler delay is recorded in GitHub summaries/logs, not the Telegram message.
 
 <!-- PHOTO: timeline chart showing kibble count, cat presence over time -->
 
@@ -109,7 +107,7 @@ flowchart LR
 
 Auto-flagging catches: single-frame hallucinations, contradicting detections, impossible scenarios (hand without cat), kibble count jumps.
 
-Daily flag counts are included in Telegram and logged to `feeding_log.csv` (`flagged_frames`, Roboflow upload/skipped/failed counts, and top flag tags). At retraining time, the monthly trend shows which failure modes are still common.
+Daily flag counts are included in Telegram and logged to `feeding_log.csv` (`flagged_frames`, Roboflow upload/skipped/failed counts, and top flag tags). The log also records `schedule_time` and `start_time` in Europe/Amsterdam time so GitHub schedule delay can be reviewed without putting delay text in Telegram. At retraining time, the monthly trend shows which failure modes are still common.
 
 Model maintenance handbook: [docs/model-improvement-handbook.md](docs/model-improvement-handbook.md)
 
@@ -117,15 +115,17 @@ Model maintenance handbook: [docs/model-improvement-handbook.md](docs/model-impr
 
 The Pi recorder monitors whether the bowl stays framed while running 24/7 using the existing `yolov8n.pt` COCO `bowl` class. Keep `yolov8n.pt` available in the recorder working directory on the Pi so the same lightweight model can handle both cat filtering and bowl-position checks.
 
-Default behavior: check every 30 seconds; send Telegram if the bowl is missing or outside the center area for 10 continuous minutes; cooldown 6 hours.
+Default behavior: check every 30 seconds; send Telegram if the bowl is missing or not fully visible for 10 continuous minutes; cooldown 6 hours. Missing bowl alerts start with `🥣?`; clipped/not-visible camera-position alerts start with `👀?`. A right-side bowl position is OK as long as the model can see the full bowl.
+
+After changing `motion_recorder.py`, deploy it to `/home/pi5/Feeder/fair-feeder/`, compile it on the Pi, restart `cat-monitor.service`, and verify the service is active.
 
 ## Morning Report Scheduling
 
 The workflow cron is intentionally early: `0 3 * * *` UTC. GitHub Actions scheduled jobs have shown multi-hour trigger delays, so the job compensates by scheduling early and then waiting until `06:35 Europe/Amsterdam` if GitHub happens to start promptly.
 
-Each Telegram report includes a scheduler heartbeat line with cron, actual UTC start time, and scheduler delay. The GitHub Actions run summary also records scheduled time, actual start time, scheduler delay, and runtime so late reports can be diagnosed as GitHub queue delay versus slow notebook execution.
+Telegram reports do not include scheduler delay. The GitHub Actions run summary records scheduled time, actual start time, scheduler delay, and runtime; `feeding_log.csv` records Amsterdam `schedule_time` and `start_time` for later analysis.
 
-The CI report filters to the morning feeding window, stitches adjacent clips only when their gap is at most 10 seconds, sends one report for a merged event, and stops processing later clips once a real feeding event has been captured.
+The CI report filters to the morning feeding window, stitches adjacent clips only when their gap is at most 10 seconds, sends one report for a merged event, and suppresses later empty-food clips once an earlier event finished the bowl.
 
 ## Architecture
 
@@ -192,6 +192,7 @@ fair-feeder/
 ├── morning_report.ipynb     # Daily CI pipeline               ← stays at root (GitHub Actions)
 ├── flagging.py              # Auto-flag suspicious detections  ← stays at root (imported by CI)
 ├── roboflow_upload.py       # Upload flagged frames            ← stays at root (imported by CI)
+├── schedule_log.py          # Schedule/start log helpers       ← stays at root (imported by CI)
 ├── config.py                # Camera & detection settings      ← stays at root (imported by Pi)
 ├── data.yaml                # YOLO dataset config (5 classes)
 │

@@ -103,6 +103,7 @@ BOWL_BAD_SECONDS = int(os.getenv('BOWL_BAD_SECONDS', '600'))
 BOWL_ALERT_COOLDOWN_SECONDS = int(os.getenv('BOWL_ALERT_COOLDOWN_SECONDS', '21600'))
 BOWL_CENTER_MIN = float(os.getenv('BOWL_CENTER_MIN', '0.25'))
 BOWL_CENTER_MAX = float(os.getenv('BOWL_CENTER_MAX', '0.75'))
+BOWL_EDGE_MARGIN = float(os.getenv('BOWL_EDGE_MARGIN', '0.02'))
 BOWL_CONF = float(os.getenv('BOWL_CONF', '0.25'))
 
 import platform
@@ -470,6 +471,7 @@ class BowlPositionMonitor:
             'checked_at': None,
             'count': 0,
             'centered_count': 0,
+            'visible_count': 0,
             'best_center': None,
             'ok': bool(yolo_model),
             'reason': 'not checked yet' if yolo_model else 'monitor off',
@@ -494,7 +496,7 @@ class BowlPositionMonitor:
         reason = status['reason']
         if ok:
             if self._alert_active:
-                send_telegram_alert('Bowl position recovered. Camera sees the bowl in frame again.')
+                send_telegram_alert('✅🥣 Bowl position recovered. Camera sees the bowl in frame again.')
             self._bad_since = None
             self._alert_active = False
             return
@@ -512,8 +514,9 @@ class BowlPositionMonitor:
 
         minutes = round(bad_seconds / 60)
         log.warning(f'Bowl position alert firing after {minutes} min: {reason}')
+        alert_title = '🥣? Bowl not detected' if reason == 'not detected' else '👀? Camera position alert'
         send_telegram_alert(
-            f'Camera position alert\n'
+            f'{alert_title}\n'
             f'Bowl has been {reason} for ~{minutes} min.\n'
             f'Please check the Tapo camera position.'
         )
@@ -544,7 +547,7 @@ class BowlPositionMonitor:
 
         return (
             f'Bowl: {status["count"]} detected, '
-            f'{status["centered_count"]} centered '
+            f'{status.get("visible_count", status.get("centered_count", 0))} fully visible '
             f'(best center {center_str}{bad_str}; {age})'
         )
 
@@ -560,6 +563,7 @@ class BowlPositionMonitor:
             best_area = 0
             count = 0
             centered_count = 0
+            visible_count = 0
 
             for r in results:
                 for box in r.boxes:
@@ -573,6 +577,14 @@ class BowlPositionMonitor:
                     cy = ((y1 + y2) / 2) / max(height, 1)
                     if BOWL_CENTER_MIN <= cx <= BOWL_CENTER_MAX and BOWL_CENTER_MIN <= cy <= BOWL_CENTER_MAX:
                         centered_count += 1
+                    fully_visible = (
+                        x1 > width * BOWL_EDGE_MARGIN and
+                        y1 > height * BOWL_EDGE_MARGIN and
+                        x2 < width * (1 - BOWL_EDGE_MARGIN) and
+                        y2 < height * (1 - BOWL_EDGE_MARGIN)
+                    )
+                    if fully_visible:
+                        visible_count += 1
                     area = max(0, x2 - x1) * max(0, y2 - y1)
                     if area > best_area:
                         best_area = area
@@ -584,20 +596,22 @@ class BowlPositionMonitor:
                     'checked_at': time.time(),
                     'count': count,
                     'centered_count': 0,
+                    'visible_count': 0,
                     'best_center': None,
                     'ok': False,
                     'reason': 'not detected',
                 }
 
-            ok = centered_count > 0
+            ok = visible_count > 0
             return {
                 'enabled': True,
                 'checked_at': time.time(),
                 'count': count,
                 'centered_count': centered_count,
+                'visible_count': visible_count,
                 'best_center': best,
                 'ok': ok,
-                'reason': '' if ok else 'outside the center area',
+                'reason': '' if ok else 'not fully visible',
             }
         except Exception as e:
             log.warning(f'Bowl position check failed: {e}')
@@ -606,6 +620,7 @@ class BowlPositionMonitor:
                 'checked_at': time.time(),
                 'count': 0,
                 'centered_count': 0,
+                'visible_count': 0,
                 'best_center': None,
                 'ok': True,
                 'reason': 'check failed',
@@ -1102,7 +1117,7 @@ if __name__ == "__main__":
         log.info('\ud83d\ude80 Monitoring... Press Ctrl+C to stop.')
         
         # Ping Telegram so user knows the service is running (e.g. after a reboot)
-        send_telegram_alert("✅ Fair Feeder Monitor is LIVE and protecting the bowl! 🐱\nRaspberry Pi 5 is officially monitoring 24/7.")
+        send_telegram_alert("📷 Fair Feeder Monitor is LIVE and protecting the bowl! 🐱\nRaspberry Pi 5 is officially monitoring 24/7.")
 
         # Start Telegram command listener (two-way health check)
         cmd_bot_token, cmd_chat_id = get_telegram_credentials()

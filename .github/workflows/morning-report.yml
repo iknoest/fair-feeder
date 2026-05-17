@@ -2,7 +2,7 @@ name: Fair Feeder Morning Report
 
 on:
   schedule:
-    - cron: '0 3 * * *'     # GitHub cron is UTC; intentionally early to compensate observed 2h+ schedule delay
+    - cron: '0 2 * * *'     # GitHub cron is UTC; intentionally early to compensate observed 3h+ schedule delay
   workflow_dispatch:         # Manual trigger for testing
 
 concurrency:

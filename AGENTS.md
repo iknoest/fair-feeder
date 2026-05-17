@@ -143,7 +143,7 @@ tasks/                         # Project tracking (not code)
 ### Active surfaces
 - **Pi 5** → `motion_recorder.py` (MOG2 + YOLOv8n cat filter, COCO bowl-position alert, rclone upload, 24/7 systemd)
 - **GitHub Actions** → `morning_report.ipynb` via papermill, runs ~06:45 Amsterdam daily
-  - Cron is `0 3 * * *` UTC to compensate observed GitHub schedule delay; workflow waits until 06:35 Europe/Amsterdam if it starts early and reports scheduler heartbeat in GitHub summary + `feeding_log.csv` (not Telegram).
+  - Cron is `0 2 * * *` UTC to compensate observed GitHub schedule delay; workflow waits until 06:35 Europe/Amsterdam if it starts early and reports scheduler heartbeat in GitHub summary + `feeding_log.csv` (not Telegram).
 - **Colab** → `smoketest.ipynb` for interactive threshold tuning; `batch_review.ipynb` for historical reprocessing
 - **V14 model** → deployed baseline; historical mAP50 0.957, fresh smoketest rerun mAP50 0.690
 - **V15 candidate** → trained from 155 manually revised April flagged images; fresh standalone/smoketest-style mAP50 0.741, but validate on a fixed holdout before deployment
@@ -317,7 +317,7 @@ Full history in git log. These are the ones whose pattern keeps catching us:
 | # | Issue | Root cause | Fix |
 |---|-------|-----------|-----|
 | 34 | `feeding_log.csv` not accumulating / wrong kibble count / duplicates on manual trigger | CSV only read last event; no dedup for same-day runs | Aggregate all `video_results`; dedup by removing today's row before appending; new columns: arrivals + weight |
-| 35 | GitHub Actions scheduled workflows may start hours after cron | Runs scheduled at 04:45 UTC were actually starting around 09:08-09:19 Amsterdam. Cron time alone is not reliable. | Schedule early (`0 3 * * *` UTC), wait until feeding window close if the runner starts early, and record scheduler heartbeat in GitHub summaries + `feeding_log.csv`. Keep Telegram concise. |
+| 35 | GitHub Actions scheduled workflows may start hours after cron | Runs scheduled at 04:45 UTC were actually starting around 09:08-09:19 Amsterdam; later `0 3 * * *` UTC runs still started after 08:00 Amsterdam on multiple days. Cron time alone is not reliable. | Schedule early (`0 2 * * *` UTC), wait until feeding window close if the runner starts early, and record scheduler heartbeat in GitHub summaries + `feeding_log.csv`. Keep Telegram concise. |
 | 33 | Annotated video never appears in Drive from CI | SA has zero storage quota; `files().create()` 403 | Dropped Drive uploads from CI; Colab archives |
 | 32 | Telegram sent unmerged short clip instead of merged | Phase 1/2 re-scanned `SOURCE_DIR`, overwriting stitch output | Guarded rescan behind `if not RUNNING_IN_CI:` |
 | 31 | FeedingTracker reports "0 kibble / no activity" despite timeline showing kibble | `_find_clear_kibble_count` searches no-cat frames; model only detects kibble when cats present | Added phase-entry/exit fallback methods |

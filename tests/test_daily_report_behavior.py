@@ -116,6 +116,8 @@ def test_kibble_snapshot_waits_for_stable_clear_count():
 
     tracker.process_frame(2, [bowl, kibble], "2026-05-02 06:20:02", frame)
     tracker.process_frame(3, [bowl, kibble], "2026-05-02 06:20:03", frame)
+    assert "kibble_dispensed_ep0" not in tracker.snapshots
+    tracker.process_frame(11, [bowl, kibble], "2026-05-02 06:20:11", frame)
 
     assert "kibble_dispensed_ep0" in tracker.snapshots
 
@@ -142,6 +144,36 @@ def test_kibble_snapshot_prefers_stable_pre_cat_frame_when_bowl_stays_covered():
 
     snap = tracker.snapshots["kibble_dispensed_ep0"]
     assert int(snap[0, 0, 0]) == 7
+
+
+def test_kibble_snapshot_waits_through_post_hand_pre_arrival_window():
+    ns = _load_report_globals()
+    tracker = ns["FeedingTracker"](fps=2.0)
+    early_frame = np.full((10, 10, 3), 1, dtype=np.uint8)
+    better_frame = np.full((10, 10, 3), 8, dtype=np.uint8)
+    cat_frame = np.full((10, 10, 3), 3, dtype=np.uint8)
+    bowl = {"class_name": "Bowl", "conf": 0.9, "x1": 0, "y1": 0, "x2": 10, "y2": 10}
+    dan = {"class_name": "Dan", "conf": 0.9, "x1": 0, "y1": 0, "x2": 10, "y2": 10}
+    hand = {"class_name": "Dan_hand", "conf": 0.9, "x1": 0, "y1": 0, "x2": 10, "y2": 10}
+    early_kibble = {"class_name": "Kibble", "conf": 0.9, "x1": 1, "y1": 1, "x2": 2, "y2": 2}
+    better_kibble = [
+        {"class_name": "Kibble", "conf": 0.9, "x1": i, "y1": 1, "x2": i + 1, "y2": 2}
+        for i in range(5)
+    ]
+
+    tracker.process_frame(0, [bowl, dan, hand], "2026-05-17 06:20:05", early_frame)
+    tracker.process_frame(1, [bowl, early_kibble], "2026-05-17 06:20:06", early_frame)
+    assert "kibble_dispensed_ep0" not in tracker.snapshots
+
+    tracker.process_frame(2, [bowl, *better_kibble], "2026-05-17 06:20:07", better_frame)
+    tracker.process_frame(3, [bowl, *better_kibble], "2026-05-17 06:20:08", better_frame)
+    tracker.process_frame(4, [bowl, *better_kibble], "2026-05-17 06:20:09", better_frame)
+    assert "kibble_dispensed_ep0" not in tracker.snapshots
+
+    tracker.process_frame(5, [bowl, dan, early_kibble], "2026-05-17 06:20:19", cat_frame)
+
+    snap = tracker.snapshots["kibble_dispensed_ep0"]
+    assert int(snap[0, 0, 0]) == 8
 
 
 def test_phase2_suppresses_later_empty_food_reports():

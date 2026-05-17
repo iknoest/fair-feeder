@@ -40,7 +40,7 @@ graph LR
 1. **Pi 5** runs 24/7 — detects motion, records clips, uploads to Google Drive
 2. **GitHub Actions** picks up clips every morning, runs YOLOv11 inference
 3. **FeedingTracker** analyzes detections: who was at the bowl, how long, how many kibble eaten
-4. **Telegram bot** sends the report with summary, timeline chart, snapshots, and annotated video
+4. **Telegram bot** sends the report with summary, timeline chart, inspectable feeding snapshots, and annotated video
 
 ## Detection Classes
 
@@ -67,7 +67,7 @@ Hand: none
 Flags: 6 frames -> Roboflow (6 sent); top: blip-kibble 3, low-conf-sanbo 2
 ```
 
-The first line appears in the Telegram push notification so you can see the verdict without opening the message: `😸 Dan finished breakfast`, `😿 Give Dan ~N kibble`, or `🍽️? Feeding machine not working?`. Timestamps in the report use seconds because a bowl can be emptied within a minute. Scheduler delay is recorded in GitHub summaries/logs, not the Telegram message.
+The first line appears in the Telegram push notification so you can see the verdict without opening the message: `😸 Dan finished breakfast`, `😿 Give Dan ~N kibble`, or `🍽️? Feeding machine not working?`. Timestamps in the report use seconds because a bowl can be emptied within a minute. Scheduler delay is recorded in GitHub summaries/logs, not the Telegram message. Kibble snapshots use `kibble_dispensed_epN`, not the first noisy `kibble_start` detection.
 
 <!-- PHOTO: timeline chart showing kibble count, cat presence over time -->
 

@@ -176,6 +176,18 @@ def test_kibble_snapshot_waits_through_post_hand_pre_arrival_window():
     assert int(snap[0, 0, 0]) == 8
 
 
+def test_tracker_does_not_emit_early_kibble_start_snapshot():
+    ns = _load_report_globals()
+    tracker = ns["FeedingTracker"](fps=2.0)
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    bowl = {"class_name": "Bowl", "conf": 0.9, "x1": 0, "y1": 0, "x2": 10, "y2": 10}
+    kibble = {"class_name": "Kibble", "conf": 0.9, "x1": 1, "y1": 1, "x2": 2, "y2": 2}
+
+    tracker.process_frame(0, [bowl, kibble], "2026-05-17 06:20:06", frame)
+
+    assert "kibble_start" not in tracker.snapshots
+
+
 def test_phase2_suppresses_later_empty_food_reports():
     nb = json.loads((ROOT / "morning_report.ipynb").read_text(encoding="utf-8"))
     source = "".join(nb["cells"][12]["source"]).replace("\r", "")

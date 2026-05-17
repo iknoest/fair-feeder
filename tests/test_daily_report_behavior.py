@@ -43,7 +43,7 @@ def _load_report_globals():
 
 def test_telegram_summary_uses_action_emoji_and_omits_schedule_and_why(monkeypatch):
     ns = _load_report_globals()
-    monkeypatch.setenv("GHA_SCHEDULE_CRON", "0 3 * * *")
+    monkeypatch.setenv("GHA_SCHEDULE_CRON", "0 2 * * *")
     monkeypatch.setenv("GHA_JOB_STARTED_AT_UTC", "2026-05-02T05:27:04Z")
     monkeypatch.setenv("GHA_SCHEDULE_DELAY_MIN", "147")
 
@@ -118,6 +118,30 @@ def test_kibble_snapshot_waits_for_stable_clear_count():
     tracker.process_frame(3, [bowl, kibble], "2026-05-02 06:20:03", frame)
 
     assert "kibble_dispensed_ep0" in tracker.snapshots
+
+
+def test_kibble_snapshot_prefers_stable_pre_cat_frame_when_bowl_stays_covered():
+    ns = _load_report_globals()
+    tracker = ns["FeedingTracker"](fps=2.0)
+    clean_frame = np.full((10, 10, 3), 7, dtype=np.uint8)
+    covered_frame = np.full((10, 10, 3), 2, dtype=np.uint8)
+    bowl = {"class_name": "Bowl", "conf": 0.9, "x1": 0, "y1": 0, "x2": 10, "y2": 10}
+    dan = {"class_name": "Dan", "conf": 0.9, "x1": 0, "y1": 0, "x2": 10, "y2": 10}
+    hand = {"class_name": "Dan_hand", "conf": 0.9, "x1": 0, "y1": 0, "x2": 10, "y2": 10}
+    clean_kibble = [
+        {"class_name": "Kibble", "conf": 0.9, "x1": i, "y1": 1, "x2": i + 1, "y2": 2}
+        for i in range(5)
+    ]
+    covered_kibble = {"class_name": "Kibble", "conf": 0.9, "x1": 1, "y1": 1, "x2": 2, "y2": 2}
+
+    tracker.process_frame(0, [bowl, *clean_kibble], "2026-05-02 06:19:57", clean_frame)
+    tracker.process_frame(1, [bowl, *clean_kibble], "2026-05-02 06:19:58", clean_frame)
+    tracker.process_frame(2, [bowl, *clean_kibble], "2026-05-02 06:19:59", clean_frame)
+    tracker.process_frame(3, [bowl, dan, hand], "2026-05-02 06:20:00", covered_frame)
+    tracker.process_frame(4, [bowl, dan, covered_kibble], "2026-05-02 06:20:01", covered_frame)
+
+    snap = tracker.snapshots["kibble_dispensed_ep0"]
+    assert int(snap[0, 0, 0]) == 7
 
 
 def test_phase2_suppresses_later_empty_food_reports():

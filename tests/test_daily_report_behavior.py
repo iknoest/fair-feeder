@@ -188,6 +188,28 @@ def test_tracker_does_not_emit_early_kibble_start_snapshot():
     assert "kibble_start" not in tracker.snapshots
 
 
+def test_kibble_snapshot_emits_without_confirmed_dan_hand_episode():
+    ns = _load_report_globals()
+    tracker = ns["FeedingTracker"](fps=2.0)
+    clean_frame = np.full((10, 10, 3), 9, dtype=np.uint8)
+    cat_frame = np.full((10, 10, 3), 4, dtype=np.uint8)
+    bowl = {"class_name": "Bowl", "conf": 0.9, "x1": 0, "y1": 0, "x2": 10, "y2": 10}
+    dan = {"class_name": "Dan", "conf": 0.9, "x1": 0, "y1": 0, "x2": 10, "y2": 10}
+    kibble = [
+        {"class_name": "Kibble", "conf": 0.9, "x1": i, "y1": 1, "x2": i + 1, "y2": 2}
+        for i in range(5)
+    ]
+
+    tracker.process_frame(0, [bowl, *kibble], "2026-05-17 06:20:07", clean_frame)
+    tracker.process_frame(1, [bowl, *kibble], "2026-05-17 06:20:08", clean_frame)
+    tracker.process_frame(2, [bowl, *kibble], "2026-05-17 06:20:09", clean_frame)
+    tracker.process_frame(3, [bowl, dan, kibble[0]], "2026-05-17 06:20:19", cat_frame)
+    tracker.summarize()
+
+    snap = tracker.snapshots["kibble_dispensed"]
+    assert int(snap[0, 0, 0]) == 9
+
+
 def test_phase2_suppresses_later_empty_food_reports():
     nb = json.loads((ROOT / "morning_report.ipynb").read_text(encoding="utf-8"))
     source = "".join(nb["cells"][12]["source"]).replace("\r", "")

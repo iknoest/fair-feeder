@@ -11,6 +11,7 @@ __pycache__/
 check_output.txt
 recordings_temp/
 artifacts/
+backup/
 
 # One-shot scripts (never commit — see docs/guides/git-push-guideline.md)
 fix_*.py

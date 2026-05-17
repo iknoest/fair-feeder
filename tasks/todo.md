@@ -31,7 +31,7 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 ### B3 — Morning Kibble Report (GitHub Actions) ✅
 - [x] Service account auth + Drive sharing
 - [x] CI-compatible notebook (`RUNNING_IN_CI` guard, `tqdm.auto`)
-- [x] Cron schedule running with early UTC compensation (`0 3 * * *`) plus wait-until-06:35 Amsterdam guard
+- [x] Cron schedule running with early UTC compensation (`0 2 * * *`) plus wait-until-06:35 Amsterdam guard
 - [x] Scheduler heartbeat added to GitHub Actions summary; Telegram delay text removed
 - [x] `feeding_log.csv` records `schedule_time` and `start_time` in Amsterdam time, with GitHub run-history backfill
 - [x] Merged clip detection and stitching working in Phase 1

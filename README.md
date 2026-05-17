@@ -121,7 +121,7 @@ After changing `motion_recorder.py`, deploy it to `/home/pi5/Feeder/fair-feeder/
 
 ## Morning Report Scheduling
 
-The workflow cron is intentionally early: `0 3 * * *` UTC. GitHub Actions scheduled jobs have shown multi-hour trigger delays, so the job compensates by scheduling early and then waiting until `06:35 Europe/Amsterdam` if GitHub happens to start promptly.
+The workflow cron is intentionally early: `0 2 * * *` UTC. GitHub Actions scheduled jobs have shown multi-hour trigger delays, so the job compensates by scheduling early and then waiting until `06:35 Europe/Amsterdam` if GitHub happens to start promptly.
 
 Telegram reports do not include scheduler delay. The GitHub Actions run summary records scheduled time, actual start time, scheduler delay, and runtime; `feeding_log.csv` records Amsterdam `schedule_time` and `start_time` for later analysis.
 

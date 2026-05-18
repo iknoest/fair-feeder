@@ -549,7 +549,7 @@ class BowlPositionMonitor:
         ok = status['ok']
         reason = status['reason']
         if ok:
-            if self._alert_active:
+            if self._alert_active and CAMERA_TYPE == 'rtsp':
                 send_telegram_alert('✅🥣 Bowl position recovered. Camera sees the bowl in frame again.')
             self._bad_since = None
             self._alert_active = False
@@ -558,6 +558,10 @@ class BowlPositionMonitor:
         if self._bad_since is None:
             self._bad_since = now
             log.warning(f'Bowl position bad: {reason}')
+
+        # Do not send Telegram alerts for non-RTSP cameras (Logitech)
+        if CAMERA_TYPE != 'rtsp':
+            return
 
         bad_seconds = now - self._bad_since
         if bad_seconds < BOWL_BAD_SECONDS:
@@ -1149,13 +1153,11 @@ if __name__ == "__main__":
         yolo_model = YOLO('yolov8n.pt')
         names = getattr(yolo_model, 'names', {})
         has_bowl = any(str(name).lower() == 'bowl' for name in names.values())
-        log.info(f'YOLOv8n detector loaded (cat filter, bowl monitor: {"on" if (has_bowl and CAMERA_TYPE == "rtsp") else "off"})')
-        if has_bowl and CAMERA_TYPE == 'rtsp':
+        log.info(f'YOLOv8n detector loaded (cat filter, bowl monitor: {"on" if has_bowl else "off"})')
+        if has_bowl:
             bowl_monitor_model = yolo_model
         else:
-            if CAMERA_TYPE != 'rtsp' and has_bowl:
-                log.info('Bowl position monitor disabled for non-RTSP camera')
-            bowl_monitor_model = None
+            log.warning('Bowl position monitor disabled: YOLOv8n class list has no bowl class')
     except ImportError as e:
         YOLO = None
         log.warning(f'ultralytics not found: {e}')

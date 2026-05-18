@@ -1,0 +1,32 @@
+[Unit]
+Description=USB Cat Monitor Motion Recorder (Logitech C925e)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi5
+
+# The working directory where the script lives
+WorkingDirectory=/home/pi5/Feeder/fair-feeder
+
+# Run the script using the dedicated Python virtual environment
+ExecStart=/home/pi5/Feeder/fair-feeder/.venv/bin/python motion_recorder.py
+
+# Auto-restart if the script crashes
+Restart=always
+RestartSec=10
+
+# Ensure logs don't get buffered
+Environment=PYTHONUNBUFFERED=1
+
+# Configuration for USB Camera
+Environment="CAMERA_TYPE=usb"
+Environment="USB_CAMERA_INDEX=0"
+Environment="RCLONE_DEST_PATH=14yBPCZvjrztIqxI5l-ckgZYkC7D0ZTdS"
+
+# Load other secrets (Telegram, etc.)
+EnvironmentFile=/home/pi5/Feeder/fair-feeder/.env
+
+[Install]
+WantedBy=multi-user.target

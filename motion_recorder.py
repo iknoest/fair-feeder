@@ -1149,11 +1149,13 @@ if __name__ == "__main__":
         yolo_model = YOLO('yolov8n.pt')
         names = getattr(yolo_model, 'names', {})
         has_bowl = any(str(name).lower() == 'bowl' for name in names.values())
-        log.info(f'YOLOv8n detector loaded (cat filter, bowl monitor: {"on" if has_bowl else "off"})')
-        if has_bowl:
+        log.info(f'YOLOv8n detector loaded (cat filter, bowl monitor: {"on" if (has_bowl and CAMERA_TYPE == "rtsp") else "off"})')
+        if has_bowl and CAMERA_TYPE == 'rtsp':
             bowl_monitor_model = yolo_model
         else:
-            log.warning('Bowl position monitor disabled: YOLOv8n class list has no bowl class')
+            if CAMERA_TYPE != 'rtsp' and has_bowl:
+                log.info('Bowl position monitor disabled for non-RTSP camera')
+            bowl_monitor_model = None
     except ImportError as e:
         YOLO = None
         log.warning(f'ultralytics not found: {e}')

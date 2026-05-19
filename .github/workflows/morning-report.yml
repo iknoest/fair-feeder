@@ -102,11 +102,18 @@ jobs:
             pytz \
             roboflow
 
+      - name: Set Folder ID
+        run: |
+          if [ "${{ matrix.camera }}" == "TAPO" ]; then
+            echo "GDRIVE_UPLOAD_FOLDER_ID=${{ secrets.GDRIVE_UPLOAD_FOLDER_ID }}" >> "$GITHUB_ENV"
+          else
+            echo "GDRIVE_UPLOAD_FOLDER_ID=${{ secrets.GDRIVE_LOGITECH_FOLDER_ID }}" >> "$GITHUB_ENV"
+          fi
+
       - name: Run analysis notebook
         env:
           GITHUB_ACTIONS: 'true'
           GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
-          GDRIVE_UPLOAD_FOLDER_ID: ${{ matrix.camera == 'TAPO' && secrets.GDRIVE_UPLOAD_FOLDER_ID || (matrix.camera == 'LOGITECH' && secrets.GDRIVE_LOGITECH_FOLDER_ID || '') }}
           GDRIVE_OUTPUT_FOLDER_ID: ${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}
           GDRIVE_MODEL_FILE_ID: ${{ secrets.GDRIVE_MODEL_FILE_ID }}
           TelegramBotToken: ${{ secrets.TELEGRAM_BOT_TOKEN }}

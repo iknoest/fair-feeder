@@ -54,9 +54,14 @@ jobs:
       - name: Wait until feeding window is complete
         run: |
           python - <<'PY'
+          import os
           from datetime import datetime, time
           from zoneinfo import ZoneInfo
           import time as sleep_time
+
+          if os.environ.get("DATE_OVERRIDE"):
+              print("Historical date override detected; skipping breakfast wait.")
+              exit(0)
 
           tz = ZoneInfo("Europe/Amsterdam")
           now = datetime.now(tz)
@@ -68,6 +73,8 @@ jobs:
           else:
               print(f"Scheduler started after feeding window close ({now:%H:%M:%S} Amsterdam); no wait needed.")
           PY
+        env:
+          DATE_OVERRIDE: ${{ github.event.inputs.date_override }}
       - name: Checkout repo
         uses: actions/checkout@v6
 

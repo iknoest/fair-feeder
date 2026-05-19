@@ -342,9 +342,32 @@ class RecordingController:
         self._clips_lock = threading.Lock()  # add this line
         self._last_motion_ts = 0
         self.last_cat_time = None
+        self._live_request_sender = None
+        self._live_frames = []
+        self._live_start_time = 0
+
+    def request_live_clip(self, sender_id):
+        """Signals the controller to capture a short live clip."""
+        self._live_request_sender = sender_id
+        self._live_frames = []
+        self._live_start_time = time.time()
 
     def tick(self):
         now = time.time()
+
+        # Handle Live Clip Request (independent of motion recording)
+        if self._live_request_sender:
+            frame = self.reader.get_latest_frame()
+            if frame is not None:
+                self._live_frames.append(frame)
+            
+            # Capture for 5 seconds
+            if now - self._live_start_time >= 5:
+                sender = self._live_request_sender
+                frames = list(self._live_frames)
+                self._live_request_sender = None # Clear request
+                self._live_frames = []
+                threading.Thread(target=self._process_and_send_live, args=(frames, sender), daemon=True).start()
 
         # Track the latest motion event time (from ONVIF listener)
         if self.listener.last_motion_time:
@@ -379,6 +402,60 @@ class RecordingController:
             elif seconds_since_motion >= COOLDOWN_SECONDS:
                 print(f'   ⏸️  No motion for {COOLDOWN_SECONDS}s — stopping')
                 self._stop_recording()
+
+    def _process_and_send_live(self, frames, sender_id):
+        if not frames:
+            return
+        
+        try:
+            temp_name = f"live_{CAMERA_TYPE}_{int(time.time())}.mp4"
+            temp_path = LOCAL_TEMP_DIR / temp_name
+            
+            # Use reported FPS
+            fps = getattr(self.reader, 'stream_fps', VIDEO_FPS)
+            writer = cv2.VideoWriter(
+                str(temp_path),
+                cv2.VideoWriter_fourcc(*'mp4v'), fps,
+                (self.reader.frame_width, self.reader.frame_height),
+            )
+            for f in frames:
+                writer.write(f)
+            writer.release()
+
+            # Remux to fix FPS/Playback
+            corrected = str(temp_path).replace('.mp4', '_fixed.mp4')
+            actual_fps = len(frames) / 5.0
+            pts_factor = fps / actual_fps if actual_fps > 0 else 1.0
+            
+            import subprocess
+            subprocess.run(
+                ["ffmpeg", "-i", str(temp_path),
+                 "-vf", f"setpts={pts_factor:.6f}*PTS",
+                 "-r", str(fps), "-c:v", "libx264",
+                 "-preset", "fast", "-y", corrected],
+                capture_output=True
+            )
+            
+            if os.path.exists(corrected):
+                final_path = corrected
+            else:
+                final_path = str(temp_path)
+
+            # Send to Telegram
+            cam_label = "LOGITECH 🎥" if CAMERA_TYPE == "usb" else "TAPO 🏠"
+            url = f"https://api.telegram.org/bot{os.getenv('TelegramBotToken')}/sendVideo"
+            with open(final_path, 'rb') as f:
+                requests.post(url, data={
+                    'chat_id': sender_id, 
+                    'caption': f'📺 Live Stream ({cam_label})'
+                }, files={'video': f}, timeout=60)
+            
+            # Cleanup
+            if os.path.exists(temp_path): os.unlink(temp_path)
+            if os.path.exists(corrected): os.unlink(corrected)
+            
+        except Exception as e:
+            print(f"⚠️ Live stream error: {e}")
 
     def _check_for_cat(self, frame):
         """Run YOLO cat detection on the frame."""
@@ -905,15 +982,22 @@ class TelegramCommandListener:
 
     def _handle_command(self, cmd, sender_id=None):
         dispatch = {
-            '/status':   self._cmd_status,
-            '/lastclip': self._cmd_lastclip,
-            '/weight':   self._cmd_weight,
-            '/help':     self._cmd_help,
-            '/start':    self._cmd_help,
+            '/status':    self._cmd_status,
+            '/lastclip':  self._cmd_lastclip,
+            '/weight':    self._cmd_weight,
+            '/streaming': self._cmd_streaming,
+            '/help':      self._cmd_help,
+            '/start':     self._cmd_help,
         }
         handler = dispatch.get(cmd)
         if handler:
             handler(sender_id=sender_id)
+
+    def _cmd_streaming(self, sender_id=None):
+        target_id = sender_id if sender_id else self.chat_id
+        cam_label = "LOGITECH 🎥" if CAMERA_TYPE == "usb" else "TAPO 🏠"
+        self._send(f"⏳ Capturing 5s live look from {cam_label}...", sender_id=target_id)
+        self.controller.request_live_clip(target_id)
 
     def _cmd_status(self, sender_id=None):
         uptime_secs = int(time.time() - START_TIME)

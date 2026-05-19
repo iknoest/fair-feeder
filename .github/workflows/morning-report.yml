@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '23 0 * * *'    # UTC; avoid top-of-hour queue and start early enough for observed 4h+ GitHub delay
   workflow_dispatch:         # Manual trigger for testing
+    inputs:
+      date_override:
+        description: 'Date to process (YYYYMMDD)'
+        required: false
+        default: ''
 
 concurrency:
   group: morning-report
@@ -106,6 +111,7 @@ jobs:
         run: |
           papermill morning_report.ipynb /tmp/smoketest_output.ipynb \
             -p CAMERA_NAME "$CAMERA_NAME" \
+            -p DATE_OVERRIDE "${{ github.event.inputs.date_override }}" \
             --no-progress-bar \
             --kernel python3
 

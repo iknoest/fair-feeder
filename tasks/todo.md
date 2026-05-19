@@ -25,6 +25,8 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 - [x] `/weight` inline menu with Log/History/Edit buttons; weight chart X-axis fixed (integer ticks + MM-DD labels)
 - [x] `/syncstatus` merged into `/status` — Drive file count appended inline
 - [x] Add 24/7 bowl-position alert using YOLOv8n COCO `bowl`
+- [x] Multi-camera support (Tapo C210 + Logitech C925e USB)
+- [x] `/streaming_logitech` command for USB camera
 - [x] **Test on Pi**: `/status` verified with bowl count/visibility state after Pi deployment
 - [ ] Verify `/lastclip`, `/weight`, `/help` from phone after latest Pi deployment
 

@@ -341,10 +341,29 @@ class RecordingController:
         self.clips_deleted = 0
         self._clips_lock = threading.Lock()  # add this line
         self._last_motion_ts = 0
-        self.last_cat_time = None
+        self.last_cat_time = self._find_last_cat_time()
         self._live_request_sender = None
         self._live_frames = []
         self._live_start_time = 0
+
+    def _find_last_cat_time(self):
+        """Scans the output directory for the most recent cat clip timestamp."""
+        try:
+            # Filenames look like: motion_20260518_213615_23s.mp4
+            clips = list(DRIVE_OUTPUT_DIR.glob('motion_*.mp4'))
+            if not clips:
+                return None
+            
+            # Sort by filename which contains timestamp
+            latest = sorted(clips)[-1].name
+            # Extract 20260518_213615
+            parts = latest.split('_')
+            if len(parts) >= 3:
+                ts_str = f"{parts[1]}_{parts[2]}"
+                return datetime.strptime(ts_str, '%Y%m%d_%H%M%S')
+        except Exception as e:
+            print(f"⚠️ Error finding last cat time: {e}")
+        return None
 
     def request_live_clip(self, sender_id):
         """Signals the controller to capture a short live clip."""
@@ -991,6 +1010,10 @@ class TelegramCommandListener:
         }
         handler = dispatch.get(cmd)
         if handler:
+            # Prevent double messages for global commands (only Tapo responds)
+            if cmd in ('/help', '/start', '/weight') and CAMERA_TYPE != 'rtsp':
+                return
+            
             # If it's a logitech streaming request, only respond if we are the USB camera
             if cmd == '/streaming_logitech' and CAMERA_TYPE != 'usb':
                 return
@@ -1000,6 +1023,17 @@ class TelegramCommandListener:
         target_id = sender_id if sender_id else self.chat_id
         self._send(f"⏳ Capturing 5s live look from LOGITECH 🎥...", sender_id=target_id)
         self.controller.request_live_clip(target_id)
+
+    def _cmd_help(self, sender_id=None):
+        self._send(
+            '🐾 Fair Feeder Commands\n'
+            '/status — View uptime, clips, and last cat time (both cameras)\n'
+            '/lastclip — Send most recent cat video from both cameras\n'
+            '/streaming_logitech — See a 5s live look from Logitech 🎥\n'
+            '/weight — Log, view history, or edit cat weights\n'
+            '/help — This message',
+            sender_id=sender_id
+        )
 
     def _cmd_status(self, sender_id=None):
         uptime_secs = int(time.time() - START_TIME)

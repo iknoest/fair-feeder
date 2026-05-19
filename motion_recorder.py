@@ -982,21 +982,23 @@ class TelegramCommandListener:
 
     def _handle_command(self, cmd, sender_id=None):
         dispatch = {
-            '/status':    self._cmd_status,
-            '/lastclip':  self._cmd_lastclip,
-            '/weight':    self._cmd_weight,
-            '/streaming': self._cmd_streaming,
-            '/help':      self._cmd_help,
-            '/start':     self._cmd_help,
+            '/status':             self._cmd_status,
+            '/lastclip':           self._cmd_lastclip,
+            '/weight':             self._cmd_weight,
+            '/streaming_logitech': self._cmd_streaming,
+            '/help':               self._cmd_help,
+            '/start':              self._cmd_help,
         }
         handler = dispatch.get(cmd)
         if handler:
+            # If it's a logitech streaming request, only respond if we are the USB camera
+            if cmd == '/streaming_logitech' and CAMERA_TYPE != 'usb':
+                return
             handler(sender_id=sender_id)
 
     def _cmd_streaming(self, sender_id=None):
         target_id = sender_id if sender_id else self.chat_id
-        cam_label = "LOGITECH 🎥" if CAMERA_TYPE == "usb" else "TAPO 🏠"
-        self._send(f"⏳ Capturing 5s live look from {cam_label}...", sender_id=target_id)
+        self._send(f"⏳ Capturing 5s live look from LOGITECH 🎥...", sender_id=target_id)
         self.controller.request_live_clip(target_id)
 
     def _cmd_status(self, sender_id=None):

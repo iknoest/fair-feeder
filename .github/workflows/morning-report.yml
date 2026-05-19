@@ -2,7 +2,7 @@ name: Fair Feeder Morning Report
 
 on:
   schedule:
-    - cron: '0 2 * * *'     # GitHub cron is UTC; intentionally early to compensate observed 3h+ schedule delay
+    - cron: '23 0 * * *'    # UTC; avoid top-of-hour queue and start early enough for observed 4h+ GitHub delay
   workflow_dispatch:         # Manual trigger for testing
 
 concurrency:
@@ -12,7 +12,7 @@ concurrency:
 jobs:
   morning-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
     strategy:
       max-parallel: 1
       matrix:
@@ -22,6 +22,7 @@ jobs:
       - name: Record scheduler heartbeat
         env:
           SCHEDULED_CRON: ${{ github.event.schedule }}
+          CAMERA_NAME: ${{ matrix.camera }}
         run: |
           python - <<'PY' >> "$GITHUB_ENV"
           import os
@@ -29,6 +30,7 @@ jobs:
 
           now = datetime.now(timezone.utc)
           cron = os.environ.get("SCHEDULED_CRON", "")
+          camera = os.environ.get("CAMERA_NAME", "")
           scheduled = ""
           delay = ""
           if cron:
@@ -41,6 +43,7 @@ jobs:
           print(f"GHA_SCHEDULE_CRON={cron}")
           print(f"GHA_SCHEDULED_AT_UTC={scheduled}")
           print(f"GHA_SCHEDULE_DELAY_MIN={delay}")
+          print(f"CAMERA_NAME={camera}")
           PY
 
       - name: Wait until feeding window is complete
@@ -99,10 +102,11 @@ jobs:
           ROBOFLOW_API_KEY: ${{ secrets.ROBOFLOW_API_KEY }}
           ROBOFLOW_WORKSPACE: ${{ secrets.ROBOFLOW_WORKSPACE }}
           GITHUB_TOKEN: ${{ github.token }}
+          CAMERA_NAME: ${{ matrix.camera }}
         run: |
           papermill morning_report.ipynb /tmp/smoketest_output.ipynb \
+            -p CAMERA_NAME "$CAMERA_NAME" \
             --no-progress-bar \
-            -p CAMERA_NAME ${{ matrix.camera }} \
             --kernel python3
 
       - name: Upload output notebook (only when analysis fails)
@@ -131,6 +135,7 @@ jobs:
           runtime = round((now - started).total_seconds() / 60) if started else "unknown"
 
           print("## Scheduler heartbeat")
+          print(f"- Camera: `{os.environ.get('CAMERA_NAME')}`")
           print(f"- Cron: `{os.environ.get('GHA_SCHEDULE_CRON') or 'manual'}`")
           print(f"- Scheduled UTC: `{os.environ.get('GHA_SCHEDULED_AT_UTC') or 'manual'}`")
           print(f"- Job started UTC: `{os.environ.get('GHA_JOB_STARTED_AT_UTC') or 'unknown'}`")

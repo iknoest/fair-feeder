@@ -119,7 +119,6 @@ jobs:
           papermill morning_report.ipynb /tmp/smoketest_output.ipynb \
             -p CAMERA_NAME "$CAMERA_NAME" \
             -p DATE_OVERRIDE "${{ github.event.inputs.date_override }}" \
-            --no-progress-bar \
             --kernel python3
 
       - name: Upload output notebook (only when analysis fails)

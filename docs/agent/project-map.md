@@ -18,10 +18,10 @@ In scope:
 - Phase-based eating attribution by bowl-overlap time.
 - Snapshot capture for Sanbo arrival, Dan_hand, and kibble-dispensed moments.
 - Boxes-only annotated video output.
+- Multi-camera support (Tapo C210 + Logitech C925e USB).
 
 Out of scope:
 - Real-time live alerting; the report pipeline batch-processes recorded clips.
-- Multi-camera support.
 - Web dashboard or feeding scheduler.
 
 ## Root Files With Hard Dependencies
@@ -48,9 +48,9 @@ its path is hardcoded in a config, workflow, or service, keep it at root.
 
 - `notebooks/` - interactive training and review notebooks.
 - `scripts/` - one-off dataset, training, and debugging tools.
-- `deploy/` - Pi deployment files such as `cat-monitor.service`.
+- `deploy/` - Pi deployment files such as `cat-monitor.service` and `usb-monitor.service`.
 - `tests/` - unit and regression tests.
-- `docs/` - product, runbook, model, and agent documentation.
+- `docs/` - product, runbook, model, and agent documentation (includes `USB_CAMERA_GUIDE.md`).
 - `tasks/` - project tracking; `todo.md` and `lessons.md`.
 
 ## Core Dependencies

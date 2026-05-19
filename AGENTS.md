@@ -1,9 +1,9 @@
 # AGENTS.md - Fair Feeder
 
 Fair Feeder is a computer-vision cat feeding monitor for Dan and Sanbo. It uses a
-Tapo C210 IR camera, YOLOv11, Tapo timestamp OCR, Google Drive, GitHub Actions,
-and Telegram reports to determine whether Dan ate enough and whether Sanbo stole
-food.
+Tapo C210 IR camera, a Logitech C925e USB camera, YOLOv11, Tapo timestamp OCR,
+Google Drive, GitHub Actions, and Telegram reports to determine whether Dan ate
+enough and whether Sanbo stole food.
 
 This file is the compact bootstrap. Load the detailed docs below only when the
 task needs them.
@@ -47,6 +47,8 @@ task needs them.
 
 - Use actual class names: Dan, Sanbo, Dan_hand, Bowl, Kibble.
 - Never hardcode secrets, Chat IDs, folder IDs, or environment-specific tokens.
+- Maintain independent systemd services and sync folders for multi-camera setups
+  to prevent resource contention.
 - Files imported by `morning_report.ipynb` or `motion_recorder.py`, or hardcoded
   in workflows/services, stay at repository root.
 - YOLO calls preserve 16:9 with `rect=True`; `imgsz` is a single int.

@@ -7,12 +7,15 @@ reporting, and Colab/Kaggle interactive analysis.
 
 Production stack:
 
-`motion_recorder.py` on systemd -> MOG2 motion detection -> YOLOv8n cat filter ->
-rclone copy to Drive -> `sync_cleanup.sh` deletes local videos older than 3 days.
+- **Tapo C210 (RTSP)**: `motion_recorder.py` on systemd (`cat-monitor.service`) -> MOG2 motion detection -> YOLOv8n cat filter -> rclone copy to Drive.
+- **Logitech C925e (USB)**: `usb-monitor.service` runs in parallel for USB recording -> rclone copy to separate Drive folder.
+
+`sync_cleanup.sh` deletes local videos older than 3 days for both cameras.
 
 Telegram commands:
 - `/status`
 - `/lastclip`
+- `/streaming_logitech`
 - `/weight`
 - `/help`
 
@@ -26,15 +29,14 @@ Weight tracking:
 
 ## Pi Deployment Expectation
 
-When changing `motion_recorder.py` or other Pi-runtime files, deploy and restart
-the Pi service unless the user explicitly says not to.
+When changing Pi-runtime files, deploy and restart the relevant service (`cat-monitor.service` or `usb-monitor.service`) unless the user explicitly says not to.
 
 Standard flow:
 1. SCP changed files to `/home/pi5/Feeder/fair-feeder/`.
 2. Run Pi-side compile check, usually:
    `cd /home/pi5/Feeder/fair-feeder && ./.venv/bin/python -m py_compile motion_recorder.py`
-3. Restart `cat-monitor.service`.
-4. Verify `systemctl is-active cat-monitor.service`.
+3. Restart the service.
+4. Verify `systemctl is-active`.
 5. Check recent logs/status for immediate failures.
 
 ## Pi Runtime Constraints

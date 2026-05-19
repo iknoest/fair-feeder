@@ -2,7 +2,7 @@ name: Fair Feeder Morning Report
 
 on:
   schedule:
-    - cron: '0 2 * * *'     # GitHub cron is UTC; intentionally early to compensate observed 3h+ schedule delay
+    - cron: '23 0 * * *'    # UTC; avoid top-of-hour queue and start early enough for observed 4h+ GitHub delay
   workflow_dispatch:         # Manual trigger for testing
 
 concurrency:
@@ -12,7 +12,7 @@ concurrency:
 jobs:
   morning-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
 
     steps:
       - name: Record scheduler heartbeat

@@ -20,8 +20,10 @@ Use this file as a short bootstrap. Load the referenced docs only when relevant.
 ## Environment
 
 - GitHub Actions runs `morning_report.ipynb` through papermill.
-- Current cron is `0 2 * * *` UTC, then wait until 06:35 Europe/Amsterdam if the
-  runner starts early.
+- Current cron is `23 0 * * *` UTC, then wait until 06:35 Europe/Amsterdam if
+  the runner starts early.
+- The schedule is deliberately early and not at minute 0 because GitHub has
+  delayed scheduled runs by about 4h10m.
 - Secrets come from Infisical or GitHub Actions env. Never hardcode values.
 - Common secret/env names: `INFISICAL_ID`, `INFISICAL_SECRET`,
   `INFISICAL_PROJECT_ID`, `TelegramBotToken`, `TelegramChatId`,
@@ -76,4 +78,3 @@ Use this file as a short bootstrap. Load the referenced docs only when relevant.
 - If Dan_hand is missing or filtered out, still emit generic `kibble_dispensed`
   from the best clean pre-cat frame.
 - Do not send `kibble_start`.
-

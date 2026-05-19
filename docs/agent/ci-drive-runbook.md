@@ -5,12 +5,17 @@ CI notebook failures.
 
 ## Current Schedule Behavior
 
-- Workflow cron is `0 2 * * *` UTC.
-- GitHub scheduled workflows can start hours after cron.
+- Workflow cron is `23 0 * * *` UTC.
+- GitHub scheduled workflows can start hours after cron; 2026-05-18 and
+  2026-05-19 were delayed about 4h10m.
+- Avoid minute `0`; GitHub documents high scheduled-workflow load at the start
+  of every hour.
 - The workflow waits until 06:35 Europe/Amsterdam if it starts early.
 - `schedule_time` and `start_time` are recorded in Europe/Amsterdam local time.
 - Scheduler heartbeat belongs in GitHub summaries and `feeding_log.csv`, not in
   Telegram.
+- Job timeout is 360 minutes so an on-time early run can wait until 06:35 and
+  still complete analysis.
 
 ## CI Preflight Checklist
 
@@ -71,4 +76,3 @@ Notes:
 - Naive UTC date filtering missing morning captures.
 - Phase 1/2 rescanning `SOURCE_DIR` and overwriting stitched output.
 - Notebook JSON edited on Windows with stray `\r`, causing IPython lexer errors.
-

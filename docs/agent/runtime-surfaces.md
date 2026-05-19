@@ -53,8 +53,11 @@ Standard flow:
 GitHub Actions runs `morning_report.ipynb` via papermill.
 
 Current schedule:
-- Cron: `0 2 * * *` UTC.
-- Reason: GitHub scheduled workflows can start hours late.
+- Cron: `23 0 * * *` UTC.
+- Reason: GitHub scheduled workflows can start hours late; observed delays were
+  about 4h10m on 2026-05-18 and 2026-05-19.
+- The minute is intentionally not `0` because GitHub documents high load at the
+  start of every hour.
 - The workflow waits until 06:35 Europe/Amsterdam if it starts early.
 - Scheduler heartbeat belongs in GitHub summaries and `feeding_log.csv`, not in
   Telegram.

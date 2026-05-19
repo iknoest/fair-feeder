@@ -58,6 +58,8 @@ task needs them.
 - Stitch clips only when the gap is 10 seconds or less.
 - Scheduler heartbeat belongs in GitHub summaries and `feeding_log.csv`, not in
   Telegram.
+- Morning-report cron is intentionally early and not at minute 0; GitHub has
+  delayed scheduled workflows by about 4h10m.
 - `feeding_log.csv` is updated through Drive `update()`, never CI `create()`.
 - Large binary archives are not uploaded from CI; Colab handles archival.
 

@@ -40,7 +40,7 @@ This file preserves project-specific lessons that are too large for root context
 | Issue | Root cause | Fix |
 |-------|------------|-----|
 | `feeding_log.csv` duplicates or wrong counts | Only last event was read; no same-day dedup. | Aggregate all `video_results`; remove today's row before append. |
-| Scheduled action still starts after 8 AM | GitHub cron start time is not reliable. | Schedule early at `0 2 * * *` UTC and wait until 06:35 Amsterdam if needed. |
+| Scheduled action still starts after 8 AM | GitHub cron start time is not reliable; 2026-05-18 and 2026-05-19 were delayed about 4h10m. | Schedule early at `23 0 * * *` UTC, avoid minute 0, raise timeout to 360, and wait until 06:35 Amsterdam if needed. |
 | Annotated video missing from Drive in CI | Service account `create()` hit zero quota. | Do not upload large binaries from CI; Colab archives. |
 | Telegram sent unmerged short clip | Phase 1/2 rescanned `SOURCE_DIR`. | Guard rescan behind `if not RUNNING_IN_CI:`. |
 | Report said 0 Kibble despite timeline Kibble | Clear-count logic only searched no-cat frames. | Add phase-entry/exit fallback methods. |

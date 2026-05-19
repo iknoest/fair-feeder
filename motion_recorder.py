@@ -332,9 +332,10 @@ class RecordingController:
     # YOLO confidence threshold (low because ground-level camera sees partial cats)
     YOLO_CONF = 0.10
 
-    def __init__(self, reader, listener, yolo_model=None):
+    def __init__(self, reader, listener, yolo_model=None, bot_token=None):
         self.reader, self.listener = reader, listener
         self.yolo_model = yolo_model
+        self.bot_token = bot_token
         self.is_recording = False
         self.writer = None
         self.clips_saved = 0
@@ -424,14 +425,18 @@ class RecordingController:
 
     def _process_and_send_live(self, frames, sender_id):
         if not frames:
+            log.warning("Live stream requested but no frames were captured.")
             return
         
+        log.info(f"🎞️ Processing {len(frames)} frames for live stream request...")
         try:
             temp_name = f"live_{CAMERA_TYPE}_{int(time.time())}.mp4"
             temp_path = LOCAL_TEMP_DIR / temp_name
             
             # Use reported FPS
             fps = getattr(self.reader, 'stream_fps', VIDEO_FPS)
+            log.info(f"   - Writing video at {fps} fps to {temp_path}")
+            
             writer = cv2.VideoWriter(
                 str(temp_path),
                 cv2.VideoWriter_fourcc(*'mp4v'), fps,
@@ -443,9 +448,11 @@ class RecordingController:
 
             # Remux to fix FPS/Playback
             corrected = str(temp_path).replace('.mp4', '_fixed.mp4')
-            actual_fps = len(frames) / 5.0
+            actual_duration = 5.0 # We know we waited 5 seconds
+            actual_fps = len(frames) / actual_duration
             pts_factor = fps / actual_fps if actual_fps > 0 else 1.0
             
+            log.info(f"   - Remuxing with ffmpeg (pts_factor={pts_factor:.4f})...")
             import subprocess
             subprocess.run(
                 ["ffmpeg", "-i", str(temp_path),
@@ -455,26 +462,35 @@ class RecordingController:
                 capture_output=True
             )
             
-            if os.path.exists(corrected):
-                final_path = corrected
-            else:
-                final_path = str(temp_path)
+            final_path = corrected if os.path.exists(corrected) else str(temp_path)
 
             # Send to Telegram
             cam_label = "LOGITECH 🎥" if CAMERA_TYPE == "usb" else "TAPO 🏠"
-            url = f"https://api.telegram.org/bot{os.getenv('TelegramBotToken')}/sendVideo"
+            log.info(f"   - Sending {os.path.getsize(final_path)/1024/1024:.1f} MB video to Telegram...")
+            if not self.bot_token:
+                log.error("   ❌ Cannot send live stream: bot_token is not initialized.")
+                return
+                
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendVideo"
             with open(final_path, 'rb') as f:
-                requests.post(url, data={
+                resp = requests.post(url, data={
                     'chat_id': sender_id, 
                     'caption': f'📺 Live Stream ({cam_label})'
                 }, files={'video': f}, timeout=60)
+            
+            if resp.status_code == 200:
+                log.info("   ✅ Live stream sent successfully!")
+            else:
+                log.error(f"   ❌ Telegram upload failed (HTTP {resp.status_code}): {resp.text}")
             
             # Cleanup
             if os.path.exists(temp_path): os.unlink(temp_path)
             if os.path.exists(corrected): os.unlink(corrected)
             
         except Exception as e:
-            print(f"⚠️ Live stream error: {e}")
+            log.error(f"⚠️ Live stream error: {e}")
+            import traceback
+            log.error(traceback.format_exc())
 
     def _check_for_cat(self, frame):
         """Run YOLO cat detection on the frame."""
@@ -1255,9 +1271,13 @@ if __name__ == "__main__":
     log.info('  Fair Feeder — Motion Recorder with Cat Detection')
     log.info('='*60)
     
-    # Initialize YOLO detectors
+    # Initialize detectors
     yolo_model = None
     bowl_monitor_model = None
+    
+    # Fetch Telegram credentials early so they can be passed to the controller
+    cmd_bot_token, cmd_chat_id = get_telegram_credentials()
+    
     try:
         from ultralytics import YOLO
         yolo_model = YOLO('yolov8n.pt')
@@ -1285,7 +1305,7 @@ if __name__ == "__main__":
     try:
         listener.start()
         reader.start()
-        controller = RecordingController(reader, listener, yolo_model=yolo_model)
+        controller = RecordingController(reader, listener, yolo_model=yolo_model, bot_token=cmd_bot_token)
         bowl_monitor = BowlPositionMonitor(reader, yolo_model=bowl_monitor_model)
         log.info('')
         log.info('\ud83d\ude80 Monitoring... Press Ctrl+C to stop.')

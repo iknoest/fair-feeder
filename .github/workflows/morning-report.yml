@@ -13,6 +13,10 @@ jobs:
   morning-report:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    strategy:
+      max-parallel: 1
+      matrix:
+        camera: [TAPO, LOGITECH]
 
     steps:
       - name: Record scheduler heartbeat
@@ -87,7 +91,7 @@ jobs:
         env:
           GITHUB_ACTIONS: 'true'
           GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
-          GDRIVE_UPLOAD_FOLDER_ID: ${{ secrets.GDRIVE_UPLOAD_FOLDER_ID }}
+          GDRIVE_UPLOAD_FOLDER_ID: ${{ matrix.camera == 'TAPO' && secrets.GDRIVE_UPLOAD_FOLDER_ID || secrets.GDRIVE_LOGITECH_FOLDER_ID }}
           GDRIVE_OUTPUT_FOLDER_ID: ${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}
           GDRIVE_MODEL_FILE_ID: ${{ secrets.GDRIVE_MODEL_FILE_ID }}
           TelegramBotToken: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -98,6 +102,7 @@ jobs:
         run: |
           papermill morning_report.ipynb /tmp/smoketest_output.ipynb \
             --no-progress-bar \
+            -p CAMERA_NAME ${{ matrix.camera }} \
             --kernel python3
 
       - name: Upload output notebook (only when analysis fails)
@@ -105,7 +110,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
-          name: smoketest-output-${{ github.run_id }}
+          name: smoketest-output-${{ matrix.camera }}-${{ github.run_id }}
           path: /tmp/smoketest_output.ipynb
           retention-days: 3
 

@@ -1219,16 +1219,6 @@ class TelegramCommandListener:
             'cmd': '/weight_edit', 'step': 'select', 'data': {'entries': recent}
         }
 
-    def _cmd_help(self, sender_id=None):
-        self._send(
-            'Fair Feeder Commands\n'
-            '/status — uptime, clips, disk, Drive sync\n'
-            '/lastclip — send most recent cat clip\n'
-            '/weight — log, view history, or edit weights\n'
-            '/help — this message',
-            sender_id=sender_id
-        )
-
     def _send(self, text, sender_id=None, reply_markup=None):
         target = sender_id if sender_id else self.chat_id
         url = f'https://api.telegram.org/bot{self.bot_token}/sendMessage'

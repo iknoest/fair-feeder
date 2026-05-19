@@ -5,8 +5,9 @@ CI notebook failures.
 
 ## Current Schedule Behavior
 
-- Workflow cron is `0 2 * * *` UTC.
-- GitHub scheduled workflows can start hours after cron.
+- Workflow cron is `23 0 * * *` UTC (2:23 AM AMS).
+- Shifted to a random minute (`23`) and earlier hour to avoid GitHub top-of-hour congestion and compensate for 4h+ delays.
+- The workflow uses a sequential matrix strategy (`[TAPO, LOGITECH]`) with `max-parallel: 1` to process both cameras while sharing `feeding_log.csv`.
 - The workflow waits until 06:35 Europe/Amsterdam if it starts early.
 - `schedule_time` and `start_time` are recorded in Europe/Amsterdam local time.
 - Scheduler heartbeat belongs in GitHub summaries and `feeding_log.csv`, not in
@@ -51,7 +52,7 @@ Required behavior:
 
 Current columns:
 
-`date, dan_kibble, sanbo_kibble, hand_feeding, compensation, video_count,
+`date, camera, dan_kibble, sanbo_kibble, hand_feeding, compensation, video_count,
 dan_first_arrival, sanbo_first_arrival, schedule_time, start_time,
 flagged_frames, roboflow_uploaded, roboflow_skipped, roboflow_failed,
 flag_top_tags, dan_weight, sanbo_weight`

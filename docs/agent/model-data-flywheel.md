@@ -36,7 +36,8 @@ Phase C:
 
 - Use pre-annotations with `is_prediction=True`; the reviewer corrects model
   output instead of labeling from scratch.
-- Use monthly batches named `flagged-YYYY-MM`.
+- Use monthly batches named `flagged-YYYY-MM` (Tapo) or
+  `flagged-logitech-YYYY-MM` (Logitech).
 - Use `roboflow_uploaded.txt` on Drive for deduplication.
 - Reference mAP50 and per-class AP50 when discussing model quality.
 

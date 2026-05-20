@@ -32,6 +32,8 @@ Use these rules for code and notebook edits.
   `2026-01-25`.
 - Tapo OCR replacement order matters: replace `\|:` with `:1` before replacing
   `\|` with `1`.
+- For cameras without on-screen timestamps (OSD), calculate frame time
+  mathematically: `start_time_from_filename + (frame_idx / fps)`.
 
 ## Secrets
 

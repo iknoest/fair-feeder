@@ -34,6 +34,8 @@ This file preserves project-specific lessons that are too large for root context
 | Tapo OCR replacement order | `\|:` must become `:1` before `\|` becomes `1`. |
 | No MixUp or vertical flip | Protects small Kibble detail and fixed camera geometry. |
 | `last_motion_time` stop timer | Tapo ONVIF motion events arrive in bursts with gaps. |
+| Independent sync folders per camera | Prevents rclone collision and simplifies cleanup/analytics. |
+| Automatic rclone Folder ID detection | Uses `--drive-root-folder-id` if `RCLONE_DEST_PATH` looks like an ID. |
 
 ## Recent Failure Patterns
 
@@ -51,4 +53,5 @@ This file preserves project-specific lessons that are too large for root context
 | Recording stopped during continuous motion | ONVIF events arrive in bursts with 1-3s gaps. | Use `last_motion_time`, stop after 5s quiet. |
 | Overlapping phases double-counted Kibble | Per-episode accounting. | Phase-based attribution and peak guard. |
 | Dan_hand false positives | No Dan body co-detection requirement. | Require Dan body in same frame. |
+| Help command showing old text | Duplicate method definition at end of file overrode updates. | Delete redundant methods when cleaning up or refactoring classes. |
 

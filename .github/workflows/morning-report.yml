@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '23 0 * * *'    # UTC; avoid top-of-hour queue and start early enough for observed 4h+ GitHub delay
   workflow_dispatch:         # Manual trigger for testing
+    inputs:
+      date_override:
+        description: 'Date to process (YYYYMMDD)'
+        required: false
+        default: ''
 
 concurrency:
   group: morning-report
@@ -13,11 +18,16 @@ jobs:
   morning-report:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      max-parallel: 1
+      matrix:
+        camera: [TAPO, LOGITECH]
 
     steps:
       - name: Record scheduler heartbeat
         env:
           SCHEDULED_CRON: ${{ github.event.schedule }}
+          CAMERA_NAME: ${{ matrix.camera }}
         run: |
           python - <<'PY' >> "$GITHUB_ENV"
           import os
@@ -25,6 +35,7 @@ jobs:
 
           now = datetime.now(timezone.utc)
           cron = os.environ.get("SCHEDULED_CRON", "")
+          camera = os.environ.get("CAMERA_NAME", "")
           scheduled = ""
           delay = ""
           if cron:
@@ -37,14 +48,20 @@ jobs:
           print(f"GHA_SCHEDULE_CRON={cron}")
           print(f"GHA_SCHEDULED_AT_UTC={scheduled}")
           print(f"GHA_SCHEDULE_DELAY_MIN={delay}")
+          print(f"CAMERA_NAME={camera}")
           PY
 
       - name: Wait until feeding window is complete
         run: |
           python - <<'PY'
+          import os
           from datetime import datetime, time
           from zoneinfo import ZoneInfo
           import time as sleep_time
+
+          if os.environ.get("DATE_OVERRIDE"):
+              print("Historical date override detected; skipping breakfast wait.")
+              exit(0)
 
           tz = ZoneInfo("Europe/Amsterdam")
           now = datetime.now(tz)
@@ -56,6 +73,8 @@ jobs:
           else:
               print(f"Scheduler started after feeding window close ({now:%H:%M:%S} Amsterdam); no wait needed.")
           PY
+        env:
+          DATE_OVERRIDE: ${{ github.event.inputs.date_override }}
       - name: Checkout repo
         uses: actions/checkout@v6
 
@@ -83,11 +102,18 @@ jobs:
             pytz \
             roboflow
 
+      - name: Set Folder ID
+        run: |
+          if [ "${{ matrix.camera }}" == "TAPO" ]; then
+            echo "GDRIVE_UPLOAD_FOLDER_ID=${{ secrets.GDRIVE_UPLOAD_FOLDER_ID }}" >> "$GITHUB_ENV"
+          else
+            echo "GDRIVE_UPLOAD_FOLDER_ID=${{ secrets.GDRIVE_LOGITECH_FOLDER_ID }}" >> "$GITHUB_ENV"
+          fi
+
       - name: Run analysis notebook
         env:
           GITHUB_ACTIONS: 'true'
           GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
-          GDRIVE_UPLOAD_FOLDER_ID: ${{ secrets.GDRIVE_UPLOAD_FOLDER_ID }}
           GDRIVE_OUTPUT_FOLDER_ID: ${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}
           GDRIVE_MODEL_FILE_ID: ${{ secrets.GDRIVE_MODEL_FILE_ID }}
           TelegramBotToken: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -95,9 +121,12 @@ jobs:
           ROBOFLOW_API_KEY: ${{ secrets.ROBOFLOW_API_KEY }}
           ROBOFLOW_WORKSPACE: ${{ secrets.ROBOFLOW_WORKSPACE }}
           GITHUB_TOKEN: ${{ github.token }}
+          CAMERA_NAME: ${{ matrix.camera }}
         run: |
           papermill morning_report.ipynb /tmp/smoketest_output.ipynb \
-            --no-progress-bar \
+            -p CAMERA_NAME "$CAMERA_NAME" \
+            -p DATE_OVERRIDE "${{ github.event.inputs.date_override }}" \
+            --log-output \
             --kernel python3
 
       - name: Upload output notebook (only when analysis fails)
@@ -105,7 +134,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
-          name: smoketest-output-${{ github.run_id }}
+          name: smoketest-output-${{ matrix.camera }}-${{ github.run_id }}
           path: /tmp/smoketest_output.ipynb
           retention-days: 3
 
@@ -126,6 +155,7 @@ jobs:
           runtime = round((now - started).total_seconds() / 60) if started else "unknown"
 
           print("## Scheduler heartbeat")
+          print(f"- Camera: `{os.environ.get('CAMERA_NAME')}`")
           print(f"- Cron: `{os.environ.get('GHA_SCHEDULE_CRON') or 'manual'}`")
           print(f"- Scheduled UTC: `{os.environ.get('GHA_SCHEDULED_AT_UTC') or 'manual'}`")
           print(f"- Job started UTC: `{os.environ.get('GHA_JOB_STARTED_AT_UTC') or 'unknown'}`")

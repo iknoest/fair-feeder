@@ -25,18 +25,22 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 - [x] `/weight` inline menu with Log/History/Edit buttons; weight chart X-axis fixed (integer ticks + MM-DD labels)
 - [x] `/syncstatus` merged into `/status` — Drive file count appended inline
 - [x] Add 24/7 bowl-position alert using YOLOv8n COCO `bowl`
+- [x] Multi-camera support (Tapo C210 + Logitech C925e USB)
+- [x] `/streaming_logitech` command for USB camera
 - [x] **Test on Pi**: `/status` verified with bowl count/visibility state after Pi deployment
 - [ ] Verify `/lastclip`, `/weight`, `/help` from phone after latest Pi deployment
 
 ### B3 — Morning Kibble Report (GitHub Actions) ✅
 - [x] Service account auth + Drive sharing
 - [x] CI-compatible notebook (`RUNNING_IN_CI` guard, `tqdm.auto`)
-- [x] Cron schedule running with early UTC compensation (`0 2 * * *`) plus wait-until-06:35 Amsterdam guard
+- [x] Cron schedule running with early UTC compensation (`23 0 * * *`) plus wait-until-06:35 Amsterdam guard
 - [x] Scheduler heartbeat added to GitHub Actions summary; Telegram delay text removed
 - [x] `feeding_log.csv` records `schedule_time` and `start_time` in Amsterdam time, with GitHub run-history backfill
 - [x] Merged clip detection and stitching working in Phase 1
 - [x] Merged CI clips send one report set; later clips skipped once a real feeding event is captured
 - [x] Timeline chart generating correctly from detection cache
+- [x] Dual-camera matrix implementation (TAPO + LOGITECH sequentially)
+- [x] Mathematical timestamp calculation for cameras without OSD (Logitech)
 - [x] **Verify all fixes work on real morning clips** — CI run 2026-03-26 all green ✅
 
 ### B4 — Weekly Trend Digest

@@ -1,6 +1,6 @@
 # Fair Feeder
 
-**AI-powered cat feeding monitor** that tracks who eats what, counts kibble, detects hand-feeding, and sends daily Telegram reports — all from a $15 camera.
+**AI-powered cat feeding monitor** that tracks who eats what, counts kibble, detects hand-feeding, and sends daily Telegram reports — all from a $15 camera. Now supports dual-camera architecture (Tapo C210 + Logitech C925e).
 
 <!-- PHOTO: annotated video frame showing Dan at bowl with bounding boxes -->
 
@@ -179,6 +179,7 @@ flowchart TB
 | OCR | EasyOCR |
 | Motion recording | OpenCV MOG2 |
 | Cat filter (Pi) | YOLOv8n (0.10 conf) |
+| USB Camera | Logitech C925e |
 | Secrets | Infisical |
 | Notifications | Telegram Bot API |
 | Storage | Google Drive (rclone) |

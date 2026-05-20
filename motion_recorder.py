@@ -75,16 +75,28 @@ START_TIME = time.time()
 # ── CONFIGURATION ──────────────────────────────────────────────────
 try:
     import config as _cfg
-    CAMERA_IP   = _cfg.TAPO_IP
-    CAMERA_USER = _cfg.TAPO_USER
-    CAMERA_PASS = _cfg.TAPO_PASS
+    CONFIG_TAPO_IP   = getattr(_cfg, 'TAPO_IP', '<YOUR_CAMERA_IP>')
+    CONFIG_TAPO_USER = getattr(_cfg, 'TAPO_USER', '<YOUR_CAMERA_USER>')
+    CONFIG_TAPO_PASS = getattr(_cfg, 'TAPO_PASS', '<YOUR_CAMERA_PASSWORD>')
+    CONFIG_CAMERA_TYPE = getattr(_cfg, 'CAMERA_TYPE', 'rtsp')
+    CONFIG_USB_INDEX   = getattr(_cfg, 'USB_CAMERA_INDEX', 0)
+    CONFIG_RCLONE_REMOTE = getattr(_cfg, 'RCLONE_REMOTE', 'gdrive-randomdice:')
+    CONFIG_RCLONE_DEST   = getattr(_cfg, 'RCLONE_DEST_PATH', '')
 except Exception:
-    # Manual Fallback
-    # NOTE: Set these environment variables or edit these locally after pulling from git.
-    # NEVER commit your real credentials to git!
-    CAMERA_IP   = os.getenv('TAPO_IP',   '<YOUR_CAMERA_IP>')
-    CAMERA_USER = os.getenv('TAPO_USER', '<YOUR_CAMERA_USER>')
-    CAMERA_PASS = os.getenv('TAPO_PASS', '<YOUR_CAMERA_PASSWORD>')
+    CONFIG_TAPO_IP = CONFIG_TAPO_USER = CONFIG_TAPO_PASS = None
+    CONFIG_CAMERA_TYPE = 'rtsp'
+    CONFIG_USB_INDEX = 0
+    CONFIG_RCLONE_REMOTE = 'gdrive-randomdice:'
+    CONFIG_RCLONE_DEST = ''
+
+# Prioritize Environment Variables over config.py
+CAMERA_TYPE = os.getenv('CAMERA_TYPE', CONFIG_CAMERA_TYPE).lower()
+CAMERA_IP   = os.getenv('TAPO_IP',   CONFIG_TAPO_IP)
+CAMERA_USER = os.getenv('TAPO_USER', CONFIG_TAPO_USER)
+CAMERA_PASS = os.getenv('TAPO_PASS', CONFIG_TAPO_PASS)
+USB_CAMERA_INDEX = int(os.getenv('USB_CAMERA_INDEX', str(CONFIG_USB_INDEX)))
+RCLONE_REMOTE = os.getenv('RCLONE_REMOTE', CONFIG_RCLONE_REMOTE)
+RCLONE_DEST_PATH = os.getenv('RCLONE_DEST_PATH', CONFIG_RCLONE_DEST)
 
 RTSP_PORT  = 554
 RTSP_STREAM = 'stream1' 
@@ -92,6 +104,14 @@ RTSP_STREAM = 'stream1'
 # Use TCP transport for more reliable RTSP connection (proven to work on Raspberry Pi)
 RTSP_URL = f'rtsp://{CAMERA_USER}:{CAMERA_PASS}@{CAMERA_IP}:{RTSP_PORT}/{RTSP_STREAM}'
 RTSP_URL_TCP = RTSP_URL + '?rtsp_transport=tcp'
+
+# Choose Source based on Type
+if CAMERA_TYPE == 'usb':
+    CAMERA_SOURCE = USB_CAMERA_INDEX
+    log.info(f"Setting up USB Camera (index {USB_CAMERA_INDEX})")
+else:
+    CAMERA_SOURCE = RTSP_URL_TCP
+    log.info(f"Setting up RTSP Camera at {CAMERA_IP}")
 
 PRE_BUFFER_SECONDS  = 3      
 COOLDOWN_SECONDS    = 5      
@@ -106,16 +126,22 @@ BOWL_CENTER_MAX = float(os.getenv('BOWL_CENTER_MAX', '0.75'))
 BOWL_EDGE_MARGIN = float(os.getenv('BOWL_EDGE_MARGIN', '0.02'))
 BOWL_CONF = float(os.getenv('BOWL_CONF', '0.25'))
 
+BOWL_CONF = float(os.getenv('BOWL_CONF', '0.25'))
+
 import platform
 
 # Google Drive path
 if platform.system() == 'Windows':
     DRIVE_OUTPUT_DIR = Path(r'H:\My Drive\Fun Project\Cat monitor\TAPO_autoupload')
 else:
-    # Raspberry Pi rclone path
+    # Raspberry Pi rclone path (local staging folder before rclone sync)
     DRIVE_OUTPUT_DIR = Path('/home/pi5/Pictures/gdrive-randomdice-sync')
+    if CAMERA_TYPE == 'usb':
+        DRIVE_OUTPUT_DIR = Path('/home/pi5/Pictures/usb-camera-sync')
 
 LOCAL_TEMP_DIR   = Path('recordings_temp')
+if CAMERA_TYPE == 'usb':
+    LOCAL_TEMP_DIR = Path('recordings_usb_temp')
 
 # Ensure directories exist
 LOCAL_TEMP_DIR.mkdir(exist_ok=True)
@@ -230,37 +256,46 @@ class FrameMotionDetector:
         except Exception as e:
             print(f"⚠️ Motion detection error: {e}")
 
-class RTSPFrameReader:
-    def __init__(self, url, buffer_seconds=3, fps=15):
-        self.url, self.fps = url, fps
+class CameraFrameReader:
+    def __init__(self, source, buffer_seconds=3, fps=15):
+        self.source, self.fps = source, fps
         self.buffer_size = int(buffer_seconds * fps)
         self.buffer = deque(maxlen=self.buffer_size)
         self.running = False
         self.frame_width = self.frame_height = 0
         self.frames_read = 0
         self._lock = threading.Lock()
+        self.is_usb = isinstance(source, int)
 
     def start(self):
-        log.info(f'Connecting to RTSP: rtsp://****:****@{CAMERA_IP}:{RTSP_PORT}/{RTSP_STREAM}')
+        if self.is_usb:
+            log.info(f'Connecting to USB Camera: {self.source}')
+            self.cap = cv2.VideoCapture(self.source)
+            # Set resolution for USB camera (Logitech C925e supports 1080p)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        else:
+            log.info(f'Connecting to RTSP: rtsp://****:****@{CAMERA_IP}:{RTSP_PORT}/{RTSP_STREAM}')
+            # Try with TCP transport first (more reliable on Raspberry Pi)
+            log.info('Attempting TCP transport...')
+            self.cap = cv2.VideoCapture(self.source)
+            
+            # Fallback to UDP if TCP fails
+            if not self.cap.isOpened():
+                log.warning('TCP failed, trying UDP...')
+                # Remove ?rtsp_transport=tcp if present for fallback
+                udp_source = self.source.split('?')[0] if isinstance(self.source, str) else self.source
+                self.cap = cv2.VideoCapture(udp_source)
         
-        # Try with TCP transport first (more reliable on Raspberry Pi)
-        log.info('Attempting TCP transport...')
-        self.cap = cv2.VideoCapture(self.url + '?rtsp_transport=tcp')
-        
-        # Fallback to UDP if TCP fails
         if not self.cap.isOpened():
-            log.warning('TCP failed, trying UDP...')
-            self.cap = cv2.VideoCapture(self.url)
-        
-        if not self.cap.isOpened():
-            log.error('RTSP stream could not be opened. Check credentials and network.')
+            log.error(f'Camera source {self.source} could not be opened.')
             sys.exit(1)
         
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         if self.frame_width == 0 or self.frame_height == 0:
-            log.error('RTSP connected but returned 0x0 frame size. Stream may be invalid.')
+            log.error('Camera connected but returned 0x0 frame size. Stream may be invalid.')
             sys.exit(1)
 
         reported = self.cap.get(cv2.CAP_PROP_FPS)
@@ -268,14 +303,19 @@ class RTSPFrameReader:
 
         self.running = True
         threading.Thread(target=self._read_loop, daemon=True).start()
-        log.info(f"📹 Stream Connected: {self.frame_width}x{self.frame_height} @ {self.stream_fps:.1f} fps")
+        log.info(f"📹 Camera Connected: {self.frame_width}x{self.frame_height} @ {self.stream_fps:.1f} fps")
 
     def _read_loop(self):
         while self.running:
             ret, frame = self.cap.read()
             if not ret:
-                time.sleep(2)
-                self.cap = cv2.VideoCapture(self.url + '?rtsp_transport=tcp')
+                log.warning("Lost camera connection, attempting to reconnect...")
+                time.sleep(5)
+                self.cap.release()
+                if self.is_usb:
+                    self.cap = cv2.VideoCapture(self.source)
+                else:
+                    self.cap = cv2.VideoCapture(self.source)
                 continue
             with self._lock: self.buffer.append(frame)
             self.frames_read += 1
@@ -292,18 +332,62 @@ class RecordingController:
     # YOLO confidence threshold (low because ground-level camera sees partial cats)
     YOLO_CONF = 0.10
 
-    def __init__(self, reader, listener, yolo_model=None):
+    def __init__(self, reader, listener, yolo_model=None, bot_token=None):
         self.reader, self.listener = reader, listener
         self.yolo_model = yolo_model
+        self.bot_token = bot_token
         self.is_recording = False
         self.writer = None
         self.clips_saved = 0
         self.clips_deleted = 0
         self._clips_lock = threading.Lock()  # add this line
         self._last_motion_ts = 0
+        self.last_cat_time = self._find_last_cat_time()
+        self._live_request_sender = None
+        self._live_frames = []
+        self._live_start_time = 0
+
+    def _find_last_cat_time(self):
+        """Scans the output directory for the most recent cat clip timestamp."""
+        try:
+            # Filenames look like: motion_20260518_213615_23s.mp4
+            clips = list(DRIVE_OUTPUT_DIR.glob('motion_*.mp4'))
+            if not clips:
+                return None
+            
+            # Sort by filename which contains timestamp
+            latest = sorted(clips)[-1].name
+            # Extract 20260518_213615
+            parts = latest.split('_')
+            if len(parts) >= 3:
+                ts_str = f"{parts[1]}_{parts[2]}"
+                return datetime.strptime(ts_str, '%Y%m%d_%H%M%S')
+        except Exception as e:
+            print(f"⚠️ Error finding last cat time: {e}")
+        return None
+
+    def request_live_clip(self, sender_id):
+        """Signals the controller to capture a short live clip."""
+        self._live_request_sender = sender_id
+        self._live_frames = []
+        self._live_start_time = time.time()
 
     def tick(self):
         now = time.time()
+
+        # Handle Live Clip Request (independent of motion recording)
+        if self._live_request_sender:
+            frame = self.reader.get_latest_frame()
+            if frame is not None:
+                self._live_frames.append(frame)
+            
+            # Capture for 5 seconds
+            if now - self._live_start_time >= 5:
+                sender = self._live_request_sender
+                frames = list(self._live_frames)
+                self._live_request_sender = None # Clear request
+                self._live_frames = []
+                threading.Thread(target=self._process_and_send_live, args=(frames, sender), daemon=True).start()
 
         # Track the latest motion event time (from ONVIF listener)
         if self.listener.last_motion_time:
@@ -339,6 +423,75 @@ class RecordingController:
                 print(f'   ⏸️  No motion for {COOLDOWN_SECONDS}s — stopping')
                 self._stop_recording()
 
+    def _process_and_send_live(self, frames, sender_id):
+        if not frames:
+            log.warning("Live stream requested but no frames were captured.")
+            return
+        
+        log.info(f"🎞️ Processing {len(frames)} frames for live stream request...")
+        try:
+            temp_name = f"live_{CAMERA_TYPE}_{int(time.time())}.mp4"
+            temp_path = LOCAL_TEMP_DIR / temp_name
+            
+            # Use reported FPS
+            fps = getattr(self.reader, 'stream_fps', VIDEO_FPS)
+            log.info(f"   - Writing video at {fps} fps to {temp_path}")
+            
+            writer = cv2.VideoWriter(
+                str(temp_path),
+                cv2.VideoWriter_fourcc(*'mp4v'), fps,
+                (self.reader.frame_width, self.reader.frame_height),
+            )
+            for f in frames:
+                writer.write(f)
+            writer.release()
+
+            # Remux to fix FPS/Playback
+            corrected = str(temp_path).replace('.mp4', '_fixed.mp4')
+            actual_duration = 5.0 # We know we waited 5 seconds
+            actual_fps = len(frames) / actual_duration
+            pts_factor = fps / actual_fps if actual_fps > 0 else 1.0
+            
+            log.info(f"   - Remuxing with ffmpeg (pts_factor={pts_factor:.4f})...")
+            import subprocess
+            subprocess.run(
+                ["ffmpeg", "-i", str(temp_path),
+                 "-vf", f"setpts={pts_factor:.6f}*PTS",
+                 "-r", str(fps), "-c:v", "libx264",
+                 "-preset", "fast", "-y", corrected],
+                capture_output=True
+            )
+            
+            final_path = corrected if os.path.exists(corrected) else str(temp_path)
+
+            # Send to Telegram
+            cam_label = "LOGITECH 🎥" if CAMERA_TYPE == "usb" else "TAPO 🏠"
+            log.info(f"   - Sending {os.path.getsize(final_path)/1024/1024:.1f} MB video to Telegram...")
+            if not self.bot_token:
+                log.error("   ❌ Cannot send live stream: bot_token is not initialized.")
+                return
+                
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendVideo"
+            with open(final_path, 'rb') as f:
+                resp = requests.post(url, data={
+                    'chat_id': sender_id, 
+                    'caption': f'📺 Live Stream ({cam_label})'
+                }, files={'video': f}, timeout=60)
+            
+            if resp.status_code == 200:
+                log.info("   ✅ Live stream sent successfully!")
+            else:
+                log.error(f"   ❌ Telegram upload failed (HTTP {resp.status_code}): {resp.text}")
+            
+            # Cleanup
+            if os.path.exists(temp_path): os.unlink(temp_path)
+            if os.path.exists(corrected): os.unlink(corrected)
+            
+        except Exception as e:
+            log.error(f"⚠️ Live stream error: {e}")
+            import traceback
+            log.error(traceback.format_exc())
+
     def _check_for_cat(self, frame):
         """Run YOLO cat detection on the frame."""
         try:
@@ -350,6 +503,7 @@ class RecordingController:
                     name = self.yolo_model.names[cls_id]
                     if name == 'cat':
                         self.cat_seen = True
+                        self.last_cat_time = datetime.now()
                         elapsed = time.time() - self.recording_start
                         print(f'   🐱 Cat detected! (conf={conf:.0%}, t={elapsed:.0f}s)')
                         return
@@ -447,10 +601,22 @@ class RecordingController:
         # Trigger rclone sync if on Raspberry Pi
         if platform.system() != 'Windows':
             import subprocess
-            print('🔄 Triggering rclone to Google Drive...')
+            
+            # rclone command construction
+            rclone_cmd = ["rclone", "copy", str(DRIVE_OUTPUT_DIR), RCLONE_REMOTE]
+            
+            # If RCLONE_DEST_PATH looks like a Google Drive ID (long alphanumeric), use --drive-root-folder-id
+            # Otherwise, append it to the remote
+            if len(RCLONE_DEST_PATH) > 20 and "/" not in RCLONE_DEST_PATH:
+                rclone_cmd.extend(["--drive-root-folder-id", RCLONE_DEST_PATH])
+                print(f'🔄 Triggering rclone to {RCLONE_REMOTE} (Folder ID: {RCLONE_DEST_PATH})...')
+            else:
+                rclone_cmd[3] = f"{RCLONE_REMOTE}{RCLONE_DEST_PATH}"
+                print(f'🔄 Triggering rclone to {RCLONE_REMOTE}{RCLONE_DEST_PATH}...')
+                
             # Run in the background (fire-and-forget) so it doesn't block the next recording
             subprocess.Popen(
-                ["rclone", "copy", str(DRIVE_OUTPUT_DIR), "gdrive-randomdice:"],
+                rclone_cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
@@ -495,7 +661,7 @@ class BowlPositionMonitor:
         ok = status['ok']
         reason = status['reason']
         if ok:
-            if self._alert_active:
+            if self._alert_active and CAMERA_TYPE == 'rtsp':
                 send_telegram_alert('✅🥣 Bowl position recovered. Camera sees the bowl in frame again.')
             self._bad_since = None
             self._alert_active = False
@@ -504,6 +670,10 @@ class BowlPositionMonitor:
         if self._bad_since is None:
             self._bad_since = now
             log.warning(f'Bowl position bad: {reason}')
+
+        # Do not send Telegram alerts for non-RTSP cameras (Logitech)
+        if CAMERA_TYPE != 'rtsp':
+            return
 
         bad_seconds = now - self._bad_since
         if bad_seconds < BOWL_BAD_SECONDS:
@@ -847,15 +1017,39 @@ class TelegramCommandListener:
 
     def _handle_command(self, cmd, sender_id=None):
         dispatch = {
-            '/status':   self._cmd_status,
-            '/lastclip': self._cmd_lastclip,
-            '/weight':   self._cmd_weight,
-            '/help':     self._cmd_help,
-            '/start':    self._cmd_help,
+            '/status':             self._cmd_status,
+            '/lastclip':           self._cmd_lastclip,
+            '/weight':             self._cmd_weight,
+            '/streaming_logitech': self._cmd_streaming,
+            '/help':               self._cmd_help,
+            '/start':              self._cmd_help,
         }
         handler = dispatch.get(cmd)
         if handler:
+            # Prevent double messages for global commands (only Tapo responds)
+            if cmd in ('/help', '/start', '/weight') and CAMERA_TYPE != 'rtsp':
+                return
+            
+            # If it's a logitech streaming request, only respond if we are the USB camera
+            if cmd == '/streaming_logitech' and CAMERA_TYPE != 'usb':
+                return
             handler(sender_id=sender_id)
+
+    def _cmd_streaming(self, sender_id=None):
+        target_id = sender_id if sender_id else self.chat_id
+        self._send(f"⏳ Capturing 5s live look from LOGITECH 🎥...", sender_id=target_id)
+        self.controller.request_live_clip(target_id)
+
+    def _cmd_help(self, sender_id=None):
+        self._send(
+            '🐾 Fair Feeder Commands\n'
+            '/status — View uptime, clips, and last cat time (both cameras)\n'
+            '/lastclip — Send most recent cat video from both cameras\n'
+            '/streaming_logitech — See a 5s live look from Logitech 🎥\n'
+            '/weight — Log, view history, or edit cat weights\n'
+            '/help — This message',
+            sender_id=sender_id
+        )
 
     def _cmd_status(self, sender_id=None):
         uptime_secs = int(time.time() - START_TIME)
@@ -867,34 +1061,40 @@ class TelegramCommandListener:
             disk_str = f'{free_gb:.1f} GB free'
         except Exception:
             disk_str = 'unknown'
-        last_motion = self.controller.listener.last_motion_time
-        motion_str = last_motion.strftime('%H:%M:%S') if last_motion else 'none yet'
+        last_cat = self.controller.last_cat_time
+        cat_str = last_cat.strftime('%H:%M:%S') if last_cat else 'none yet'
         with self.controller._clips_lock:
             saved = self.controller.clips_saved
             deleted = self.controller.clips_deleted
         # Quick Drive sync check
         try:
             import subprocess as _sp, json as _json
-            _res = _sp.run(
-                ['rclone', 'size', 'gdrive-randomdice:', '--json'],
-                capture_output=True, text=True, timeout=8
-            )
+            size_cmd = ['rclone', 'size', RCLONE_REMOTE, '--json']
+            if len(RCLONE_DEST_PATH) > 20 and "/" not in RCLONE_DEST_PATH:
+                size_cmd.extend(['--drive-root-folder-id', RCLONE_DEST_PATH])
+            else:
+                size_cmd[2] = f"{RCLONE_REMOTE}{RCLONE_DEST_PATH}"
+                
+            _res = _sp.run(size_cmd, capture_output=True, text=True, timeout=30)
             if _res.returncode == 0:
                 _rdata = _json.loads(_res.stdout)
                 sync_str = f'Drive: {_rdata.get("count", "?")} files ✅'
             else:
                 sync_str = f'Drive: unreachable ⚠️'
-        except Exception:
-            sync_str = 'Drive: check skipped'
+        except Exception as e:
+            sync_str = 'Drive: check error ❌'
+            log.warning(f"Status drive check failed: {e}")
+
         bowl_str = self.bowl_monitor.status_text(force_check=True) if self.bowl_monitor else 'Bowl: monitor off'
 
+        cam_label = "LOGITECH 🎥" if CAMERA_TYPE == "usb" else "TAPO 🏠"
         self._send(
-            f'✅ Fair Feeder Status\n'
+            f'✅ Fair Feeder Status ({cam_label})\n'
             f'Uptime: {h}h {m}m\n'
             f'Clips saved: {saved}\n'
             f'Clips deleted: {deleted}\n'
             f'Local space: {disk_str}\n'
-            f'Last motion: {motion_str}\n'
+            f'Last cat: {cat_str}\n'
             f'{bowl_str}\n'
             f'{sync_str}',
             sender_id=sender_id
@@ -1035,16 +1235,6 @@ class TelegramCommandListener:
             'cmd': '/weight_edit', 'step': 'select', 'data': {'entries': recent}
         }
 
-    def _cmd_help(self, sender_id=None):
-        self._send(
-            'Fair Feeder Commands\n'
-            '/status — uptime, clips, disk, Drive sync\n'
-            '/lastclip — send most recent cat clip\n'
-            '/weight — log, view history, or edit weights\n'
-            '/help — this message',
-            sender_id=sender_id
-        )
-
     def _send(self, text, sender_id=None, reply_markup=None):
         target = sender_id if sender_id else self.chat_id
         url = f'https://api.telegram.org/bot{self.bot_token}/sendMessage'
@@ -1081,9 +1271,13 @@ if __name__ == "__main__":
     log.info('  Fair Feeder — Motion Recorder with Cat Detection')
     log.info('='*60)
     
-    # Initialize YOLO detectors
+    # Initialize detectors
     yolo_model = None
     bowl_monitor_model = None
+    
+    # Fetch Telegram credentials early so they can be passed to the controller
+    cmd_bot_token, cmd_chat_id = get_telegram_credentials()
+    
     try:
         from ultralytics import YOLO
         yolo_model = YOLO('yolov8n.pt')
@@ -1105,13 +1299,13 @@ if __name__ == "__main__":
         log.info('   Falling back to: all clips will be kept (no cat filtering)')
 
     listener = FrameMotionDetector(None, threshold_percent=2.0)
-    reader = RTSPFrameReader(RTSP_URL, buffer_seconds=PRE_BUFFER_SECONDS, fps=VIDEO_FPS)
+    reader = CameraFrameReader(CAMERA_SOURCE, buffer_seconds=PRE_BUFFER_SECONDS, fps=VIDEO_FPS)
     listener.reader = reader  # Wire the reader into the detector
 
     try:
         listener.start()
         reader.start()
-        controller = RecordingController(reader, listener, yolo_model=yolo_model)
+        controller = RecordingController(reader, listener, yolo_model=yolo_model, bot_token=cmd_bot_token)
         bowl_monitor = BowlPositionMonitor(reader, yolo_model=bowl_monitor_model)
         log.info('')
         log.info('\ud83d\ude80 Monitoring... Press Ctrl+C to stop.')

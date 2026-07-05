@@ -197,7 +197,27 @@ def test_sanitize_error_message(monkeypatch):
     sanitized4 = sanitize_error_message(msg4)
     assert "Bearer ***REDACTED***" in sanitized4
     assert "my-secret-token" not in sanitized4
-
+    
+    # Test Telegram secrets redaction
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake_telegram_bot_token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake_telegram_chat_id")
+    
+    msg5 = "Error with token fake_telegram_bot_token and chat id fake_telegram_chat_id"
+    sanitized5 = sanitize_error_message(msg5)
+    assert "fake_telegram_bot_token" not in sanitized5
+    assert "fake_telegram_chat_id" not in sanitized5
+    assert "***REDACTED***" in sanitized5
+    
+    # Test Telegram URL redaction
+    msg6 = "Failed URL: https://api.telegram.org/bot12345:secret/sendMessage"
+    sanitized6 = sanitize_error_message(msg6)
+    assert "12345:secret" not in sanitized6
+    assert "https://api.telegram.org/bot***REDACTED***/sendMessage" in sanitized6
+    
+    msg7 = "Failed URL: https://api.telegram.org/bot54321:other/sendPhoto"
+    sanitized7 = sanitize_error_message(msg7)
+    assert "54321:other" not in sanitized7
+    assert "https://api.telegram.org/bot***REDACTED***/sendPhoto" in sanitized7
 def test_schema_rejects_wrong_camera():
     valid_data = {
         "camera": "TAPO", # Invalid
@@ -602,7 +622,7 @@ def test_low_confidence_formatting(mock_post, monkeypatch, tmp_path):
     assert "- Eating evidence: Uncertain" in md_text
 
     tg_text = (tmp_path / "logitech_vlm_shadow_telegram_preview.txt").read_text()
-    assert "Eating: Uncertain" in tg_text
+    assert "Eating: unsure ⚠️ eating uncertain" in tg_text
 
 @patch("requests.post")
 @patch("time.sleep", return_value=None)
@@ -694,7 +714,8 @@ def test_max_api_calls_cap_and_cleanup(mock_sleep, mock_post, monkeypatch, tmp_p
     assert "Reason: API call cap reached" in md_text
     
     tg_text = (tmp_path / "logitech_vlm_shadow_telegram_preview.txt").read_text()
-    assert "motion_20260704_061900_clip2.mp4 -> SKIPPED: API call cap reached" in tg_text
+    assert "Clip: motion_20260704_061900_clip2.mp4" in tg_text
+    assert "SKIPPED: ApiCapReached" in tg_text
 
 @patch("requests.post")
 def test_failed_clip_in_reports_and_sanitized(mock_post, monkeypatch, tmp_path):
@@ -743,3 +764,296 @@ def test_failed_clip_in_reports_and_sanitized(mock_post, monkeypatch, tmp_path):
     tg_text = (tmp_path / "logitech_vlm_shadow_telegram_preview.txt").read_text()
     assert "FAILED: ValueError" in tg_text
     assert "AIza-secret" not in tg_text
+
+def test_send_telegram_shadow_without_run_vlm_exits_nonzero(capsys):
+    import logitech_vlm_shadow
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--send-telegram-shadow", "--date", "2026-07-05"]):
+        with pytest.raises(SystemExit) as excinfo:
+            logitech_vlm_shadow.main()
+        assert excinfo.value.code != 0
+    captured = capsys.readouterr()
+    assert "requires --run-vlm" in captured.out
+
+# script loads .env at startup, so missing-env tests must not depend on repo .env.
+def test_send_telegram_shadow_without_env_exits_nonzero(monkeypatch, capsys):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    import logitech_vlm_shadow
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--send-telegram-shadow", "--run-vlm", "--confirm-cost", "--date", "2026-07-05"]):
+        with patch("requests.post") as mock_post:
+            with pytest.raises(SystemExit) as excinfo:
+                logitech_vlm_shadow.main()
+            assert excinfo.value.code != 0
+            mock_post.assert_not_called()
+    captured = capsys.readouterr()
+    assert "Missing required Telegram environment variables" in captured.out
+
+def test_send_telegram_shadow_requires_explicit_date(monkeypatch, capsys):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake")
+    import logitech_vlm_shadow
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--send-telegram-shadow", "--run-vlm", "--confirm-cost"]):
+        with patch("requests.post") as mock_post:
+            with pytest.raises(SystemExit) as excinfo:
+                logitech_vlm_shadow.main()
+            assert excinfo.value.code != 0
+            mock_post.assert_not_called()
+    captured = capsys.readouterr()
+    assert "requires an explicit --date" in captured.out
+
+def test_send_telegram_shadow_with_explicit_date_reaches_env_guard_or_next_guard(monkeypatch, capsys):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    import logitech_vlm_shadow
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--send-telegram-shadow", "--run-vlm", "--confirm-cost", "--date", "2026-07-05"]):
+        with pytest.raises(SystemExit) as excinfo:
+            logitech_vlm_shadow.main()
+        assert excinfo.value.code != 0
+    captured = capsys.readouterr()
+    assert "Missing required Telegram environment variables" in captured.out
+    assert "requires an explicit --date" not in captured.out
+
+@patch("requests.post")
+def test_telegram_flags_and_sending(mock_post, monkeypatch, tmp_path):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake_bot_token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake_chat_id")
+    monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake_key")
+    
+    # We will mock the VLM call to return a specific result to trigger flags
+    import logitech_vlm_shadow
+    def mock_gemini(*args, **kwargs):
+        # We simulate 3 clips processed sequentially
+        if not hasattr(mock_gemini, "count"):
+            mock_gemini.count = 0
+        mock_gemini.count += 1
+        
+        if mock_gemini.count == 1:
+            return {
+                "camera": "LOGITECH", "date": "20260704", "clip_name": "motion_20260704_060001.mp4",
+                "cat_identity": "both", "eating_evidence": "no", "bowl_state": "low",
+                "confidence": 0.9, "reasons": [], "needs_higher_model": False
+            }
+        elif mock_gemini.count == 2:
+            return {
+                "camera": "LOGITECH", "date": "20260704", "clip_name": "motion_20260704_060002.mp4",
+                "cat_identity": "Dan", "eating_evidence": "unsure", "bowl_state": "empty",
+                "confidence": 0.70, "reasons": [], "needs_higher_model": True
+            }
+        else:
+            return {
+                "camera": "LOGITECH", "date": "20260704", "clip_name": "motion_20260704_060003.mp4",
+                "cat_identity": "none", "eating_evidence": "yes", "bowl_state": "half",
+                "confidence": 0.9, "reasons": [], "needs_higher_model": False
+            }
+
+    # Mock requests.post to succeed
+    class MockResp:
+        def raise_for_status(self): pass
+    mock_post.return_value = MockResp()
+    
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "20260704", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path), "--send-telegram-shadow", "--max-clips", "3"]):
+        with patch('logitech_vlm_shadow.check_credentials', return_value=True), \
+             patch('logitech_vlm_shadow.call_gemini_vlm', side_effect=mock_gemini), \
+             patch('logitech_vlm_shadow.MAX_API_CALLS_PER_RUN', 3):
+            
+            # Setup fake files to process
+            (tmp_path / "motion_20260704_060001.mp4").write_bytes(b"")
+            (tmp_path / "motion_20260704_060002.mp4").write_bytes(b"")
+            (tmp_path / "motion_20260704_060003.mp4").write_bytes(b"")
+            
+            # Create fake contact sheets so they can be attached
+            (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_060001.jpg").write_bytes(b"img1")
+            (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_060002.jpg").write_bytes(b"img2")
+            (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_060003.jpg").write_bytes(b"img3")
+            
+            class MockDrive:
+                def files(self):
+                    class MockFiles:
+                        def list(self, **kwargs):
+                            class MockList:
+                                def execute(self):
+                                    return {"files": [
+                                        {"name": "motion_20260704_060001.mp4", "id": "1"},
+                                        {"name": "motion_20260704_060002.mp4", "id": "2"},
+                                        {"name": "motion_20260704_060003.mp4", "id": "3"}
+                                    ]}
+                            return MockList()
+                        def get_media(self, **kwargs):
+                            class MockReq: pass
+                            return MockReq()
+                    return MockFiles()
+            with patch('googleapiclient.discovery.build', return_value=MockDrive()), patch('logitech_vlm_shadow.in_feeding_window', return_value=True):
+                with patch('logitech_vlm_shadow.download_file'):
+                    class MockCap:
+                        def get(self, prop): return 1
+                        def set(self, prop, val): pass
+                        def read(self): return True, np.zeros((10, 10, 3), dtype=np.uint8)
+                        def release(self): pass
+                    with patch('cv2.VideoCapture', return_value=MockCap()):
+                        logitech_vlm_shadow.main()
+                        
+    # Check preview text
+    tg_text = (tmp_path / "logitech_vlm_shadow_telegram_preview.txt").read_text()
+    assert "[SHADOW] Logitech VLM / Sanbo feeder" in tg_text
+    assert "Non-authoritative. Production report unchanged." in tg_text
+    
+    # Flags check
+    assert "⚠️ possible food theft — verify" in tg_text
+    assert "⚠️ Dan at Logitech/Sanbo feeder — verify" in tg_text
+    assert "⚠️ identity needs review" in tg_text
+    assert "⚠️ no eating evidence" in tg_text
+    assert "⚠️ eating uncertain" in tg_text
+    assert "⚠️ low confidence" in tg_text
+    assert "⚠️ needs higher model review" in tg_text
+    
+    # Check requests.post calls
+    assert mock_post.call_count == 3  # 1 text, 2 photos (cap is 2)
+    
+    # Verify summary
+    summary_path = tmp_path / "telegram_shadow_send_summary.json"
+    assert summary_path.exists()
+    summary = json.loads(summary_path.read_text())
+    assert summary["telegram_send_attempted"] is True
+    assert summary["telegram_text_sent"] is True
+    assert summary["telegram_images_attempted"] == 2
+    assert summary["telegram_images_sent"] == 2
+    assert summary["telegram_error"] is None
+    assert summary["telegram_send_fully_successful"] is True
+
+    # Check logitech_vlm_shadow_summary.json
+    main_summary_path = tmp_path / "logitech_vlm_shadow_summary.json"
+    if main_summary_path.exists():
+        main_summary = json.loads(main_summary_path.read_text())
+        assert main_summary["telegram_sent"] is True
+        assert main_summary["telegram_images_sent"] == 2
+        assert main_summary["telegram_error"] is None
+
+@patch("requests.post")
+def test_telegram_send_text_failure_exits_nonzero(mock_post, monkeypatch, tmp_path):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake_bot_token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake_chat_id")
+    monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake_key")
+    
+    import requests
+    class MockHTTPError(requests.exceptions.HTTPError):
+        pass
+    def side_effect(*args, **kwargs):
+        raise MockHTTPError("Telegram API error with token fake_bot_token")
+    mock_post.side_effect = side_effect
+    
+    import logitech_vlm_shadow
+    def mock_gemini(*args, **kwargs):
+        return {
+            "camera": "LOGITECH", "date": "20260704", "clip_name": "motion_20260704_060001.mp4",
+            "cat_identity": "both", "eating_evidence": "no", "bowl_state": "low",
+            "confidence": 0.9, "reasons": [], "needs_higher_model": False
+        }
+        
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "20260704", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path), "--send-telegram-shadow", "--max-clips", "1"]):
+        with patch('logitech_vlm_shadow.check_credentials', return_value=True), patch('logitech_vlm_shadow.call_gemini_vlm', side_effect=mock_gemini):
+            (tmp_path / "motion_20260704_060001.mp4").write_bytes(b"")
+            (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_060001.jpg").write_bytes(b"img1")
+            
+            class MockDrive:
+                def files(self):
+                    class MockFiles:
+                        def list(self, **kwargs):
+                            class MockList:
+                                def execute(self):
+                                    return {"files": [{"name": "motion_20260704_060001.mp4", "id": "1"}]}
+                            return MockList()
+                        def get_media(self, **kwargs):
+                            class MockReq: pass
+                            return MockReq()
+                    return MockFiles()
+            with patch('googleapiclient.discovery.build', return_value=MockDrive()), patch('logitech_vlm_shadow.in_feeding_window', return_value=True), patch('logitech_vlm_shadow.download_file'):
+                class MockCap:
+                    def get(self, prop): return 1
+                    def set(self, prop, val): pass
+                    def read(self): return True, np.zeros((10, 10, 3), dtype=np.uint8)
+                    def release(self): pass
+                with patch('cv2.VideoCapture', return_value=MockCap()):
+                    import pytest
+                    with pytest.raises(SystemExit):
+                        logitech_vlm_shadow.main()
+                        
+    summary_path = tmp_path / "telegram_shadow_send_summary.json"
+    summary = json.loads(summary_path.read_text())
+    assert summary["telegram_text_sent"] is False
+    assert summary["telegram_images_attempted"] == 0
+    assert summary["telegram_send_fully_successful"] is False
+    assert "fake_bot_token" not in summary["telegram_error"]
+    assert "***REDACTED***" in summary["telegram_error"]
+    
+@patch("requests.post")
+def test_telegram_send_photo_failure_exits_nonzero(mock_post, monkeypatch, tmp_path):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake_bot_token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake_chat_id")
+    monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake_key")
+    
+    import requests
+    class MockHTTPError(requests.exceptions.HTTPError):
+        pass
+        
+    call_count = [0]
+    def side_effect(url, *args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            class MockResp:
+                def raise_for_status(self): pass
+            return MockResp()
+        else:
+            raise MockHTTPError("Telegram API photo error for fake_chat_id")
+    mock_post.side_effect = side_effect
+    
+    import logitech_vlm_shadow
+    def mock_gemini(*args, **kwargs):
+        return {
+            "camera": "LOGITECH", "date": "20260704", "clip_name": "motion_20260704_060001.mp4",
+            "cat_identity": "both", "eating_evidence": "no", "bowl_state": "low",
+            "confidence": 0.9, "reasons": [], "needs_higher_model": False
+        }
+        
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "20260704", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path), "--send-telegram-shadow", "--max-clips", "1"]):
+        with patch('logitech_vlm_shadow.check_credentials', return_value=True), patch('logitech_vlm_shadow.call_gemini_vlm', side_effect=mock_gemini):
+            (tmp_path / "motion_20260704_060001.mp4").write_bytes(b"")
+            (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_060001.jpg").write_bytes(b"img1")
+            
+            class MockDrive:
+                def files(self):
+                    class MockFiles:
+                        def list(self, **kwargs):
+                            class MockList:
+                                def execute(self):
+                                    return {"files": [{"name": "motion_20260704_060001.mp4", "id": "1"}]}
+                            return MockList()
+                        def get_media(self, **kwargs):
+                            class MockReq: pass
+                            return MockReq()
+                    return MockFiles()
+            with patch('googleapiclient.discovery.build', return_value=MockDrive()), patch('logitech_vlm_shadow.in_feeding_window', return_value=True), patch('logitech_vlm_shadow.download_file'):
+                class MockCap:
+                    def get(self, prop): return 1
+                    def set(self, prop, val): pass
+                    def read(self): return True, np.zeros((10, 10, 3), dtype=np.uint8)
+                    def release(self): pass
+                with patch('cv2.VideoCapture', return_value=MockCap()):
+                    import pytest
+                    with pytest.raises(SystemExit):
+                        logitech_vlm_shadow.main()
+                        
+    summary_path = tmp_path / "telegram_shadow_send_summary.json"
+    summary = json.loads(summary_path.read_text())
+    assert summary["telegram_text_sent"] is True
+    assert summary["telegram_images_attempted"] == 1
+    assert summary["telegram_images_sent"] == 0
+    assert summary["telegram_send_fully_successful"] is False
+    assert "fake_chat_id" not in summary["telegram_error"]
+    assert "***REDACTED***" in summary["telegram_error"]
+    
+    # Check logitech_vlm_shadow_summary.json
+    main_summary_path = tmp_path / "logitech_vlm_shadow_summary.json"
+    main_summary = json.loads(main_summary_path.read_text())
+    assert main_summary["telegram_sent"] is True
+    assert main_summary["telegram_images_sent"] == 0
+    assert "***REDACTED***" in main_summary["telegram_error"]

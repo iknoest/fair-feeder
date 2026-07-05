@@ -174,10 +174,17 @@ def sanitize_error_message(message: str) -> str:
     if 'GEMINI_API_KEY' in os.environ and os.environ['GEMINI_API_KEY']:
         s = s.replace(os.environ['GEMINI_API_KEY'], "***REDACTED***")
         
+    if 'TELEGRAM_BOT_TOKEN' in os.environ and os.environ['TELEGRAM_BOT_TOKEN']:
+        s = s.replace(os.environ['TELEGRAM_BOT_TOKEN'], "***REDACTED***")
+    if 'TELEGRAM_CHAT_ID' in os.environ and os.environ['TELEGRAM_CHAT_ID']:
+        s = s.replace(os.environ['TELEGRAM_CHAT_ID'], "***REDACTED***")
+        
     # Redact URL query param key=...
     s = re.sub(r'key=[^&\s]+', 'key=***REDACTED***', s)
     # Redact Authorization bearer token
     s = re.sub(r'(?i)bearer\s+[^\s]+', 'Bearer ***REDACTED***', s)
+    # Redact Telegram bot URL tokens
+    s = re.sub(r'https://api\.telegram\.org/bot[^/]+/', 'https://api.telegram.org/bot***REDACTED***/', s)
     return s
 
 def validate_vlm_schema(data, expected_date=None, expected_clip_name=None):
@@ -291,7 +298,7 @@ def call_gemini_vlm(prompt_text, image_path, model_name, api_key):
 
 def main():
     parser = argparse.ArgumentParser(description="Logitech VLM Shadow Scaffold")
-    parser.add_argument("--date", type=str, default="20260704")
+    parser.add_argument("--date", type=str, default=None)
     parser.add_argument("--out-dir", type=str, default=".agent/artifacts/logitech_vlm_shadow_20260704")
     parser.add_argument("--run-vlm", action="store_true", help="Attempt to run VLM API if key is present")
     parser.add_argument("--confirm-cost", action="store_true", help="Explicitly confirm real VLM API execution costs")
@@ -299,7 +306,27 @@ def main():
     parser.add_argument("--vlm-model", type=str, help="VLM Model name")
     parser.add_argument("--max-clips", type=int, default=2, help="Max clips to process in VLM API")
     parser.add_argument("--cleanup-downloaded-videos", action="store_true", help="Remove downloaded mp4 files from the out-dir after result generation")
+    parser.add_argument("--send-telegram-shadow", action="store_true", help="Send a shadow Telegram report")
     args = parser.parse_args()
+
+    telegram_token = None
+    telegram_chat_id = None
+    if args.send_telegram_shadow:
+        if args.date is None:
+            # Shadow Telegram send requires explicit date because Drive video filenames are date-based and midnight rollover can select an empty next-day window.
+            print("[STOP] --send-telegram-shadow requires an explicit --date to avoid date rollover mistakes.")
+            sys.exit(1)
+        if not args.run_vlm or not args.confirm_cost:
+            print("[STOP] --send-telegram-shadow requires --run-vlm and --confirm-cost.")
+            sys.exit(1)
+        telegram_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        if not telegram_token or not telegram_chat_id:
+            print("[STOP] Missing required Telegram environment variables (TELEGRAM_BOT_TOKEN and/or TELEGRAM_CHAT_ID).")
+            sys.exit(1)
+
+    if args.date is None:
+        args.date = "20260704"
 
     if args.run_vlm:
         if not args.confirm_cost:
@@ -684,22 +711,130 @@ def main():
             
         (out_dir / "logitech_vlm_shadow_report.md").write_text("\n".join(report_lines))
         
-        # Telegram preview
+        # Telegram preview and actual text format
         tg_lines = [
-            "[SHADOW] Logitech VLM",
-            "Production report unchanged."
+            "[SHADOW] Logitech VLM / Sanbo feeder",
+            "Non-authoritative. Production report unchanged.",
+            f"Date: {search_date}",
+            f"Provider/model: {args.vlm_provider} / {args.vlm_model}",
+            ""
         ]
+        
         for r in all_results:
-            ee = "Uncertain" if r['eating_evidence'] == "unsure" else r['eating_evidence']
-            tg_lines.append(f"Clip: {r['clip_name']} -> Cat: {r['cat_identity']} Eating: {ee} Bowl: {r['bowl_state']} Conf: {r['confidence']}")
+            tg_lines.append(f"Clip: {r['clip_name']}")
+            
+            cat_id = r['cat_identity']
+            cat_flag = ""
+            if cat_id.lower() == "both":
+                cat_flag = " ⚠️ possible food theft — verify"
+            elif cat_id.lower() == "dan":
+                cat_flag = " ⚠️ Dan at Logitech/Sanbo feeder — verify"
+            elif cat_id.lower() in ["none", "unsure"]:
+                cat_flag = " ⚠️ identity needs review"
+                
+            tg_lines.append(f"Cat: {cat_id}{cat_flag}")
+            
+            ee = str(r['eating_evidence'])
+            ee_flag = ""
+            if ee.lower() == "unsure":
+                ee_flag = " ⚠️ eating uncertain"
+            elif ee.lower() == "no":
+                ee_flag = " ⚠️ no eating evidence"
+            
+            tg_lines.append(f"Eating: {ee}{ee_flag}")
+            tg_lines.append(f"Bowl: {r['bowl_state']}")
+            
+            conf = r['confidence']
+            conf_flag = ""
+            if float(conf) < 0.75:
+                conf_flag = " ⚠️ low confidence"
+            
+            tg_lines.append(f"Confidence: {conf}{conf_flag}")
+            
+            nhm = r['needs_higher_model']
+            nhm_flag = ""
+            if str(nhm).lower() == "true":
+                nhm_flag = " ⚠️ needs higher model review"
+                
+            tg_lines.append(f"Needs Higher Model: {nhm}{nhm_flag}")
+            tg_lines.append(f"Attempts: {r.get('attempts_made', 1)}")
+            tg_lines.append("")
             
         for r in all_failed:
-            tg_lines.append(f"Clip: {r['clip_name']} -> FAILED: {r['error_type']}")
+            tg_lines.append(f"Clip: {r['clip_name']}")
+            tg_lines.append(f"FAILED: {r['error_type']} - {r['error_message']}")
+            tg_lines.append("")
             
         for r in all_skipped:
-            tg_lines.append(f"Clip: {r['clip_name']} -> SKIPPED: API call cap reached")
+            tg_lines.append(f"Clip: {r['clip_name']}")
+            tg_lines.append(f"SKIPPED: {r['error_type']} - {r['error_message']}")
+            tg_lines.append("")
             
-        (out_dir / "logitech_vlm_shadow_telegram_preview.txt").write_text("\n".join(tg_lines))
+        tg_text = "\n".join(tg_lines).strip()
+        (out_dir / "logitech_vlm_shadow_telegram_preview.txt").write_text(tg_text)
+
+        if args.send_telegram_shadow:
+            send_summary = {
+                "telegram_send_attempted": True,
+                "telegram_text_sent": False,
+                "telegram_images_attempted": 0,
+                "telegram_images_sent": 0,
+                "telegram_image_cap": 2,
+                "attached_contact_sheets": [],
+                "telegram_error": None,
+                "production_report_changed": False,
+                "original_report_changed": False,
+                "telegram_is_shadow": True,
+                "message_starts_with_shadow": tg_text.startswith("[SHADOW] Logitech VLM / Sanbo feeder"),
+                "telegram_send_fully_successful": False
+            }
+            
+            import requests
+            try:
+                # Send text
+                url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+                resp = requests.post(url, data={"chat_id": telegram_chat_id, "text": tg_text}, timeout=20)
+                resp.raise_for_status()
+                send_summary["telegram_text_sent"] = True
+                
+                # Send up to 2 images
+                images_to_send = []
+                for r in all_results:
+                    if len(images_to_send) < 2:
+                        cs_path = out_dir / r['source_contact_sheet']
+                        if cs_path.exists():
+                            images_to_send.append(cs_path)
+                            
+                send_summary["telegram_images_attempted"] = len(images_to_send)
+                for img_path in images_to_send:
+                    photo_url = f"https://api.telegram.org/bot{telegram_token}/sendPhoto"
+                    with open(img_path, "rb") as photo_f:
+                        files = {"photo": photo_f}
+                        data = {"chat_id": telegram_chat_id}
+                        p_resp = requests.post(photo_url, data=data, files=files, timeout=30)
+                        p_resp.raise_for_status()
+                        send_summary["telegram_images_sent"] += 1
+                        send_summary["attached_contact_sheets"].append(img_path.name)
+                        
+                send_summary["telegram_send_fully_successful"] = True
+            except Exception as e:
+                send_summary["telegram_error"] = sanitize_error_message(str(e))
+                print(f"[VLM] Telegram send error: {send_summary['telegram_error']}")
+                had_failures = True
+                
+            with open(out_dir / "telegram_shadow_send_summary.json", "w") as jf:
+                json.dump(send_summary, jf, indent=2)
+                
+            # Update logitech_vlm_shadow_summary.json
+            summary_path = out_dir / "logitech_vlm_shadow_summary.json"
+            if summary_path.exists():
+                with open(summary_path, "r") as f_sum:
+                    main_sum = json.load(f_sum)
+                main_sum["telegram_sent"] = send_summary["telegram_text_sent"]
+                main_sum["telegram_images_sent"] = send_summary["telegram_images_sent"]
+                main_sum["telegram_error"] = send_summary["telegram_error"]
+                with open(summary_path, "w") as f_sum:
+                    json.dump(main_sum, f_sum, indent=2)
         
         if args.cleanup_downloaded_videos:
             for mp4_file in out_dir.glob("motion_*.mp4"):

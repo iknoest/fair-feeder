@@ -18,6 +18,27 @@ from logitech_vlm_shadow import (
     call_openai_vlm
 )
 
+@pytest.fixture(autouse=True)
+def mock_env_vars(monkeypatch):
+    monkeypatch.setenv("GDRIVE_SERVICE_ACCOUNT_KEY", "{}")
+    monkeypatch.setenv("GDRIVE_LOGITECH_FOLDER_ID", "fake_folder")
+    monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake_key")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake_token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake_chat")
+    
+    monkeypatch.setattr("google.oauth2.service_account.Credentials.from_service_account_info", lambda x, scopes=None: None)
+    
+    class FakeDrive:
+        def files(self):
+            class FakeFiles:
+                def list(self, **kwargs):
+                    class FakeList:
+                        def execute(self):
+                            return {"files": []}
+                    return FakeList()
+            return FakeFiles()
+    monkeypatch.setattr("googleapiclient.discovery.build", lambda service, version, credentials=None: FakeDrive())
+
 def test_in_feeding_window():
     assert in_feeding_window("motion_20260704_061800.mp4", "20260704") is True
     assert in_feeding_window("motion_20260704_063100.mp4", "20260704") is False
@@ -83,13 +104,13 @@ def test_selection_reason_labels_are_stable():
 
 def test_run_vlm_without_confirm_cost_exits_nonzero():
     script_path = Path(__file__).parent.parent / "scripts" / "logitech_vlm_shadow.py"
-    result = subprocess.run([sys.executable, str(script_path), "--run-vlm"], capture_output=True, text=True)
+    result = subprocess.run([sys.executable, str(script_path), "--date", "2026-07-05", "--run-vlm"], capture_output=True, text=True)
     assert result.returncode != 0
     assert "requires --confirm-cost" in result.stdout
 
 def test_run_vlm_without_provider_model_exits_nonzero():
     script_path = Path(__file__).parent.parent / "scripts" / "logitech_vlm_shadow.py"
-    result = subprocess.run([sys.executable, str(script_path), "--run-vlm", "--confirm-cost"], capture_output=True, text=True)
+    result = subprocess.run([sys.executable, str(script_path), "--date", "2026-07-05", "--run-vlm", "--confirm-cost"], capture_output=True, text=True)
     assert result.returncode != 0
     assert "requires --vlm-provider and --vlm-model" in result.stdout
 
@@ -307,7 +328,7 @@ def test_missing_gemini_key_error_mentions_both(monkeypatch, capsys):
     monkeypatch.delenv("FAIR_FEEDER_GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     import logitech_vlm_shadow
-    with patch("sys.argv", ["logitech_vlm_shadow.py", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model"]):
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-05", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model"]):
         with pytest.raises(SystemExit):
             logitech_vlm_shadow.main()
             
@@ -788,18 +809,25 @@ def test_send_telegram_shadow_without_env_exits_nonzero(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "Missing required Telegram environment variables" in captured.out
 
-def test_send_telegram_shadow_requires_explicit_date(monkeypatch, capsys):
+def test_missing_date_exits_before_env_drive_vlm_telegram(monkeypatch, capsys):
+    monkeypatch.setenv("GDRIVE_SERVICE_ACCOUNT_KEY", "{}")
+    monkeypatch.setenv("GDRIVE_LOGITECH_FOLDER_ID", "fake")
+    monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake")
+    
     import logitech_vlm_shadow
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--send-telegram-shadow", "--run-vlm", "--confirm-cost"]):
-        with patch("requests.post") as mock_post:
+        with patch("requests.post") as mock_post, patch("googleapiclient.discovery.build") as mock_build, patch("logitech_vlm_shadow.call_gemini_vlm") as mock_gemini, patch("logitech_vlm_shadow.call_openai_vlm") as mock_openai:
             with pytest.raises(SystemExit) as excinfo:
                 logitech_vlm_shadow.main()
             assert excinfo.value.code != 0
             mock_post.assert_not_called()
+            mock_build.assert_not_called()
+            mock_gemini.assert_not_called()
+            mock_openai.assert_not_called()
     captured = capsys.readouterr()
-    assert "requires an explicit --date" in captured.out
+    assert "date is required" in captured.out
 
 def test_send_telegram_shadow_with_explicit_date_reaches_env_guard_or_next_guard(monkeypatch, capsys):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
@@ -1057,3 +1085,207 @@ def test_telegram_send_photo_failure_exits_nonzero(mock_post, monkeypatch, tmp_p
     assert main_summary["telegram_sent"] is True
     assert main_summary["telegram_images_sent"] == 0
     assert "***REDACTED***" in main_summary["telegram_error"]
+
+import pytest
+from unittest.mock import patch
+
+def test_missing_date_exits_nonzero_global(capsys):
+    import logitech_vlm_shadow
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--out-dir", "fake_dir"]):
+        with pytest.raises(SystemExit) as excinfo:
+            logitech_vlm_shadow.main()
+        assert excinfo.value.code != 0
+    captured = capsys.readouterr()
+    assert "date is required" in captured.out
+
+def test_check_image_domain_color():
+    from logitech_vlm_shadow import check_image_domain
+    import numpy as np
+    img = np.zeros((10, 10, 3), dtype=np.uint8)
+    img[:,:,0] = 100
+    img[:,:,1] = 50
+    img[:,:,2] = 20
+    assert check_image_domain(img) == 'COLOR'
+
+def test_check_image_domain_bright_grayscale():
+    from logitech_vlm_shadow import check_image_domain
+    import numpy as np
+    img = np.full((10, 10, 3), 100, dtype=np.uint8)
+    assert check_image_domain(img) == 'BRIGHT_GRAYSCALE'
+
+def test_check_image_domain_dark_grayscale():
+    from logitech_vlm_shadow import check_image_domain
+    import numpy as np
+    img = np.full((10, 10, 3), 20, dtype=np.uint8)
+    assert check_image_domain(img) == 'DARK_GRAYSCALE'
+
+def test_sanitize_gdrive_key(monkeypatch):
+    from logitech_vlm_shadow import sanitize_error_message
+    monkeypatch.setenv("GDRIVE_SERVICE_ACCOUNT_KEY", "fake_gdrive_key_value")
+    msg = "Error with key fake_gdrive_key_value"
+    assert "fake_gdrive_key_value" not in sanitize_error_message(msg)
+
+def test_sanitize_json_private_key():
+    from logitech_vlm_shadow import sanitize_error_message
+    msg = '{"type": "service_account", "private_key": "-----BEGIN PRIVATE KEY-----\\nSuperSecret\\n-----END PRIVATE KEY-----\\n", "client_email": "fake@foo.com"}'
+    sanitized = sanitize_error_message(msg)
+    assert "SuperSecret" not in sanitized
+    assert 'private_key": "***REDACTED***"' in sanitized or "private_key': '***REDACTED***'" in sanitized
+
+def test_sanitize_pem_block():
+    from logitech_vlm_shadow import sanitize_error_message
+    msg = "Some error\\n-----BEGIN PRIVATE KEY-----\\nAnotherSecret\\n-----END PRIVATE KEY-----\\nEnd error"
+    sanitized = sanitize_error_message(msg)
+    assert "AnotherSecret" not in sanitized
+    assert "-----BEGIN PRIVATE KEY-----\n***REDACTED***\n-----END PRIVATE KEY-----" in sanitized
+
+def test_zero_selected_clips_hard_stop(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("GDRIVE_LOGITECH_FOLDER_ID", "fake_folder")
+    import logitech_vlm_shadow
+    
+    class FakeDrive:
+        def files(self):
+            return self
+        def list(self, **kwargs):
+            return self
+        def execute(self):
+            return {'files': [{'name': 'not_in_window.mp4', 'id': '123'}]}
+            
+    monkeypatch.setattr("google.oauth2.service_account.Credentials.from_service_account_info", lambda x, scopes: None)
+    monkeypatch.setattr("googleapiclient.discovery.build", lambda s, v, credentials: FakeDrive())
+    monkeypatch.setattr("logitech_vlm_shadow.check_credentials", lambda: True)
+    
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-02", "--out-dir", str(tmp_path), "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "gemini-1.5"]):
+        with pytest.raises(SystemExit) as excinfo:
+            logitech_vlm_shadow.main()
+        assert excinfo.value.code != 0
+        
+    captured = capsys.readouterr()
+    assert "No selected clips found" in captured.out
+    assert "not_in_window.mp4" in captured.out
+    assert "123" not in captured.out
+
+def test_stale_out_dir_summary_guard(tmp_path, capsys):
+    import logitech_vlm_shadow
+    import json
+    
+    s_path = tmp_path / "summary.json"
+    with open(s_path, "w") as f:
+        json.dump({"date": "20260701"}, f)
+        
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-02", "--out-dir", str(tmp_path)]):
+        with pytest.raises(SystemExit) as excinfo:
+            logitech_vlm_shadow.main()
+        assert excinfo.value.code != 0
+        
+    captured = capsys.readouterr()
+    assert "Stale out-dir guard" in captured.out
+    assert "has date 20260701 but --date is 20260702" in captured.out
+
+def test_stale_out_dir_mp4_guard(tmp_path, capsys):
+    import logitech_vlm_shadow
+    
+    (tmp_path / "motion_20260701_061800_10s.mp4").touch()
+        
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-02", "--out-dir", str(tmp_path)]):
+        with pytest.raises(SystemExit) as excinfo:
+            logitech_vlm_shadow.main()
+        assert excinfo.value.code != 0
+        
+    captured = capsys.readouterr()
+    assert "Stale out-dir guard" in captured.out
+    assert "does not match --date 20260702" in captured.out
+
+
+def test_gdrive_logitech_folder_id_missing_exits_nonzero_fixed(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("GDRIVE_SERVICE_ACCOUNT_KEY", "{}")
+    monkeypatch.delenv("GDRIVE_LOGITECH_FOLDER_ID", raising=False)
+    monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake")
+    
+    import logitech_vlm_shadow
+    
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-02", "--out-dir", str(tmp_path), "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test"]):
+        with patch("requests.post") as mock_post, patch("googleapiclient.discovery.build") as mock_build, patch("logitech_vlm_shadow.call_gemini_vlm") as mock_vlm:
+            with pytest.raises(SystemExit) as excinfo:
+                logitech_vlm_shadow.main()
+            assert excinfo.value.code != 0
+            mock_post.assert_not_called()
+            mock_build.assert_not_called()
+            mock_vlm.assert_not_called()
+            
+    captured = capsys.readouterr()
+    assert "GDRIVE_LOGITECH_FOLDER_ID is missing" in captured.out
+
+
+def test_contact_sheet_overlay_trap_fixed(monkeypatch, capsys, tmp_path):
+    import logitech_vlm_shadow
+    import numpy as np
+    import cv2
+    from pathlib import Path
+    
+    # Hermetic mock of required env vars
+    monkeypatch.setenv("GDRIVE_SERVICE_ACCOUNT_KEY", "{}")
+    monkeypatch.setenv("GDRIVE_LOGITECH_FOLDER_ID", "fake")
+    monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake")
+    
+    class FakeDrive:
+        def files(self):
+            return self
+        def list(self, **kwargs):
+            return self
+        def execute(self):
+            return {'files': [{'name': 'motion_20260702_062112_2m_30s.mp4', 'id': '123'}]}
+    
+    monkeypatch.setattr("google.oauth2.service_account.Credentials.from_service_account_info", lambda x, scopes: None)
+    monkeypatch.setattr("googleapiclient.discovery.build", lambda s, v, credentials: FakeDrive())
+    
+    # Mock download to just touch the file
+    def fake_download(*args, **kwargs):
+        dest = kwargs.get('dest_path') or args[2]
+        Path(dest).touch()
+    monkeypatch.setattr("logitech_vlm_shadow.download_file", fake_download)
+    
+    class FakeCap:
+        def __init__(self, *args): pass
+        def get(self, prop):
+            if prop == cv2.CAP_PROP_FRAME_COUNT: return 10
+            if prop == cv2.CAP_PROP_FPS: return 1.0
+            return 0
+        def set(self, prop, val): pass
+        def read(self):
+            # raw frames are bright grayscale
+            return True, np.full((10, 10, 3), 100, dtype=np.uint8)
+        def release(self): pass
+    monkeypatch.setattr("cv2.VideoCapture", FakeCap)
+    
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-02", "--out-dir", str(tmp_path), "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test", "--send-telegram-shadow"]):
+        with patch("requests.post") as mock_post, patch("logitech_vlm_shadow.call_openai_vlm") as mock_openai, patch("logitech_vlm_shadow.call_gemini_vlm") as mock_gemini:
+            with pytest.raises(SystemExit) as excinfo:
+                logitech_vlm_shadow.main()
+            assert excinfo.value.code != 0
+            mock_post.assert_not_called()
+            mock_openai.assert_not_called()
+            mock_gemini.assert_not_called()
+    
+    captured = capsys.readouterr()
+    assert "BRIGHT_GRAYSCALE" in captured.out
+    assert "Likely Tapo IR input" in captured.out
+
+def test_gdrive_service_account_key_missing_exits_nonzero(monkeypatch, capsys, tmp_path):
+    monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
+    monkeypatch.setenv("GDRIVE_LOGITECH_FOLDER_ID", "fake")
+    import logitech_vlm_shadow
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-02", "--out-dir", str(tmp_path), "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test"]):
+        with patch("requests.post") as mock_post, patch("googleapiclient.discovery.build") as mock_build, patch("logitech_vlm_shadow.call_gemini_vlm") as mock_vlm:
+            with pytest.raises(SystemExit) as excinfo:
+                logitech_vlm_shadow.main()
+            assert excinfo.value.code != 0
+            mock_post.assert_not_called()
+            mock_build.assert_not_called()
+            mock_vlm.assert_not_called()
+    captured = capsys.readouterr()
+    assert "Missing required environment variables:" in captured.out

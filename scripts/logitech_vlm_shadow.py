@@ -179,13 +179,39 @@ def sanitize_error_message(message: str) -> str:
     if 'TELEGRAM_CHAT_ID' in os.environ and os.environ['TELEGRAM_CHAT_ID']:
         s = s.replace(os.environ['TELEGRAM_CHAT_ID'], "***REDACTED***")
         
+    if 'GDRIVE_SERVICE_ACCOUNT_KEY' in os.environ and os.environ['GDRIVE_SERVICE_ACCOUNT_KEY']:
+        s = s.replace(os.environ['GDRIVE_SERVICE_ACCOUNT_KEY'], "***REDACTED***")
+
     # Redact URL query param key=...
     s = re.sub(r'key=[^&\s]+', 'key=***REDACTED***', s)
     # Redact Authorization bearer token
     s = re.sub(r'(?i)bearer\s+[^\s]+', 'Bearer ***REDACTED***', s)
     # Redact Telegram bot URL tokens
     s = re.sub(r'https://api\.telegram\.org/bot[^/]+/', 'https://api.telegram.org/bot***REDACTED***/', s)
+    # Redact JSON private_key field
+    s = re.sub(r'("|\')private_key\1\s*:\s*("|\')(?:(?!\2).)*\2', r'\1private_key\1: \2***REDACTED***\2', s)
+    # Redact PEM block independent of env
+    s = re.sub(r'-----BEGIN (?:RSA )?PRIVATE KEY-----.*?-----END (?:RSA )?PRIVATE KEY-----', '-----BEGIN PRIVATE KEY-----\n***REDACTED***\n-----END PRIVATE KEY-----', s, flags=re.DOTALL)
     return s
+
+def check_image_domain(img) -> str:
+    import numpy as np
+    if len(img.shape) < 3 or img.shape[2] != 3:
+        mean_lum = np.mean(img)
+        if mean_lum > 30:
+            return 'BRIGHT_GRAYSCALE'
+        return 'DARK_GRAYSCALE'
+    r, g, b = img[:,:,0], img[:,:,1], img[:,:,2]
+    diff_rg = np.mean(np.abs(r.astype(int) - g.astype(int)))
+    diff_gb = np.mean(np.abs(g.astype(int) - b.astype(int)))
+    diff_rb = np.mean(np.abs(r.astype(int) - b.astype(int)))
+    max_diff = max(diff_rg, diff_gb, diff_rb)
+    if max_diff > 5:
+        return 'COLOR'
+    mean_lum = np.mean(img)
+    if mean_lum > 30:
+        return 'BRIGHT_GRAYSCALE'
+    return 'DARK_GRAYSCALE'
 
 def validate_vlm_schema(data, expected_date=None, expected_clip_name=None):
     required_fields = [
@@ -299,7 +325,7 @@ def call_gemini_vlm(prompt_text, image_path, model_name, api_key):
 def main():
     parser = argparse.ArgumentParser(description="Logitech VLM Shadow Scaffold")
     parser.add_argument("--date", type=str, default=None)
-    parser.add_argument("--out-dir", type=str, default=".agent/artifacts/logitech_vlm_shadow_20260704")
+    parser.add_argument("--out-dir", type=str, default=None)
     parser.add_argument("--run-vlm", action="store_true", help="Attempt to run VLM API if key is present")
     parser.add_argument("--confirm-cost", action="store_true", help="Explicitly confirm real VLM API execution costs")
     parser.add_argument("--vlm-provider", type=str, choices=['gemini', 'openai'], help="VLM Provider")
@@ -309,13 +335,18 @@ def main():
     parser.add_argument("--send-telegram-shadow", action="store_true", help="Send a shadow Telegram report")
     args = parser.parse_args()
 
+    if args.date is None:
+        print("[STOP] --date is required to avoid date rollover mistakes.")
+        sys.exit(1)
+        
+    args.date = args.date.replace("-", "")
+    
+    if args.out_dir is None:
+        args.out_dir = f".agent/artifacts/logitech_vlm_shadow_{args.date}"
+
     telegram_token = None
     telegram_chat_id = None
     if args.send_telegram_shadow:
-        if args.date is None:
-            # Shadow Telegram send requires explicit date because Drive video filenames are date-based and midnight rollover can select an empty next-day window.
-            print("[STOP] --send-telegram-shadow requires an explicit --date to avoid date rollover mistakes.")
-            sys.exit(1)
         if not args.run_vlm or not args.confirm_cost:
             print("[STOP] --send-telegram-shadow requires --run-vlm and --confirm-cost.")
             sys.exit(1)
@@ -324,9 +355,6 @@ def main():
         if not telegram_token or not telegram_chat_id:
             print("[STOP] Missing required Telegram environment variables (TELEGRAM_BOT_TOKEN and/or TELEGRAM_CHAT_ID).")
             sys.exit(1)
-
-    if args.date is None:
-        args.date = "20260704"
 
     if args.run_vlm:
         if not args.confirm_cost:
@@ -351,7 +379,12 @@ def main():
             sys.exit(1)
 
     if not check_credentials():
-        return
+        sys.exit(1)
+
+    folder_id = os.environ.get('GDRIVE_LOGITECH_FOLDER_ID')
+    if not folder_id:
+        print("[STOP] GDRIVE_LOGITECH_FOLDER_ID is missing from environment.")
+        sys.exit(1)
 
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
@@ -363,21 +396,34 @@ def main():
         )
         drive = build('drive', 'v3', credentials=creds)
     except Exception as e:
-        print(f"[STOP] Failed to connect to Drive: {e}")
-        return
+        print(f"[STOP] Failed to connect to Drive: {sanitize_error_message(str(e))}")
+        sys.exit(1)
 
     out_dir = Path(args.out_dir)
+    
+    if out_dir.exists():
+        for summary_file in ["summary.json", "logitech_vlm_shadow_summary.json"]:
+            s_path = out_dir / summary_file
+            if s_path.exists():
+                try:
+                    with open(s_path, "r") as f:
+                        s_data = json.load(f)
+                    if s_data.get("date") and s_data.get("date") != args.date:
+                        print(f"[STOP] Stale out-dir guard: {summary_file} has date {s_data.get('date')} but --date is {args.date}.")
+                        sys.exit(1)
+                except Exception:
+                    pass
+        for mp4_file in out_dir.glob("motion_*.mp4"):
+            if f"_{args.date}_" not in mp4_file.name:
+                print(f"[STOP] Stale out-dir guard: {mp4_file.name} does not match --date {args.date}.")
+                sys.exit(1)
+                
     frames_dir = out_dir / "logitech_vlm_frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     
     generate_vlm_schema(out_dir)
 
     search_date = args.date.replace("-", "")
-    folder_id = os.environ.get('GDRIVE_LOGITECH_FOLDER_ID')
-    
-    if not folder_id:
-        print("[STOP] GDRIVE_LOGITECH_FOLDER_ID is missing from environment.")
-        return
 
     q = f"'{folder_id}' in parents and mimeType='video/mp4' and name contains '{search_date}' and trashed=false"
     results = drive.files().list(pageSize=1000, q=q, fields='files(id, name)').execute()
@@ -386,7 +432,15 @@ def main():
     selected_files = [f for f in all_files if in_feeding_window(f['name'], search_date)]
     selected_files.sort(key=lambda x: x['name'])
     
+    if not selected_files:
+        print(f"[STOP] No selected clips found for --date {args.date} in feeding window 06:18-06:30.")
+        print(f"Drive returned {len(all_files)} total files for that date:")
+        for f in all_files:
+            print(f"  - {f['name']}")
+        sys.exit(1)
+    
     manifest_data = []
+    clip_domains = {}
     for f in selected_files:
         contact_sheet_frames = []
         dest_path = out_dir / f['name']
@@ -440,6 +494,10 @@ def main():
             
             ts = extract_timestamp_calc(f['name'], idx, fps)
             heuristic_cat = simple_cat_heuristic(frame, bg_frame)
+            
+            if f['name'] not in clip_domains:
+                clip_domains[f['name']] = []
+            clip_domains[f['name']].append(check_image_domain(frame))
             
             frame_filename = f"{f['name']}_frame_{idx}.jpg"
             frame_path = frames_dir / frame_filename
@@ -547,6 +605,19 @@ def main():
             print(f"[VLM] Processing {clip_name} with {args.vlm_provider}...")
             clips_attempted += 1
             
+            domains = clip_domains.get(clip_name, [])
+            if domains:
+                if 'COLOR' in domains:
+                    pass  # allow
+                elif all(d == 'BRIGHT_GRAYSCALE' for d in domains):
+                    print(f"[STOP] RGB/IR domain guard: {clip_name} is BRIGHT_GRAYSCALE. Likely Tapo IR input routed to Logitech. Aborting.")
+                    sys.exit(1)
+                elif all(d == 'DARK_GRAYSCALE' for d in domains):
+                    print(f"[WARN] RGB/IR domain guard: {clip_name} is DARK_GRAYSCALE. Proceeding as dark RGB morning.")
+                else:
+                    print(f"[STOP] RGB/IR domain guard: {clip_name} has mixed grayscale frames. Aborting conservatively.")
+                    sys.exit(1)
+
             attempts = 0
             max_attempts = 2
             success = False
@@ -599,6 +670,7 @@ def main():
                                 "model": args.vlm_model,
                                 "error_type": "ApiCapReached",
                                 "error_message": f"API call cap reached. Last error: {sanitized_msg}",
+                                "telegram_error_message": "ApiCapReached - API call cap reached.",
                                 "created_at_utc": datetime.now(timezone.utc).isoformat(),
                                 "prompt_hash": prompt_hash,
                                 "attempts_made": attempts
@@ -616,12 +688,21 @@ def main():
                         continue
                         
                     print(f"[VLM] Failed for {clip_name}: {sanitized_msg}")
+                    
+                    telegram_bound_msg = sanitized_msg
+                    if "parse" in sanitized_msg.lower() or "schema" in sanitized_msg.lower() or "json" in sanitized_msg.lower() or isinstance(e, ValueError):
+                        telegram_bound_msg = f"{type(e).__name__} - provider response could not be parsed; see local artifact"
+                    else:
+                        if len(telegram_bound_msg) > 200:
+                            telegram_bound_msg = telegram_bound_msg[:197] + "..."
+                            
                     failed_json = {
                         "clip_name": clip_name,
                         "provider": args.vlm_provider,
                         "model": args.vlm_model,
                         "error_type": type(e).__name__,
-                        "error_message": sanitized_msg,
+                        "error_message": sanitized_msg[:1000],
+                        "telegram_error_message": telegram_bound_msg,
                         "created_at_utc": datetime.now(timezone.utc).isoformat(),
                         "prompt_hash": prompt_hash,
                         "attempts_made": attempts
@@ -762,12 +843,14 @@ def main():
             
         for r in all_failed:
             tg_lines.append(f"Clip: {r['clip_name']}")
-            tg_lines.append(f"FAILED: {r['error_type']} - {r['error_message']}")
+            msg = r.get('telegram_error_message', r.get('error_message', 'Unknown error'))
+            tg_lines.append(f"FAILED: {r['error_type']} - {msg}")
             tg_lines.append("")
             
         for r in all_skipped:
             tg_lines.append(f"Clip: {r['clip_name']}")
-            tg_lines.append(f"SKIPPED: {r['error_type']} - {r['error_message']}")
+            msg = r.get('telegram_error_message', r.get('error_message', 'Unknown error'))
+            tg_lines.append(f"SKIPPED: {r['error_type']} - {msg}")
             tg_lines.append("")
             
         tg_text = "\n".join(tg_lines).strip()
@@ -808,9 +891,12 @@ def main():
                 send_summary["telegram_images_attempted"] = len(images_to_send)
                 for img_path in images_to_send:
                     photo_url = f"https://api.telegram.org/bot{telegram_token}/sendPhoto"
+                    img_clip_name = img_path.name.replace("logitech_vlm_contact_sheet_", "").replace(".jpg", ".mp4")
+                    iso_date = f"{args.date[:4]}-{args.date[4:6]}-{args.date[6:8]}"
+                    caption = f"[SHADOW] {iso_date} {img_clip_name}"
                     with open(img_path, "rb") as photo_f:
                         files = {"photo": photo_f}
-                        data = {"chat_id": telegram_chat_id}
+                        data = {"chat_id": telegram_chat_id, "caption": caption}
                         p_resp = requests.post(photo_url, data=data, files=files, timeout=30)
                         p_resp.raise_for_status()
                         send_summary["telegram_images_sent"] += 1

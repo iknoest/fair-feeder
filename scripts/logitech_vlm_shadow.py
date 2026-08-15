@@ -194,6 +194,227 @@ def sanitize_error_message(message: str) -> str:
     s = re.sub(r'-----BEGIN (?:RSA )?PRIVATE KEY-----.*?-----END (?:RSA )?PRIVATE KEY-----', '-----BEGIN PRIVATE KEY-----\n***REDACTED***\n-----END PRIVATE KEY-----', s, flags=re.DOTALL)
     return s
 
+def extract_duration_from_filename(filename):
+    m = re.search(r'motion_\d{8}_\d{6}(?:_(\d+)m)?_(\d+)s', str(filename))
+    if m:
+        mins = int(m.group(1)) if m.group(1) else 0
+        secs = int(m.group(2))
+        return mins * 60 + secs
+    return 0
+
+def format_duration_str(seconds: float) -> str:
+    secs = int(round(seconds))
+    m, s = divmod(secs, 60)
+    if m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+def build_vlm_session_report(selected_files, manifest_data, all_results, all_failed, all_skipped, search_date, provider, model):
+    """
+    Aggregates clip-level VLM results and video metadata into a session-level feeding report.
+    Guarantees: VLM MUST NOT count individual kibble pieces.
+    """
+    from datetime import timedelta
+
+    # 1. Deterministic Session Timestamps & Duration
+    clip_times = []
+    total_active_video_sec = 0.0
+    for f in selected_files:
+        name = f['name'] if isinstance(f, dict) else str(f)
+        m = re.search(r'motion_(\d{8})_(\d{6})', name)
+        dur = extract_duration_from_filename(name)
+        total_active_video_sec += dur
+        if m:
+            try:
+                dt = datetime.strptime(f"{m.group(1)}{m.group(2)}", "%Y%m%d%H%M%S")
+                clip_times.append((dt, dt + timedelta(seconds=dur)))
+            except Exception:
+                pass
+
+    if clip_times:
+        clip_times.sort(key=lambda x: x[0])
+        session_start_dt = clip_times[0][0]
+        session_end_dt = clip_times[-1][1]
+        session_span_sec = max(0.0, (session_end_dt - session_start_dt).total_seconds())
+        start_time_str = session_start_dt.strftime("%H:%M:%S")
+        end_time_str = session_end_dt.strftime("%H:%M:%S")
+        span_str = format_duration_str(session_span_sec)
+    else:
+        start_time_str = "unknown"
+        end_time_str = "unknown"
+        span_str = "0s"
+
+    clean_date = str(search_date).replace("-", "")
+    if len(clean_date) == 8 and clean_date.isdigit():
+        formatted_date = f"{clean_date[:4]}-{clean_date[4:6]}-{clean_date[6:]}"
+    else:
+        formatted_date = str(search_date)
+
+    # 2. Cat Identity Aggregation
+    identities = [r.get("cat_identity") for r in all_results if r.get("cat_identity")]
+    if any(i in ["both"] for i in identities) or ("Dan" in identities and "Sanbo" in identities):
+        cat_identity = "both"
+    elif identities and all(i == "Sanbo" for i in identities):
+        cat_identity = "Sanbo"
+    elif identities and all(i == "Dan" for i in identities):
+        cat_identity = "Dan"
+    elif identities and all(i == "none" for i in identities):
+        cat_identity = "none"
+    elif identities:
+        cat_identity = identities[0]
+    else:
+        cat_identity = "unsure"
+
+    # 3. Eating Evidence Aggregation
+    eating_evidences = [r.get("eating_evidence") for r in all_results if r.get("eating_evidence")]
+    if "yes" in eating_evidences:
+        eating_evidence = "yes"
+    elif "unsure" in eating_evidences:
+        eating_evidence = "unsure"
+    elif eating_evidences:
+        eating_evidence = "no"
+    else:
+        eating_evidence = "unsure"
+
+    # 4. Bowl State Progression (Qualitative start -> end)
+    bowl_states = [r.get("bowl_state") for r in all_results if r.get("bowl_state")]
+    dedup_states = []
+    for bs in bowl_states:
+        if not dedup_states or dedup_states[-1] != bs:
+            dedup_states.append(bs)
+    if len(dedup_states) > 1:
+        bowl_state_progression = " → ".join(dedup_states)
+    elif dedup_states:
+        bowl_state_progression = dedup_states[0]
+    else:
+        bowl_state_progression = "unsure"
+
+    # 5. First Bowl Interaction Time & Interaction Duration
+    motion_timestamps = [m["timestamp"] for m in manifest_data if m.get("timestamp") and m.get("motion_detected")]
+    if motion_timestamps:
+        first_seen = f"~{motion_timestamps[0].split()[-1]}"
+    elif manifest_data and manifest_data[0].get("timestamp"):
+        first_seen = f"~{manifest_data[0]['timestamp'].split()[-1]}"
+    else:
+        first_seen = f"~{start_time_str}"
+
+    bowl_interaction_duration = format_duration_str(total_active_video_sec)
+
+    # 6. Hand / Human Interaction Detection
+    reasons_text = " ".join([reason for r in all_results for reason in r.get("reasons", [])]).lower()
+    hand_keywords = ["hand", "human", "person", "dispens", "refill", "finger"]
+    if any(kw in reasons_text for kw in hand_keywords):
+        hand_interaction = "1 ep (human hand/interaction observed)"
+    else:
+        hand_interaction = "none observed"
+
+    # 7. Food Theft Flag
+    possible_food_theft = cat_identity in ["both", "Dan"]
+
+    # 8. Confidence & Higher Model Flag
+    confidences = [r.get("confidence", 0.0) for r in all_results if isinstance(r.get("confidence"), (int, float))]
+    confidence = round(float(np.mean(confidences)), 2) if confidences else 0.0
+    needs_higher_model = any(r.get("needs_higher_model", False) for r in all_results) or (confidence < 0.75)
+
+    session_data = {
+        "date": formatted_date,
+        "session_start_time": start_time_str,
+        "session_end_time": end_time_str,
+        "total_duration": span_str,
+        "cat_identity": cat_identity,
+        "eating_evidence": eating_evidence,
+        "bowl_state_progression": bowl_state_progression,
+        "first_bowl_interaction_time": first_seen,
+        "approximate_bowl_interaction_duration": bowl_interaction_duration,
+        "hand_human_interaction": hand_interaction,
+        "possible_food_theft": possible_food_theft,
+        "confidence": confidence,
+        "needs_higher_model": needs_higher_model,
+        "evidence_clip_count": len(selected_files),
+        "evidence_sampled_frame_count": len(manifest_data),
+        "provider": provider,
+        "model": model,
+        "status": "completed" if all_results else "failed_or_skipped"
+    }
+
+    return session_data
+
+def format_session_report_text(session_data, all_results, all_failed, all_skipped, shadow_header=True):
+    lines = []
+    if shadow_header:
+        lines.append("[SHADOW] Logitech VLM Feeding Session Report")
+        lines.append("Non-authoritative shadow report. Production report unchanged.")
+    lines.append(f"Date: {session_data['date']}")
+    lines.append(f"Time: {session_data['session_start_time']}-{session_data['session_end_time']} ({session_data['total_duration']})")
+    lines.append(f"Provider/model: {session_data['provider']} / {session_data['model']}")
+    lines.append("")
+
+    cat_id = session_data["cat_identity"]
+    if session_data["possible_food_theft"]:
+        if cat_id == "both":
+            title = "😿 Possible food theft — Dan & Sanbo at bowl!"
+            cat_line = "      cat: both ⚠️ possible food theft — verify"
+        else:
+            title = f"😿 Possible food theft — {cat_id} at Sanbo feeder!"
+            cat_line = f"      cat: {cat_id} ⚠️ Dan at Logitech/Sanbo feeder — verify"
+    elif cat_id == "Sanbo":
+        title = "😸 Sanbo feeding session"
+        cat_line = "      cat: Sanbo"
+    elif cat_id in ["none", "unsure"]:
+        title = "🍽️? Feeding session (cat identity uncertain)"
+        cat_line = f"      cat: {cat_id} ⚠️ identity needs review"
+    else:
+        title = f"🐱 {cat_id} feeding session"
+        cat_line = f"      cat: {cat_id}"
+
+    lines.append(title)
+    lines.append(cat_line)
+
+    ee = session_data["eating_evidence"]
+    ee_flag = " ⚠️ eating uncertain" if ee == "unsure" else (" ⚠️ no eating evidence" if ee == "no" else "")
+    lines.append(f"   eating: {ee}{ee_flag}")
+    lines.append(f"     bowl: {session_data['bowl_state_progression']}")
+    lines.append(f"first seen: {session_data['first_bowl_interaction_time']} (bowl interaction ~{session_data['approximate_bowl_interaction_duration']})")
+    lines.append(f"     hand: {session_data['hand_human_interaction']}")
+    lines.append(f"  evidence: {session_data['evidence_clip_count']} clip(s) ({session_data['evidence_sampled_frame_count']} frames)")
+
+    conf_flag = " ⚠️ low confidence" if session_data["confidence"] < 0.75 else ""
+    lines.append(f"confidence: {session_data['confidence']}{conf_flag}")
+
+    if session_data["needs_higher_model"]:
+        lines.append("     model: ⚠️ needs higher model review")
+
+    lines.append("")
+    lines.append("Key Observations:")
+    reasons = [reason for r in all_results for reason in r.get("reasons", [])]
+    if reasons:
+        for r in reasons:
+            lines.append(f"- {r}")
+    else:
+        lines.append("- No VLM visual observations recorded.")
+
+    lines.append("")
+    lines.append("Verification / Flags:")
+    flags = []
+    if session_data["possible_food_theft"]:
+        flags.append("⚠️ possible food theft — verify")
+    if session_data["confidence"] < 0.75:
+        flags.append("⚠️ low confidence score — manual review recommended")
+    if session_data["needs_higher_model"]:
+        flags.append("⚠️ marked for higher model review")
+    if all_failed:
+        flags.append(f"⚠️ {len(all_failed)} clip(s) failed API processing")
+    if all_skipped:
+        flags.append(f"⚠️ {len(all_skipped)} clip(s) skipped")
+
+    if flags:
+        for f in flags:
+            lines.append(f"- {f}")
+    else:
+        lines.append("- None (clean session)")
+
+    return "\n".join(lines)
+
 def check_image_domain(img) -> str:
     import numpy as np
     if len(img.shape) < 3 or img.shape[2] != 3:
@@ -743,117 +964,22 @@ def main():
         summary["baseline"] = "no baseline"
         summary["note"] = f"real VLM API execution with {args.vlm_provider}"
         
+        session_data = build_vlm_session_report(
+            selected_files, manifest_data, all_results, all_failed, all_skipped,
+            search_date, args.vlm_provider, args.vlm_model
+        )
+        summary["session"] = session_data
+
         with open(out_dir / "logitech_vlm_shadow_summary.json", "w") as f_sum:
             json.dump(summary, f_sum, indent=2)
             
-        # Human-readable report
-        report_lines = [
-            "[SHADOW] Logitech VLM / Sanbo feeder",
-            f"Date: {search_date}",
-            f"Provider/model: {args.vlm_provider} / {args.vlm_model}",
-            "Production report changed: no",
-            ""
-        ]
-        for r in all_results:
-            report_lines.append(f"Clip: {r['clip_name']}")
-            report_lines.append(f"- Cat identity: {r['cat_identity']}")
-            ee = r['eating_evidence']
-            if ee == "unsure":
-                ee = "Uncertain"
-            report_lines.append(f"- Eating evidence: {ee}")
-            report_lines.append(f"- Bowl state: {r['bowl_state']}")
-            conf = r['confidence']
-            conf_str = str(conf)
-            if conf < 0.75:
-                conf_str += " (Needs review)"
-            report_lines.append(f"- Confidence: {conf_str}")
-            nhm = r['needs_higher_model']
-            nhm_str = str(nhm).lower()
-            if nhm:
-                nhm_str += " (Needs higher model)"
-            report_lines.append(f"- Needs higher model: {nhm_str}")
-            report_lines.append(f"- Contact sheet: {r['source_contact_sheet']}")
-            report_lines.append("- Reasons:")
-            for reason in r.get('reasons', []):
-                report_lines.append(f"  - {reason}")
-            report_lines.append("")
-            
-        for r in all_failed:
-            report_lines.append(f"Clip: {r['clip_name']}")
-            report_lines.append(f"- FAILED: {r['error_type']}")
-            report_lines.append(f"- Error: {r['error_message']}")
-            report_lines.append("")
-            
-        for r in all_skipped:
-            report_lines.append(f"Clip: {r['clip_name']}")
-            report_lines.append(f"- SKIPPED: {r['error_type']}")
-            report_lines.append(f"- Reason: {r['error_message']}")
-            report_lines.append("")
-            
-        (out_dir / "logitech_vlm_shadow_report.md").write_text("\n".join(report_lines))
-        
-        # Telegram preview and actual text format
-        tg_lines = [
-            "[SHADOW] Logitech VLM / Sanbo feeder",
-            "Non-authoritative. Production report unchanged.",
-            f"Date: {search_date}",
-            f"Provider/model: {args.vlm_provider} / {args.vlm_model}",
-            ""
-        ]
-        
-        for r in all_results:
-            tg_lines.append(f"Clip: {r['clip_name']}")
-            
-            cat_id = r['cat_identity']
-            cat_flag = ""
-            if cat_id.lower() == "both":
-                cat_flag = " ⚠️ possible food theft — verify"
-            elif cat_id.lower() == "dan":
-                cat_flag = " ⚠️ Dan at Logitech/Sanbo feeder — verify"
-            elif cat_id.lower() in ["none", "unsure"]:
-                cat_flag = " ⚠️ identity needs review"
-                
-            tg_lines.append(f"Cat: {cat_id}{cat_flag}")
-            
-            ee = str(r['eating_evidence'])
-            ee_flag = ""
-            if ee.lower() == "unsure":
-                ee_flag = " ⚠️ eating uncertain"
-            elif ee.lower() == "no":
-                ee_flag = " ⚠️ no eating evidence"
-            
-            tg_lines.append(f"Eating: {ee}{ee_flag}")
-            tg_lines.append(f"Bowl: {r['bowl_state']}")
-            
-            conf = r['confidence']
-            conf_flag = ""
-            if float(conf) < 0.75:
-                conf_flag = " ⚠️ low confidence"
-            
-            tg_lines.append(f"Confidence: {conf}{conf_flag}")
-            
-            nhm = r['needs_higher_model']
-            nhm_flag = ""
-            if str(nhm).lower() == "true":
-                nhm_flag = " ⚠️ needs higher model review"
-                
-            tg_lines.append(f"Needs Higher Model: {nhm}{nhm_flag}")
-            tg_lines.append(f"Attempts: {r.get('attempts_made', 1)}")
-            tg_lines.append("")
-            
-        for r in all_failed:
-            tg_lines.append(f"Clip: {r['clip_name']}")
-            msg = r.get('telegram_error_message', r.get('error_message', 'Unknown error'))
-            tg_lines.append(f"FAILED: {r['error_type']} - {msg}")
-            tg_lines.append("")
-            
-        for r in all_skipped:
-            tg_lines.append(f"Clip: {r['clip_name']}")
-            msg = r.get('telegram_error_message', r.get('error_message', 'Unknown error'))
-            tg_lines.append(f"SKIPPED: {r['error_type']} - {msg}")
-            tg_lines.append("")
-            
-        tg_text = "\n".join(tg_lines).strip()
+        with open(out_dir / "logitech_vlm_session_summary.json", "w") as f_sess:
+            json.dump(session_data, f_sess, indent=2)
+
+        session_report_md = format_session_report_text(session_data, all_results, all_failed, all_skipped, shadow_header=True)
+        (out_dir / "logitech_vlm_shadow_report.md").write_text(session_report_md)
+
+        tg_text = format_session_report_text(session_data, all_results, all_failed, all_skipped, shadow_header=True)
         (out_dir / "logitech_vlm_shadow_telegram_preview.txt").write_text(tg_text)
 
         if args.send_telegram_shadow:

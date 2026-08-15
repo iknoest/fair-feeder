@@ -58,7 +58,39 @@ from pathlib import Path
 from datetime import datetime
 from collections import deque
 
-# Suppress verbose logs
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+def acquire_process_lock(camera_type: str):
+    """
+    Acquires an OS-level non-blocking advisory file lock (fcntl.flock)
+    to ensure only one motion_recorder instance runs per camera_type.
+    Returns the open file object if lock acquired, or None if lock failed.
+    """
+    cam_name = (camera_type or 'default').lower()
+    lock_filename = f"fair_feeder_recorder_{cam_name}.lock"
+    lock_dir = Path(os.getenv('TEMP', '/tmp')) if os.name == 'nt' else Path('/tmp')
+    lock_path = lock_dir / lock_filename
+    try:
+        lock_file = open(lock_path, "a+")
+        if fcntl is not None and hasattr(fcntl, 'flock'):
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif os.name == 'nt':
+            import msvcrt
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(f"{os.getpid()}\n")
+        lock_file.flush()
+        return lock_file
+    except (IOError, OSError):
+        log.error(
+            f"❌ Single-instance guard: Another motion_recorder process for camera '{camera_type}' "
+            f"is already running (lock file: {lock_path}). Exiting."
+        )
+        return None
 logging.getLogger('zeep').setLevel(logging.CRITICAL)
 logging.getLogger('httpx').setLevel(logging.CRITICAL)
 logging.getLogger('urllib3').setLevel(logging.CRITICAL)
@@ -133,6 +165,10 @@ import platform
 # Google Drive path
 if platform.system() == 'Windows':
     DRIVE_OUTPUT_DIR = Path(r'H:\My Drive\Fun Project\Cat monitor\TAPO_autoupload')
+elif platform.system() == 'Darwin':
+    DRIVE_OUTPUT_DIR = Path('/tmp/gdrive-randomdice-sync')
+    if CAMERA_TYPE == 'usb':
+        DRIVE_OUTPUT_DIR = Path('/tmp/usb-camera-sync')
 else:
     # Raspberry Pi rclone path (local staging folder before rclone sync)
     DRIVE_OUTPUT_DIR = Path('/home/pi5/Pictures/gdrive-randomdice-sync')
@@ -144,8 +180,11 @@ if CAMERA_TYPE == 'usb':
     LOCAL_TEMP_DIR = Path('recordings_usb_temp')
 
 # Ensure directories exist
-LOCAL_TEMP_DIR.mkdir(exist_ok=True)
-DRIVE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    LOCAL_TEMP_DIR.mkdir(exist_ok=True)
+    DRIVE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass
 
 # ── TELEGRAM ───────────────────────────────────────────────────────
 import requests
@@ -256,6 +295,14 @@ class FrameMotionDetector:
         except Exception as e:
             print(f"⚠️ Motion detection error: {e}")
 
+    def reset_background(self):
+        """Reinitializes the background subtractor to clear static absorption."""
+        try:
+            self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(detectShadows=False)
+            log.info("🔄 Background subtractor reset for session continuation.")
+        except Exception as e:
+            log.warning(f"⚠️ Failed to reset background subtractor: {e}")
+
 class CameraFrameReader:
     def __init__(self, source, buffer_seconds=3, fps=15):
         self.source, self.fps = source, fps
@@ -346,6 +393,7 @@ class RecordingController:
         self._live_request_sender = None
         self._live_frames = []
         self._live_start_time = 0
+        self._continuation_requested = False
 
     def _find_last_cat_time(self):
         """Scans the output directory for the most recent cat clip timestamp."""
@@ -397,7 +445,8 @@ class RecordingController:
         seconds_since_motion = now - self._last_motion_ts if self._last_motion_ts else float('inf')
 
         if not self.is_recording:
-            if self.listener.motion_detected:
+            if self.listener.motion_detected or self._continuation_requested:
+                self._continuation_requested = False
                 self._start_recording()
         else:
             # Write frame regardless of motion state
@@ -418,7 +467,12 @@ class RecordingController:
             # Stop conditions
             if elapsed >= MAX_RECORDING_SECS:
                 print(f'   ⏱️  Max duration reached ({MAX_RECORDING_SECS}s)')
+                was_cat_session = self.cat_seen or (self.yolo_model is None and seconds_since_motion < COOLDOWN_SECONDS)
                 self._stop_recording()
+                if was_cat_session:
+                    if hasattr(self.listener, 'reset_background'):
+                        self.listener.reset_background()
+                    self._continuation_requested = True
             elif seconds_since_motion >= COOLDOWN_SECONDS:
                 print(f'   ⏸️  No motion for {COOLDOWN_SECONDS}s — stopping')
                 self._stop_recording()
@@ -564,20 +618,25 @@ class RecordingController:
             import subprocess
             actual_fps = self._frame_count / duration
             if abs(actual_fps - self._declared_fps) / max(self._declared_fps, 1) > 0.20:
-                corrected = str(self.temp_path).replace('.mp4', '_fixed.mp4')
-                pts_factor = self._declared_fps / actual_fps
-                result = subprocess.run(
-                    ["ffmpeg", "-i", str(self.temp_path),
-                     "-vf", f"setpts={pts_factor:.6f}*PTS",
-                     "-r", str(self._declared_fps), "-c:v", "libx264",
-                     "-preset", "fast", "-y", corrected],
-                    capture_output=True
-                )
-                if result.returncode == 0 and os.path.exists(corrected):
-                    os.replace(corrected, str(self.temp_path))
-                    print(f'   🔧 Remuxed: actual {actual_fps:.1f} fps → declared {self._declared_fps:.1f} fps')
-                else:
-                    print(f'   ⚠️ Remux failed (ffmpeg rc={result.returncode}), keeping original')
+                try:
+                    corrected = str(self.temp_path).replace('.mp4', '_fixed.mp4')
+                    pts_factor = self._declared_fps / actual_fps
+                    result = subprocess.run(
+                        ["ffmpeg", "-i", str(self.temp_path),
+                         "-vf", f"setpts={pts_factor:.6f}*PTS",
+                         "-r", str(self._declared_fps), "-c:v", "libx264",
+                         "-preset", "fast", "-y", corrected],
+                        capture_output=True
+                    )
+                    if result.returncode == 0 and os.path.exists(corrected):
+                        os.replace(corrected, str(self.temp_path))
+                        print(f'   🔧 Remuxed: actual {actual_fps:.1f} fps → declared {self._declared_fps:.1f} fps')
+                    else:
+                        print(f'   ⚠️ Remux failed (ffmpeg rc={result.returncode}), keeping original')
+                except FileNotFoundError:
+                    print('   ⚠️ ffmpeg not found, skipping remux')
+                except Exception as e:
+                    print(f'   ⚠️ Remux error: {e}')
 
         # Cat detection filter: delete if no cat found in any sampled frame
         if self.yolo_model and not self.cat_seen:
@@ -600,26 +659,31 @@ class RecordingController:
 
         # Trigger rclone sync if on Raspberry Pi
         if platform.system() != 'Windows':
-            import subprocess
-            
-            # rclone command construction
-            rclone_cmd = ["rclone", "copy", str(DRIVE_OUTPUT_DIR), RCLONE_REMOTE]
-            
-            # If RCLONE_DEST_PATH looks like a Google Drive ID (long alphanumeric), use --drive-root-folder-id
-            # Otherwise, append it to the remote
-            if len(RCLONE_DEST_PATH) > 20 and "/" not in RCLONE_DEST_PATH:
-                rclone_cmd.extend(["--drive-root-folder-id", RCLONE_DEST_PATH])
-                print(f'🔄 Triggering rclone to {RCLONE_REMOTE} (Folder ID: {RCLONE_DEST_PATH})...')
-            else:
-                rclone_cmd[3] = f"{RCLONE_REMOTE}{RCLONE_DEST_PATH}"
-                print(f'🔄 Triggering rclone to {RCLONE_REMOTE}{RCLONE_DEST_PATH}...')
+            try:
+                import subprocess
                 
-            # Run in the background (fire-and-forget) so it doesn't block the next recording
-            subprocess.Popen(
-                rclone_cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
+                # rclone command construction
+                rclone_cmd = ["rclone", "copy", str(DRIVE_OUTPUT_DIR), RCLONE_REMOTE]
+                
+                # If RCLONE_DEST_PATH looks like a Google Drive ID (long alphanumeric), use --drive-root-folder-id
+                # Otherwise, append it to the remote
+                if len(RCLONE_DEST_PATH) > 20 and "/" not in RCLONE_DEST_PATH:
+                    rclone_cmd.extend(["--drive-root-folder-id", RCLONE_DEST_PATH])
+                    print(f'🔄 Triggering rclone to {RCLONE_REMOTE} (Folder ID: {RCLONE_DEST_PATH})...')
+                else:
+                    rclone_cmd[3] = f"{RCLONE_REMOTE}{RCLONE_DEST_PATH}"
+                    print(f'🔄 Triggering rclone to {RCLONE_REMOTE}{RCLONE_DEST_PATH}...')
+                    
+                # Run in the background (fire-and-forget) so it doesn't block the next recording
+                subprocess.Popen(
+                    rclone_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+            except FileNotFoundError:
+                print('   ⚠️ rclone not found in PATH, skipping auto-sync')
+            except Exception as e:
+                print(f'   ⚠️ rclone launch error: {e}')
 
 class BowlPositionMonitor:
     """Periodically checks whether the COCO bowl class is framed."""
@@ -1271,6 +1335,11 @@ if __name__ == "__main__":
     log.info('  Fair Feeder — Motion Recorder with Cat Detection')
     log.info('='*60)
     
+    # Enforce single-instance process lock per camera type
+    lock_handle = acquire_process_lock(CAMERA_TYPE)
+    if lock_handle is None:
+        sys.exit(1)
+
     # Initialize detectors
     yolo_model = None
     bowl_monitor_model = None

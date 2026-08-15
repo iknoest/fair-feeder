@@ -143,7 +143,6 @@ jobs:
         env:
           GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
           GDRIVE_LOGITECH_FOLDER_ID: ${{ secrets.GDRIVE_LOGITECH_FOLDER_ID }}
-          FAIR_FEEDER_GEMINI_API_KEY: ${{ secrets.FAIR_FEEDER_GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |

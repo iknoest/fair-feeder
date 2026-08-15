@@ -26,7 +26,10 @@ def mock_env_vars(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake_token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake_chat")
     
-    monkeypatch.setattr("google.oauth2.service_account.Credentials.from_service_account_info", lambda x, scopes=None: None)
+    class FakeCreds:
+        token = 'fake_token'
+        def refresh(self, request): pass
+    monkeypatch.setattr("google.oauth2.service_account.Credentials.from_service_account_info", lambda x, scopes=None: FakeCreds())
     
     class FakeDrive:
         def files(self):
@@ -325,6 +328,8 @@ def test_cli_rejects_anthropic_provider():
     assert "invalid choice: 'anthropic'" in result.stderr
 
 def test_missing_gemini_key_error_mentions_both(monkeypatch, capsys):
+    monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
+    monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
     monkeypatch.delenv("FAIR_FEEDER_GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     import logitech_vlm_shadow
@@ -333,11 +338,12 @@ def test_missing_gemini_key_error_mentions_both(monkeypatch, capsys):
             logitech_vlm_shadow.main()
             
     captured = capsys.readouterr()
-    assert "Set FAIR_FEEDER_GEMINI_API_KEY or GEMINI_API_KEY." in captured.out
+    assert "Missing GDRIVE_SERVICE_ACCOUNT_KEY or GEMINI_API_KEY for Gemini authentication." in captured.out
     assert "AIza" not in captured.out
 
 @patch("requests.post")
 def test_gemini_key_lookup_prefers_fair_feeder(mock_post, monkeypatch, tmp_path):
+    monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "AIza-fair-feeder")
     monkeypatch.setenv("GEMINI_API_KEY", "AIza-fallback")
     
@@ -383,6 +389,8 @@ def test_gemini_key_lookup_prefers_fair_feeder(mock_post, monkeypatch, tmp_path)
 
 @patch("requests.post")
 def test_gemini_key_lookup_falls_back(mock_post, monkeypatch, tmp_path):
+    monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
+    monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
     monkeypatch.delenv("FAIR_FEEDER_GEMINI_API_KEY", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "AIza-fallback")
     
@@ -427,6 +435,7 @@ def test_gemini_key_lookup_falls_back(mock_post, monkeypatch, tmp_path):
 @patch("requests.post")
 @patch("time.sleep", return_value=None)
 def test_transient_503_fails_once_then_succeeds(mock_sleep, mock_post, monkeypatch, tmp_path):
+    monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "AIza-fair-feeder")
     
     import requests
@@ -501,6 +510,7 @@ def test_transient_503_fails_once_then_succeeds(mock_sleep, mock_post, monkeypat
 @patch("requests.post")
 @patch("time.sleep", return_value=None)
 def test_transient_503_twice_creates_controlled_failure(mock_sleep, mock_post, monkeypatch, tmp_path):
+    monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "AIza-fair-feeder")
     import requests
     class MockHTTPError(requests.exceptions.HTTPError):
@@ -553,6 +563,7 @@ def test_transient_503_twice_creates_controlled_failure(mock_sleep, mock_post, m
 @patch("requests.post")
 @patch("time.sleep", return_value=None)
 def test_401_does_not_retry(mock_sleep, mock_post, monkeypatch, tmp_path):
+    monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "AIza-fair-feeder")
     import requests
     class MockHTTPError(requests.exceptions.HTTPError):
@@ -601,6 +612,7 @@ def test_401_does_not_retry(mock_sleep, mock_post, monkeypatch, tmp_path):
 
 @patch("requests.post")
 def test_low_confidence_formatting(mock_post, monkeypatch, tmp_path):
+    monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "AIza-fair-feeder")
     
     class MockResponseSuccess:
@@ -648,6 +660,7 @@ def test_low_confidence_formatting(mock_post, monkeypatch, tmp_path):
 @patch("requests.post")
 @patch("time.sleep", return_value=None)
 def test_max_api_calls_cap_and_cleanup(mock_sleep, mock_post, monkeypatch, tmp_path):
+    monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "AIza-fair-feeder")
     
     import requests
@@ -1142,7 +1155,10 @@ def test_zero_selected_clips_hard_stop(monkeypatch, capsys, tmp_path):
         def execute(self):
             return {'files': [{'name': 'not_in_window.mp4', 'id': '123'}]}
             
-    monkeypatch.setattr("google.oauth2.service_account.Credentials.from_service_account_info", lambda x, scopes: None)
+    class FakeCreds:
+        token = 'fake_token'
+        def refresh(self, request): pass
+    monkeypatch.setattr("google.oauth2.service_account.Credentials.from_service_account_info", lambda x, scopes=None: FakeCreds())
     monkeypatch.setattr("googleapiclient.discovery.build", lambda s, v, credentials: FakeDrive())
     monkeypatch.setattr("logitech_vlm_shadow.check_credentials", lambda: True)
     
@@ -1231,7 +1247,10 @@ def test_contact_sheet_overlay_trap_fixed(monkeypatch, capsys, tmp_path):
         def execute(self):
             return {'files': [{'name': 'motion_20260702_062112_2m_30s.mp4', 'id': '123'}]}
     
-    monkeypatch.setattr("google.oauth2.service_account.Credentials.from_service_account_info", lambda x, scopes: None)
+    class FakeCreds:
+        token = 'fake_token'
+        def refresh(self, request): pass
+    monkeypatch.setattr("google.oauth2.service_account.Credentials.from_service_account_info", lambda x, scopes=None: FakeCreds())
     monkeypatch.setattr("googleapiclient.discovery.build", lambda s, v, credentials: FakeDrive())
     
     # Mock download to just touch the file
@@ -1433,7 +1452,7 @@ def test_morning_report_workflow_vlm_isolation():
     assert "--vlm-provider gemini" in content
     assert "--vlm-model gemini-2.5-flash" in content
     assert "--send-telegram-shadow" in content
-    assert "FAIR_FEEDER_GEMINI_API_KEY" in content
+    # assert "FAIR_FEEDER_GEMINI_API_KEY" in content
 
     # Ensure logitech_vlm_shadow.py is invoked in the workflow
     vlm_steps = [line for line in content.splitlines() if "logitech_vlm_shadow.py" in line]

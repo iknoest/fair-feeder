@@ -559,7 +559,17 @@ def call_openai_vlm(prompt_text, image_path, model_name, api_key):
 
 def call_gemini_vlm(prompt_text, image_path, model_name, api_key):
     import requests
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    if isinstance(api_key, tuple):
+        token, project_id = api_key
+        url = f"https://us-central1-aiplatform.googleapis.com/v1/projects/{project_id}/locations/us-central1/publishers/google/models/{model_name}:generateContent"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+    else:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        headers = {"Content-Type": "application/json"}
+        
     with open(image_path, "rb") as f:
         img_data = f.read()
     b64_img = base64.b64encode(img_data).decode("utf-8")
@@ -567,6 +577,7 @@ def call_gemini_vlm(prompt_text, image_path, model_name, api_key):
     payload = {
         "contents": [
             {
+                "role": "user",
                 "parts": [
                     {"text": prompt_text},
                     {
@@ -584,7 +595,7 @@ def call_gemini_vlm(prompt_text, image_path, model_name, api_key):
         }
     }
     
-    resp = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
+    resp = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
     resp.raise_for_status()
     data = resp.json()
     
@@ -637,10 +648,26 @@ def main():
             sys.exit(1)
             
         if args.vlm_provider == 'gemini':
-            api_key = os.environ.get('FAIR_FEEDER_GEMINI_API_KEY') or os.environ.get('GEMINI_API_KEY')
-            if not api_key:
-                print("[STOP] Missing required API key. Set FAIR_FEEDER_GEMINI_API_KEY or GEMINI_API_KEY.")
-                sys.exit(1)
+            gdrive_creds_json = os.environ.get('GDRIVE_SERVICE_ACCOUNT_KEY')
+            if gdrive_creds_json:
+                try:
+                    from google.oauth2 import service_account
+                    from google.auth.transport.requests import Request
+                    creds_dict = json.loads(gdrive_creds_json)
+                    creds = service_account.Credentials.from_service_account_info(
+                        creds_dict,
+                        scopes=['https://www.googleapis.com/auth/cloud-platform']
+                    )
+                    creds.refresh(Request())
+                    api_key = (creds.token, creds_dict.get('project_id'))
+                except Exception as e:
+                    print(f"[STOP] Failed to obtain Vertex AI token: {e}")
+                    sys.exit(1)
+            else:
+                api_key = os.environ.get('FAIR_FEEDER_GEMINI_API_KEY') or os.environ.get('GEMINI_API_KEY')
+                if not api_key:
+                    print("[STOP] Missing GDRIVE_SERVICE_ACCOUNT_KEY or GEMINI_API_KEY for Gemini authentication.")
+                    sys.exit(1)
         elif args.vlm_provider == 'openai':
             api_key = os.environ.get('OPENAI_API_KEY')
             if not api_key:
@@ -662,7 +689,7 @@ def main():
     from googleapiclient.discovery import build
 
     try:
-        key_dict = json.loads(os.environ['GDRIVE_SERVICE_ACCOUNT_KEY'])
+        key_dict = json.loads(os.environ.get('GDRIVE_SERVICE_ACCOUNT_KEY', '{}'))
         creds = service_account.Credentials.from_service_account_info(
             key_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
         )

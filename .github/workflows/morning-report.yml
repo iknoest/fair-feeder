@@ -110,6 +110,15 @@ jobs:
             echo "GDRIVE_UPLOAD_FOLDER_ID=${{ secrets.GDRIVE_LOGITECH_FOLDER_ID }}" >> "$GITHUB_ENV"
           fi
 
+      - name: Determine Target Date
+        run: |
+          if [ -n "${{ github.event.inputs.date_override }}" ]; then
+            TARGET_DATE="${{ github.event.inputs.date_override }}"
+          else
+            TARGET_DATE=$(python -c 'from datetime import datetime; from zoneinfo import ZoneInfo; print(datetime.now(ZoneInfo("Europe/Amsterdam")).strftime("%Y%m%d"))')
+          fi
+          echo "TARGET_DATE=${TARGET_DATE}" >> "$GITHUB_ENV"
+
       - name: Run analysis notebook
         env:
           GITHUB_ACTIONS: 'true'
@@ -128,6 +137,25 @@ jobs:
             -p DATE_OVERRIDE "${{ github.event.inputs.date_override }}" \
             --log-output \
             --kernel python3
+
+      - name: Run Logitech Gemini VLM Shadow Report
+        if: matrix.camera == 'LOGITECH'
+        env:
+          GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
+          GDRIVE_LOGITECH_FOLDER_ID: ${{ secrets.GDRIVE_LOGITECH_FOLDER_ID }}
+          FAIR_FEEDER_GEMINI_API_KEY: ${{ secrets.FAIR_FEEDER_GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python scripts/logitech_vlm_shadow.py \
+            --date "$TARGET_DATE" \
+            --out-dir "/tmp/logitech_vlm_shadow_${TARGET_DATE}" \
+            --run-vlm \
+            --confirm-cost \
+            --vlm-provider gemini \
+            --vlm-model gemini-2.5-flash \
+            --send-telegram-shadow \
+            --cleanup-downloaded-videos
 
       - name: Upload output notebook (only when analysis fails)
         if: failure()

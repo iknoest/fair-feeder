@@ -1418,3 +1418,23 @@ def test_vlm_session_report_no_kibble_counts():
     assert "pieces" not in report_text.lower()
     assert "start_kibble" not in session
     assert "kibble_eaten" not in session
+
+
+def test_morning_report_workflow_vlm_isolation():
+    from pathlib import Path
+    workflow_path = Path(".github/workflows/morning-report.yml")
+    assert workflow_path.exists(), "morning-report.yml must exist"
+    content = workflow_path.read_text(encoding="utf-8")
+
+    assert "Run Logitech Gemini VLM Shadow Report" in content
+    assert "if: matrix.camera == 'LOGITECH'" in content
+    assert "--run-vlm" in content
+    assert "--confirm-cost" in content
+    assert "--vlm-provider gemini" in content
+    assert "--vlm-model gemini-2.5-flash" in content
+    assert "--send-telegram-shadow" in content
+    assert "FAIR_FEEDER_GEMINI_API_KEY" in content
+
+    # Ensure logitech_vlm_shadow.py is invoked in the workflow
+    vlm_steps = [line for line in content.splitlines() if "logitech_vlm_shadow.py" in line]
+    assert len(vlm_steps) >= 1

@@ -1379,8 +1379,9 @@ if __name__ == "__main__":
         log.info('')
         log.info('\ud83d\ude80 Monitoring... Press Ctrl+C to stop.')
         
-        # Ping Telegram so user knows the service is running (e.g. after a reboot)
-        send_telegram_alert("📷 Fair Feeder Monitor is LIVE and protecting the bowl! 🐱\nRaspberry Pi 5 is officially monitoring 24/7.")
+        # Ping Telegram so user knows which camera service is running (e.g. after a reboot/restart)
+        cam_label = "LOGITECH" if CAMERA_TYPE == "usb" else "TAPO"
+        send_telegram_alert(f"📷 Fair Feeder Monitor [{cam_label}] is LIVE and protecting the bowl! 🐱\nRaspberry Pi 5 is officially monitoring 24/7.")
 
         # Start Telegram command listener (two-way health check)
         cmd_bot_token, cmd_chat_id = get_telegram_credentials()

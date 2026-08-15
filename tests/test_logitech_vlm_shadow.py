@@ -1438,3 +1438,73 @@ def test_morning_report_workflow_vlm_isolation():
     # Ensure logitech_vlm_shadow.py is invoked in the workflow
     vlm_steps = [line for line in content.splitlines() if "logitech_vlm_shadow.py" in line]
     assert len(vlm_steps) >= 1
+
+
+def test_vlm_total_failure_report_format():
+    import logitech_vlm_shadow
+    selected = [{'name': 'motion_20260702_061945_52s.mp4', 'id': '1'}]
+    manifest = [{'timestamp': '2026-07-02 06:19:50', 'motion_detected': True}]
+    failed = [{
+        'clip_name': 'motion_20260702_061945_52s.mp4',
+        'error_type': 'ApiCapReached',
+        'error_message': '400 Client Error: Bad Request for url: https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash',
+        'telegram_error_message': 'ApiCapReached - 400 Client Error'
+    }]
+    session = logitech_vlm_shadow.build_vlm_session_report(
+        selected, manifest, [], failed, [], "20260702", "gemini", "gemini-2.5-flash"
+    )
+    assert session['vlm_success_count'] == 0
+    assert session['failure_category'] == 'provider quota/billing'
+    assert session['status'] == 'failed'
+
+    report_text = logitech_vlm_shadow.format_vlm_failure_report_text(session, failed, [], shadow_header=True)
+    assert "[SHADOW][LOGITECH] ⚠️ VLM analysis failed" in report_text
+    assert "No cat/eating/bowl conclusion was produced." in report_text
+    assert "Failure category: provider quota/billing" in report_text
+    assert "cat: unsure" not in report_text
+    assert "eating: unsure" not in report_text
+
+
+def test_telegram_delivery_accounting_on_failure_report(monkeypatch, tmp_path):
+    monkeypatch.setenv("GDRIVE_SERVICE_ACCOUNT_KEY", "{}")
+    monkeypatch.setenv("GDRIVE_LOGITECH_FOLDER_ID", "fake")
+    monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake_bot_token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake_chat_id")
+
+    import logitech_vlm_shadow
+
+    selected_files = [{'name': 'motion_20260702_061945_52s.mp4', 'id': '1'}]
+    manifest_data = [{'timestamp': '2026-07-02 06:19:50', 'motion_detected': True}]
+    failed = [{
+        'clip_name': 'motion_20260702_061945_52s.mp4',
+        'error_type': 'ApiCapReached',
+        'error_message': '429 Quota Exceeded',
+        'telegram_error_message': 'ApiCapReached - 429 Quota Exceeded'
+    }]
+
+    session = logitech_vlm_shadow.build_vlm_session_report(
+        selected_files, manifest_data, [], failed, [], "20260702", "gemini", "gemini-2.5-flash"
+    )
+
+    send_summary = {
+        "telegram_send_attempted": True,
+        "telegram_text_sent": True,
+        "telegram_photos_attempted": 0,
+        "telegram_photos_sent": 0,
+        "is_failure_report": True,
+        "is_analysis_report": False,
+        "total_messages_delivered": 1,
+        "telegram_error": None
+    }
+
+    assert send_summary["total_messages_delivered"] == 1
+    assert send_summary["is_failure_report"] is True
+    assert send_summary["total_messages_delivered"] != 0
+
+
+def test_camera_label_in_startup_alert():
+    from pathlib import Path
+    source = Path("motion_recorder.py").read_text(encoding="utf-8")
+    assert "cam_label =" in source
+    assert "📷 Fair Feeder Monitor [{cam_label}] is LIVE" in source

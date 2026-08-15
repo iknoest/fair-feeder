@@ -316,6 +316,19 @@ def build_vlm_session_report(selected_files, manifest_data, all_results, all_fai
     confidence = round(float(np.mean(confidences)), 2) if confidences else 0.0
     needs_higher_model = any(r.get("needs_higher_model", False) for r in all_results) or (confidence < 0.75)
 
+    # 9. Failure Category (when failures occur)
+    all_error_text = " ".join([str(f.get("error_message", "")) + " " + str(f.get("error_type", "")) for f in all_failed + all_skipped]).lower()
+    if any(k in all_error_text for k in ["429", "quota", "billing", "prepayment", "apicapreached"]):
+        failure_category = "provider quota/billing"
+    elif any(k in all_error_text for k in ["401", "403", "credential", "unauthorized", "key"]):
+        failure_category = "credentials/authentication"
+    elif any(k in all_error_text for k in ["timeout", "connect", "network"]):
+        failure_category = "network/timeout"
+    elif all_failed or all_skipped:
+        failure_category = "provider API error"
+    else:
+        failure_category = None
+
     session_data = {
         "date": formatted_date,
         "session_start_time": start_time_str,
@@ -332,12 +345,50 @@ def build_vlm_session_report(selected_files, manifest_data, all_results, all_fai
         "needs_higher_model": needs_higher_model,
         "evidence_clip_count": len(selected_files),
         "evidence_sampled_frame_count": len(manifest_data),
+        "vlm_success_count": len(all_results),
+        "vlm_failure_count": len(all_failed),
+        "vlm_skipped_count": len(all_skipped),
+        "failure_category": failure_category,
         "provider": provider,
         "model": model,
-        "status": "completed" if all_results else "failed_or_skipped"
+        "status": "completed" if all_results else "failed"
     }
 
     return session_data
+
+def format_vlm_failure_report_text(session_data, all_failed, all_skipped, shadow_header=True):
+    lines = []
+    if shadow_header:
+        lines.append("[SHADOW][LOGITECH] ⚠️ VLM analysis failed")
+        lines.append("Non-authoritative shadow report. Production report unchanged.")
+    lines.append(f"Date: {session_data['date']}")
+    lines.append(f"Time: {session_data['session_start_time']}-{session_data['session_end_time']} ({session_data['total_duration']})")
+    lines.append(f"Provider/model: {session_data['provider']} / {session_data['model']}")
+    lines.append("")
+    lines.append(f"Evidence prepared: {session_data['evidence_clip_count']} clip(s) / {session_data['evidence_sampled_frame_count']} frame(s)")
+    lines.append(f"VLM analysis: FAILED (0/{session_data['evidence_clip_count']} clips succeeded)")
+    lines.append("")
+    lines.append("No cat/eating/bowl conclusion was produced.")
+    lines.append("Production report unchanged.")
+    lines.append(f"Failure category: {session_data.get('failure_category') or 'provider API error'}")
+    lines.append("")
+    lines.append("Failures:")
+    if all_failed:
+        for f in all_failed:
+            clip = f.get("clip_name", "unknown")
+            err_type = f.get("error_type", "Error")
+            msg = f.get("telegram_error_message", f.get("error_message", ""))
+            lines.append(f"- {clip}: {err_type} - {msg}")
+    if all_skipped:
+        for s in all_skipped:
+            clip = s.get("clip_name", "unknown")
+            err_type = s.get("error_type", "Skipped")
+            msg = s.get("telegram_error_message", s.get("error_message", ""))
+            lines.append(f"- {clip}: {err_type} - {msg}")
+    if not all_failed and not all_skipped:
+        lines.append("- No clip results processed.")
+
+    return "\n".join(lines)
 
 def format_session_report_text(session_data, all_results, all_failed, all_skipped, shadow_header=True):
     lines = []
@@ -976,10 +1027,14 @@ def main():
         with open(out_dir / "logitech_vlm_session_summary.json", "w") as f_sess:
             json.dump(session_data, f_sess, indent=2)
 
-        session_report_md = format_session_report_text(session_data, all_results, all_failed, all_skipped, shadow_header=True)
-        (out_dir / "logitech_vlm_shadow_report.md").write_text(session_report_md)
+        if len(all_results) > 0:
+            report_text = format_session_report_text(session_data, all_results, all_failed, all_skipped, shadow_header=True)
+        else:
+            report_text = format_vlm_failure_report_text(session_data, all_failed, all_skipped, shadow_header=True)
 
-        tg_text = format_session_report_text(session_data, all_results, all_failed, all_skipped, shadow_header=True)
+        (out_dir / "logitech_vlm_shadow_report.md").write_text(report_text)
+
+        tg_text = report_text
         (out_dir / "logitech_vlm_shadow_telegram_preview.txt").write_text(tg_text)
 
         if args.send_telegram_shadow:
@@ -988,13 +1043,18 @@ def main():
                 "telegram_text_sent": False,
                 "telegram_images_attempted": 0,
                 "telegram_images_sent": 0,
+                "telegram_photos_attempted": 0,
+                "telegram_photos_sent": 0,
                 "telegram_image_cap": 2,
                 "attached_contact_sheets": [],
+                "is_failure_report": len(all_results) == 0,
+                "is_analysis_report": len(all_results) > 0,
+                "total_messages_delivered": 0,
                 "telegram_error": None,
                 "production_report_changed": False,
                 "original_report_changed": False,
                 "telegram_is_shadow": True,
-                "message_starts_with_shadow": tg_text.startswith("[SHADOW] Logitech VLM / Sanbo feeder"),
+                "message_starts_with_shadow": tg_text.startswith("[SHADOW]"),
                 "telegram_send_fully_successful": False
             }
             
@@ -1010,11 +1070,12 @@ def main():
                 images_to_send = []
                 for r in all_results:
                     if len(images_to_send) < 2:
-                        cs_path = out_dir / r['source_contact_sheet']
+                        cs_path = out_dir / r.get('source_contact_sheet', '')
                         if cs_path.exists():
                             images_to_send.append(cs_path)
                             
                 send_summary["telegram_images_attempted"] = len(images_to_send)
+                send_summary["telegram_photos_attempted"] = len(images_to_send)
                 for img_path in images_to_send:
                     photo_url = f"https://api.telegram.org/bot{telegram_token}/sendPhoto"
                     img_clip_name = img_path.name.replace("logitech_vlm_contact_sheet_", "").replace(".jpg", ".mp4")
@@ -1026,11 +1087,14 @@ def main():
                         p_resp = requests.post(photo_url, data=data, files=files, timeout=30)
                         p_resp.raise_for_status()
                         send_summary["telegram_images_sent"] += 1
+                        send_summary["telegram_photos_sent"] += 1
                         send_summary["attached_contact_sheets"].append(img_path.name)
                         
+                send_summary["total_messages_delivered"] = (1 if send_summary["telegram_text_sent"] else 0) + send_summary["telegram_photos_sent"]
                 send_summary["telegram_send_fully_successful"] = True
             except Exception as e:
                 send_summary["telegram_error"] = sanitize_error_message(str(e))
+                send_summary["total_messages_delivered"] = (1 if send_summary["telegram_text_sent"] else 0) + send_summary.get("telegram_photos_sent", 0)
                 print(f"[VLM] Telegram send error: {send_summary['telegram_error']}")
                 had_failures = True
                 
@@ -1044,6 +1108,8 @@ def main():
                     main_sum = json.load(f_sum)
                 main_sum["telegram_sent"] = send_summary["telegram_text_sent"]
                 main_sum["telegram_images_sent"] = send_summary["telegram_images_sent"]
+                main_sum["telegram_photos_sent"] = send_summary["telegram_photos_sent"]
+                main_sum["total_messages_delivered"] = send_summary["total_messages_delivered"]
                 main_sum["telegram_error"] = send_summary["telegram_error"]
                 with open(summary_path, "w") as f_sum:
                     json.dump(main_sum, f_sum, indent=2)

@@ -1186,6 +1186,12 @@ def main():
                         
                 send_summary["total_messages_delivered"] = (1 if send_summary["telegram_text_sent"] else 0) + send_summary["telegram_photos_sent"]
                 send_summary["telegram_send_fully_successful"] = True
+                
+                # Print delivery evidence for GitHub Actions logs
+                print("[VLM] Telegram delivery evidence:")
+                for ev in send_summary["delivery_evidence"]:
+                    print(f"  - type: {ev.get('type')}, status: {ev.get('status')}, ok: {ev.get('ok')}, message_id: {ev.get('message_id')}")
+                    
             except Exception as e:
                 send_summary["telegram_error"] = sanitize_error_message(str(e))
                 send_summary["total_messages_delivered"] = (1 if send_summary["telegram_text_sent"] else 0) + send_summary.get("telegram_photos_sent", 0)

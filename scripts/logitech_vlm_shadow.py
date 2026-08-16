@@ -414,22 +414,25 @@ def format_session_report_text(session_data, all_results, all_failed, all_skippe
     lines.append("")
 
     cat_id = session_data["cat_identity"]
+    has_refs = bool(all_results and all_results[0].get('reference_images'))
+    ref_str = " (reference-assisted)" if has_refs else ""
+    
     if session_data["possible_food_theft"]:
         if cat_id == "both":
             title = "😿 Possible food theft — Dan & Sanbo at bowl!"
-            cat_line = "      cat: both ⚠️ possible food theft — verify"
+            cat_line = f"      cat: both{ref_str} ⚠️ possible food theft — verify"
         else:
             title = f"😿 Possible food theft — {cat_id} at Sanbo feeder!"
-            cat_line = f"      cat: {cat_id} ⚠️ Dan at Logitech/Sanbo feeder — verify"
+            cat_line = f"      cat: {cat_id}{ref_str} ⚠️ Dan at Logitech/Sanbo feeder — verify"
     elif cat_id == "Sanbo":
         title = "😸 Sanbo feeding session"
-        cat_line = "      cat: Sanbo"
-    elif cat_id in ["none", "unsure"]:
-        title = "🍽️? Feeding session (cat identity uncertain)"
-        cat_line = f"      cat: {cat_id} ⚠️ identity needs review"
+        cat_line = f"      cat: Sanbo{ref_str}"
+    elif cat_id == "Dan":
+        title = "😸 Dan feeding session"
+        cat_line = f"      cat: Dan{ref_str}"
     else:
         title = f"🐱 {cat_id} feeding session"
-        cat_line = f"      cat: {cat_id}"
+        cat_line = f"      cat: {cat_id}{ref_str}"
 
     lines.append(title)
     lines.append(cat_line)
@@ -1113,6 +1116,7 @@ def main():
                 "telegram_photos_sent": 0,
                 "telegram_image_cap": 2,
                 "attached_contact_sheets": [],
+                "delivery_evidence": [],
                 "is_failure_report": len(all_results) == 0,
                 "is_analysis_report": len(all_results) > 0,
                 "total_messages_delivered": 0,
@@ -1129,6 +1133,18 @@ def main():
                 # Send text
                 url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
                 resp = requests.post(url, data={"chat_id": telegram_chat_id, "text": tg_text}, timeout=20)
+                
+                try:
+                    r_json = resp.json()
+                    send_summary["delivery_evidence"].append({
+                        "type": "text",
+                        "status": resp.status_code,
+                        "ok": r_json.get("ok"),
+                        "message_id": r_json.get("result", {}).get("message_id")
+                    })
+                except Exception:
+                    pass
+                
                 resp.raise_for_status()
                 send_summary["telegram_text_sent"] = True
                 
@@ -1151,6 +1167,18 @@ def main():
                         files = {"photo": photo_f}
                         data = {"chat_id": telegram_chat_id, "caption": caption}
                         p_resp = requests.post(photo_url, data=data, files=files, timeout=30)
+                        
+                        try:
+                            pr_json = p_resp.json()
+                            send_summary["delivery_evidence"].append({
+                                "type": "photo",
+                                "status": p_resp.status_code,
+                                "ok": pr_json.get("ok"),
+                                "message_id": pr_json.get("result", {}).get("message_id")
+                            })
+                        except Exception:
+                            pass
+                            
                         p_resp.raise_for_status()
                         send_summary["telegram_images_sent"] += 1
                         send_summary["telegram_photos_sent"] += 1

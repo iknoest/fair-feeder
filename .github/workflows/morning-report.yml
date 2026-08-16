@@ -145,7 +145,11 @@ jobs:
           GDRIVE_LOGITECH_FOLDER_ID: ${{ secrets.GDRIVE_LOGITECH_FOLDER_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ROBOFLOW_API_KEY: ${{ secrets.ROBOFLOW_API_KEY }}
         run: |
+          REF_DIR="$RUNNER_TEMP/fair-feeder-reference"
+          python scripts/prepare_vlm_references.py --out-dir "$REF_DIR"
+          
           python scripts/logitech_vlm_shadow.py \
             --date "$TARGET_DATE" \
             --out-dir "/tmp/logitech_vlm_shadow_${TARGET_DATE}" \
@@ -154,7 +158,11 @@ jobs:
             --vlm-provider gemini \
             --vlm-model gemini-2.5-flash \
             --send-telegram-shadow \
+            --reference-dir "$REF_DIR" \
             --cleanup-downloaded-videos
+            
+          # Clean up ephemeral references immediately
+          rm -rf "$REF_DIR"
 
       - name: Upload output notebook (only when analysis fails)
         if: failure()

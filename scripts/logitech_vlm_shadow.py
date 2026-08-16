@@ -112,17 +112,17 @@ def make_contact_sheet(frames_data: list, out_path: Path, cols: int = 4):
     contact_sheet = cv2.vconcat(row_images)
     cv2.imwrite(str(out_path), contact_sheet)
 
-def generate_vlm_prompt(out_dir: Path, clip_name: str, date_str: str):
+def generate_vlm_prompt(out_dir: Path, date_str: str):
     prompt = f"""You are an expert feline behavior and feeding monitor. Your task is to analyze frames from a top-down RGB camera (Logitech) looking at a cat feeding bowl.
 
-You are evaluating the clip: {clip_name}
+You are evaluating a complete feeding session consisting of sampled frames.
 Date: {date_str}
 
 Rules:
 1. Use only visible evidence from the provided frames.
-2. Do not count individual kibble pieces. Provide a general bowl state (empty, low, half, full, unsure).
+2. Do not count individual kibble pieces. Provide a general bowl state progression (e.g., "full -> low" or "empty -> low") based on the start and end of the session, or "unsure" if obstructed.
 3. Do not claim machine failure or say "feeding machine not working".
-4. If the cat identity is ambiguous or obstructed, return `unsure`.
+4. If the cat identity is ambiguous or obstructed due to darkness, return `unsure`.
 5. If the bowl state is obstructed (e.g. cat head in the way), return `unsure`.
 6. Sanbo is the calico cat. Dan is the black-and-white tuxedo cat.
 7. Logitech is a top-down RGB/ambient view. Only rely on visual evidence.
@@ -134,19 +134,18 @@ Expected JSON schema:
 {{
   "camera": "LOGITECH",
   "date": "{date_str}",
-  "clip_name": "{clip_name}",
+  "clip_name": "session",
   "cat_identity": "Dan | Sanbo | both | none | unsure",
   "eating_evidence": "yes | no | unsure",
-  "bowl_state": "empty | low | half | full | unsure",
+  "bowl_state": "empty | low | half | full | unsure | (e.g. empty -> low)",
   "confidence": 0.0,
-  "reasons": ["short visual reasons"],
-  "needs_higher_model": true
+  "reasons": ["short visual reasons..."],
+  "needs_higher_model": true/false
 }}
-```
-"""
-    prompt_path = out_dir / f"logitech_vlm_prompt_{Path(clip_name).stem}.md"
-    prompt_path.write_text(prompt)
-    return prompt_path
+```"""
+    with open(out_dir / f"logitech_vlm_prompt_session.md", "w") as f:
+        f.write(prompt)
+    return out_dir / f"logitech_vlm_prompt_session.md"
 
 def generate_vlm_schema(out_dir: Path):
     schema = {
@@ -337,8 +336,8 @@ def build_vlm_session_report(selected_files, manifest_data, all_results, all_fai
         "cat_identity": cat_identity,
         "eating_evidence": eating_evidence,
         "bowl_state_progression": bowl_state_progression,
-        "first_bowl_interaction_time": first_seen,
-        "approximate_bowl_interaction_duration": bowl_interaction_duration,
+        "first_recorded_motion_time": first_seen,
+        "recorded_session_duration": bowl_interaction_duration,
         "hand_human_interaction": hand_interaction,
         "possible_food_theft": possible_food_theft,
         "confidence": confidence,
@@ -425,7 +424,7 @@ def format_session_report_text(session_data, all_results, all_failed, all_skippe
     ee_flag = " ⚠️ eating uncertain" if ee == "unsure" else (" ⚠️ no eating evidence" if ee == "no" else "")
     lines.append(f"   eating: {ee}{ee_flag}")
     lines.append(f"     bowl: {session_data['bowl_state_progression']}")
-    lines.append(f"first seen: {session_data['first_bowl_interaction_time']} (bowl interaction ~{session_data['approximate_bowl_interaction_duration']})")
+    lines.append(f"first seen: {session_data['first_recorded_motion_time']} (bowl interaction ~{session_data['recorded_session_duration']})")
     lines.append(f"     hand: {session_data['hand_human_interaction']}")
     lines.append(f"  evidence: {session_data['evidence_clip_count']} clip(s) ({session_data['evidence_sampled_frame_count']} frames)")
 
@@ -740,8 +739,8 @@ def main():
     
     manifest_data = []
     clip_domains = {}
+    contact_sheet_frames = []
     for f in selected_files:
-        contact_sheet_frames = []
         dest_path = out_dir / f['name']
         download_file(drive, f['id'], dest_path)
         
@@ -828,11 +827,15 @@ def main():
             contact_sheet_frames.append({"frame_data": frame, "name": str(idx)})
             
         cap.release()
+
+    if contact_sheet_frames:
+        if len(contact_sheet_frames) > 16:
+            import numpy as np
+            indices = np.linspace(0, len(contact_sheet_frames) - 1, 16, dtype=int)
+            contact_sheet_frames = [contact_sheet_frames[i] for i in indices]
+        make_contact_sheet(contact_sheet_frames, out_dir / "logitech_vlm_contact_sheet_session.jpg")
         
-        if contact_sheet_frames:
-            make_contact_sheet(contact_sheet_frames, out_dir / f"logitech_vlm_contact_sheet_{Path(f['name']).stem}.jpg")
-            
-        generate_vlm_prompt(out_dir, f['name'], search_date)
+    generate_vlm_prompt(out_dir, search_date)
         
     manifest_path = out_dir / "logitech_vlm_manifest.csv"
     with open(manifest_path, "w", newline='') as f_csv:
@@ -869,11 +872,11 @@ def main():
         import time
         import requests
         
-        for f in selected_files[:args.max_clips]:
-            clip_name = f['name']
-            stem = Path(clip_name).stem
-            contact_sheet_path = out_dir / f"logitech_vlm_contact_sheet_{stem}.jpg"
-            prompt_path = out_dir / f"logitech_vlm_prompt_{stem}.md"
+        for f in [selected_files[0]]:  # Just run ONCE for the whole session
+            clip_name = "session"
+            stem = "session"
+            contact_sheet_path = out_dir / "logitech_vlm_contact_sheet_session.jpg"
+            prompt_path = out_dir / "logitech_vlm_prompt_session.md"
             
             if not contact_sheet_path.exists() or not prompt_path.exists():
                 continue

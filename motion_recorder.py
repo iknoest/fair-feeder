@@ -320,7 +320,14 @@ class CameraFrameReader:
             self.cap = cv2.VideoCapture(self.source)
             # Set resolution for USB camera (Logitech C925e supports 1080p)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            # Maximize analog gain for low-light morning feeds
+            import subprocess
+            try:
+                subprocess.run(['v4l2-ctl', '-d', self.source, '-c', 'gain=255'], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
         else:
             log.info(f'Connecting to RTSP: rtsp://****:****@{CAMERA_IP}:{RTSP_PORT}/{RTSP_STREAM}')
             # Try with TCP transport first (more reliable on Raspberry Pi)

@@ -422,6 +422,7 @@ def format_session_report_text(session_data, all_results, all_failed, all_skippe
     lines.append(f"Time: {session_data['session_start_time']}-{session_data['session_end_time']} ({session_data['total_duration']})")
     lines.append(f"Provider/model: {session_data['provider']} / {session_data['model']}")
     lines.append("")
+    lines.append("--- VLM VISUAL CONCLUSIONS ---")
 
     cat_id = session_data["cat_identity"]
     has_refs = bool(all_results and all_results[0].get('reference_images'))
@@ -457,10 +458,15 @@ def format_session_report_text(session_data, all_results, all_failed, all_skippe
     ee_flag = " ⚠️ eating uncertain" if ee == "unsure" else (" ⚠️ no eating evidence" if ee == "no" else "")
     lines.append(f"   eating: {ee}{ee_flag}")
     lines.append(f"     bowl: {session_data['bowl_state_progression']}")
-    lines.append(f"first seen: {session_data['first_recorded_motion_time']} (bowl interaction ~{session_data['recorded_session_duration']})")
     lines.append(f"     hand: {session_data['hand_human_interaction']}")
-    lines.append(f"  evidence: {session_data['evidence_clip_count']} clip(s) ({session_data['evidence_sampled_frame_count']} frames)")
+    
+    lines.append("")
+    lines.append("--- RECORDED MOTION METADATA ---")
+    lines.append(f"motion start: {session_data['first_recorded_motion_time']}")
+    lines.append(f"motion duration: ~{session_data['recorded_session_duration']}")
+    lines.append(f"evidence: {session_data['evidence_clip_count']} clip(s) ({session_data['evidence_sampled_frame_count']} frames)")
 
+    lines.append("")
     conf_flag = " ⚠️ low confidence" if session_data["confidence"] < 0.75 else ""
     lines.append(f"confidence: {session_data['confidence']}{conf_flag}")
 

@@ -13,7 +13,7 @@ Use this file as a short bootstrap. Load the referenced docs only when relevant.
 - Notebook JSON check:
   `python -c "import json; json.load(open('morning_report.ipynb', encoding='utf-8'))"`
 - Focused report behavior test on this machine:
-  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest tests/test_daily_report_behavior.py -q`
+  `$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'; C:\Users\AVAVAVA\anaconda3\python.exe -m pytest tests/test_daily_report_behavior.py -q`
 - Pi compile check after `motion_recorder.py` edits:
   `cd /home/pi5/Feeder/fair-feeder && ./.venv/bin/python -m py_compile motion_recorder.py`
 

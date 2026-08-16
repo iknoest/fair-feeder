@@ -8,13 +8,6 @@ enough and whether Sanbo stole food.
 This file is the compact bootstrap. Load the detailed docs below only when the
 task needs them.
 
-> Stateless / fresh agents (e.g. Antigravity `agy`) with no prior context:
-> read `BRIEF.md` → "Stateless Agent Boot" FIRST — it contains the hybrid
-> IR-YOLO/VLM routing contract, ground-truth verification commands, and the
-> fatal-invariant subset. Then return here for the document index.
-> Architecture status: v14 IR-YOLO is FROZEN (Tapo kibble counts only); the
-> Roboflow retraining flywheel is mothballed per AUDIT-2026-07-04.md.
-
 ## Document Reference Index
 
 - Project map, file layout, dependencies, services:

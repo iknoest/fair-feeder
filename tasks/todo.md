@@ -28,7 +28,7 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 - [x] Multi-camera support (Tapo C210 + Logitech C925e USB)
 - [x] `/streaming_logitech` command for USB camera
 - [x] **Test on Pi**: `/status` verified with bowl count/visibility state after Pi deployment
-- [x] Verify `/lastclip`, `/weight`, `/help` from phone after latest Pi deployment
+- [ ] Verify `/lastclip`, `/weight`, `/help` from phone after latest Pi deployment
 
 ### B3 — Morning Kibble Report (GitHub Actions) ✅
 - [x] Service account auth + Drive sharing
@@ -98,9 +98,9 @@ All 4 bugs fixed and verified in CI run 2026-03-26.
 ---
 
 ## Ongoing
-- [x] Monitor rclone uploads via log file
-- [x] Monitor disk usage: `df -h /home/pi5/Pictures/gdrive-randomdice-sync/`
-- [x] B2 Pi test: verify `/lastclip`, `/weight`, `/help` from phone
+- [ ] Monitor rclone uploads via log file
+- [ ] Monitor disk usage: `df -h /home/pi5/Pictures/gdrive-randomdice-sync/`
+- [ ] B2 Pi test: verify `/lastclip`, `/weight`, `/help` from phone
 
 ---
 

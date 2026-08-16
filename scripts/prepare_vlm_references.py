@@ -32,11 +32,35 @@ def main():
         print(f"[ERROR] Roboflow download failed: {type(e).__name__} - {str(e)[:100]}")
         sys.exit(1)
 
+    import yaml
+    yaml_path = os.path.join(dataset_path, "data.yaml")
+    dan_cls_id, sanbo_cls_id = None, None
+    if os.path.exists(yaml_path):
+        with open(yaml_path, "r") as f:
+            data = yaml.safe_load(f)
+            names = data.get("names", [])
+            if isinstance(names, dict):
+                # YOLOv5 format dict: {0: 'Dan', 1: 'Sanbo'}
+                for k, v in names.items():
+                    if v == "Dan": dan_cls_id = k
+                    elif v == "Sanbo": sanbo_cls_id = k
+            elif isinstance(names, list):
+                # YOLOv8 format list: ['Bowl', 'Dan', ...]
+                try:
+                    dan_cls_id = names.index("Dan")
+                    sanbo_cls_id = names.index("Sanbo")
+                except ValueError:
+                    pass
+                    
+    if dan_cls_id is None or sanbo_cls_id is None:
+        print("[ERROR] Could not resolve Dan and Sanbo class IDs from data.yaml")
+        sys.exit(1)
+        
+    print(f"[INFO] Resolved class IDs: Dan={dan_cls_id}, Sanbo={sanbo_cls_id}")
+
     dan_images = []
     sanbo_images = []
 
-    # In YOLOv8 export for this dataset:
-    # 0: Bowl, 1: Dan, 2: Dan_hand, 3: Kibble, 4: Sanbo
     for split in ['train', 'valid', 'test']:
         labels_dir = os.path.join(dataset_path, split, 'labels')
         images_dir = os.path.join(dataset_path, split, 'images')
@@ -55,10 +79,10 @@ def main():
                 cls_id, w, h = int(parts[0]), float(parts[3]), float(parts[4])
                 area = w * h
                 
-                if cls_id == 1: # Dan
+                if cls_id == dan_cls_id:
                     has_dan = True
                     if area > 0.05: is_good_dan = True
-                elif cls_id == 4: # Sanbo
+                elif cls_id == sanbo_cls_id:
                     has_sanbo = True
                     if area > 0.05: is_good_sanbo = True
             

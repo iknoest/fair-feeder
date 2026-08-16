@@ -142,7 +142,8 @@ Rules:
 6. Sanbo is the light-colored cat with dark spots (cow/calico). Dan is the dark-colored cat with white markings (tuxedo).
 7. Logitech is a top-down RGB/ambient view. Only rely on visual evidence.
 8. Set 'identity_basis' to 'enhanced + reference-assisted' if reference images are present, otherwise 'raw'.
-9. Set 'visibility' to 'poor', 'usable', or 'good' based on how clearly the cat's markings can be seen in the session frames.
+9. Set 'visibility' to 'poor', 'usable', or 'good'. Note that if the underlying capture is extremely dark (even if pre-processing/enhancement recovers usable contrast), visibility should not be labeled 'good'.
+10. Calibrate your confidence carefully. A low-light, reference-assisted result should rarely reach 1.0 certainty, even if pre-processing makes markings easier to inspect.
 
 Output ONLY valid JSON matching the exact expected schema below.
 

@@ -112,12 +112,26 @@ def make_contact_sheet(frames_data: list, out_path: Path, cols: int = 4):
     contact_sheet = cv2.vconcat(row_images)
     cv2.imwrite(str(out_path), contact_sheet)
 
-def generate_vlm_prompt(out_dir: Path, date_str: str):
+def generate_vlm_prompt(out_dir: Path, date_str: str, has_references: bool = False):
+    ref_text = ""
+    if has_references:
+        ref_text = """
+The first few images provided are REFERENCE IMAGES, organized as:
+REFERENCE — DAN
+REFERENCE — SANBO
+Followed by:
+SESSION EVIDENCE (the contact sheet of the actual feeding session)
+
+Reference images are ONLY for identity comparison. 
+They MUST NOT be used to infer eating, bowl state, hand presence, or food theft in the current session.
+Those behaviors must come ONLY from the SESSION EVIDENCE frames.
+"""
+
     prompt = f"""You are an expert feline behavior and feeding monitor. Your task is to analyze frames from a top-down RGB camera (Logitech) looking at a cat feeding bowl.
 
 You are evaluating a complete feeding session consisting of sampled frames.
 Date: {date_str}
-
+{ref_text}
 Rules:
 1. Use only visible evidence from the provided frames.
 2. Do not count individual kibble pieces. Provide a general bowl state progression (e.g., "full -> low" or "empty -> low") based on the start and end of the session, or "unsure" if obstructed.
@@ -519,7 +533,8 @@ def validate_vlm_schema(data, expected_date=None, expected_clip_name=None):
     if not isinstance(data["needs_higher_model"], bool):
         raise ValueError("needs_higher_model must be a boolean")
 
-def call_openai_vlm(prompt_text, image_path, model_name, api_key):
+def call_openai_vlm(prompt_text, image_paths, model_name, api_key):
+    image_path = image_paths[-1] # fallback to just the contact sheet for now
     import requests
     url = "https://api.openai.com/v1/chat/completions"
     with open(image_path, "rb") as f:
@@ -556,7 +571,7 @@ def call_openai_vlm(prompt_text, image_path, model_name, api_key):
     except Exception as e:
         raise ValueError(f"Failed to parse OpenAI response: {resp.text}") from e
 
-def call_gemini_vlm(prompt_text, image_path, model_name, api_key):
+def call_gemini_vlm(prompt_text, image_paths, model_name, api_key):
     import requests
     if isinstance(api_key, tuple):
         token, project_id = api_key
@@ -569,23 +584,24 @@ def call_gemini_vlm(prompt_text, image_path, model_name, api_key):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         headers = {"Content-Type": "application/json"}
         
-    with open(image_path, "rb") as f:
-        img_data = f.read()
-    b64_img = base64.b64encode(img_data).decode("utf-8")
+    parts = [{"text": prompt_text}]
+    
+    for img_path in image_paths:
+        with open(img_path, "rb") as f:
+            img_data = f.read()
+        b64_img = base64.b64encode(img_data).decode("utf-8")
+        parts.append({
+            "inline_data": {
+                "mime_type": "image/jpeg",
+                "data": b64_img
+            }
+        })
     
     payload = {
         "contents": [
             {
                 "role": "user",
-                "parts": [
-                    {"text": prompt_text},
-                    {
-                        "inline_data": {
-                            "mime_type": "image/jpeg",
-                            "data": b64_img
-                        }
-                    }
-                ]
+                "parts": parts
             }
         ],
         "generationConfig": {
@@ -615,6 +631,7 @@ def main():
     parser.add_argument("--max-clips", type=int, default=2, help="Max clips to process in VLM API")
     parser.add_argument("--cleanup-downloaded-videos", action="store_true", help="Remove downloaded mp4 files from the out-dir after result generation")
     parser.add_argument("--send-telegram-shadow", action="store_true", help="Send a shadow Telegram report")
+    parser.add_argument("--reference-dir", type=str, default=None, help="Path to private reference image directory")
     args = parser.parse_args()
 
     if args.date is None:
@@ -835,7 +852,7 @@ def main():
             contact_sheet_frames = [contact_sheet_frames[i] for i in indices]
         make_contact_sheet(contact_sheet_frames, out_dir / "logitech_vlm_contact_sheet_session.jpg")
         
-    generate_vlm_prompt(out_dir, search_date)
+    generate_vlm_prompt(out_dir, search_date, has_references=bool(args.reference_dir))
         
     manifest_path = out_dir / "logitech_vlm_manifest.csv"
     with open(manifest_path, "w", newline='') as f_csv:
@@ -932,10 +949,24 @@ def main():
                 attempts += 1
                 api_calls_made += 1
                 try:
+                    image_paths = []
+                    ref_metadata = []
+                    if args.reference_dir:
+                        ref_dir = Path(args.reference_dir)
+                        for cat in ['dan', 'sanbo']:
+                            cat_dir = ref_dir / cat
+                            if cat_dir.exists():
+                                for img in sorted(cat_dir.glob("*.jpg")):
+                                    image_paths.append(str(img))
+                                    with open(img, "rb") as f:
+                                        h = hashlib.sha256(f.read()).hexdigest()
+                                    ref_metadata.append({"cat": cat, "basename": img.name, "sha256": h})
+                    image_paths.append(str(contact_sheet_path))
+
                     if args.vlm_provider == 'openai':
-                        result_json = call_openai_vlm(prompt_text, contact_sheet_path, args.vlm_model, api_key)
+                        result_json = call_openai_vlm(prompt_text, image_paths, args.vlm_model, api_key)
                     elif args.vlm_provider == 'gemini':
-                        result_json = call_gemini_vlm(prompt_text, contact_sheet_path, args.vlm_model, api_key)
+                        result_json = call_gemini_vlm(prompt_text, image_paths, args.vlm_model, api_key)
                     else:
                         raise NotImplementedError(f"Provider {args.vlm_provider} not supported.")
                         
@@ -946,6 +977,7 @@ def main():
                     result_json["prompt_hash"] = prompt_hash
                     result_json["created_at_utc"] = datetime.now(timezone.utc).isoformat()
                     result_json["source_contact_sheet"] = str(contact_sheet_path.name)
+                    result_json["reference_images"] = ref_metadata
                     result_json["raw_response_saved"] = False
                     result_json["attempts_made"] = attempts
                     

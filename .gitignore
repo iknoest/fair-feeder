@@ -31,3 +31,13 @@ Thumbs.db
 # Secrets and local config
 .env
 .claude/settings.local.json
+
+# Secret and credential files
+.env.*
+*.pem
+*service-account*.json
+*credential*.json
+*credentials*.json
+*token*.json
+job-tracker-*.json
+.private_refs/

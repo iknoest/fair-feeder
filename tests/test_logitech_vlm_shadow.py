@@ -181,7 +181,7 @@ def test_mocked_provider_response(mock_post, tmp_path):
     img_path = tmp_path / "test.jpg"
     img_path.write_bytes(b"fake_image_data")
     
-    result = call_openai_vlm("prompt", str(img_path), "gpt-4o", "fake_key")
+    result = call_openai_vlm("prompt", [str(img_path)], "gpt-4o", "fake_key")
     assert result["cat_identity"] == "Sanbo"
     assert result["eating_evidence"] == "yes"
 
@@ -1523,3 +1523,14 @@ def test_camera_label_in_startup_alert():
     source = Path("motion_recorder.py").read_text(encoding="utf-8")
     assert "cam_label =" in source
     assert "📷 Fair Feeder Monitor [{cam_label}] is LIVE" in source
+
+def test_generate_vlm_prompt_references(tmp_path):
+    p_no_ref = generate_vlm_prompt(tmp_path, "20260816", has_references=False)
+    no_ref_text = p_no_ref.read_text()
+    
+    p_ref = generate_vlm_prompt(tmp_path, "20260816", has_references=True)
+    ref_text = p_ref.read_text()
+    
+    assert "REFERENCE IMAGES" not in no_ref_text
+    assert "REFERENCE IMAGES" in ref_text
+    assert "REFERENCE — DAN" in ref_text

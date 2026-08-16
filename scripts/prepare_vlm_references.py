@@ -23,8 +23,6 @@ def main():
         project = rf.workspace("test-7vyqo").project("ir-kibble")
         version = project.version(13)
         
-        # Download dataset to a safe ephemeral place
-        # version.download will put it in the CWD if we don't change dir
         import tempfile
         tmpdir = tempfile.mkdtemp()
         os.chdir(tmpdir)
@@ -37,12 +35,14 @@ def main():
     dan_images = []
     sanbo_images = []
 
+    # In YOLOv8 export for this dataset:
+    # 0: Bowl, 1: Dan, 2: Dan_hand, 3: Kibble, 4: Sanbo
     for split in ['train', 'valid', 'test']:
         labels_dir = os.path.join(dataset_path, split, 'labels')
         images_dir = os.path.join(dataset_path, split, 'images')
         if not os.path.exists(labels_dir): continue
         
-        for label_file in glob.glob(os.path.join(labels_dir, "*.txt")):
+        for label_file in sorted(glob.glob(os.path.join(labels_dir, "*.txt"))):
             with open(label_file, 'r') as f:
                 lines = f.readlines()
             
@@ -55,10 +55,10 @@ def main():
                 cls_id, w, h = int(parts[0]), float(parts[3]), float(parts[4])
                 area = w * h
                 
-                if cls_id == 0:
+                if cls_id == 1: # Dan
                     has_dan = True
                     if area > 0.05: is_good_dan = True
-                elif cls_id == 1:
+                elif cls_id == 4: # Sanbo
                     has_sanbo = True
                     if area > 0.05: is_good_sanbo = True
             
@@ -91,8 +91,6 @@ def main():
         shutil.copy(img, os.path.join(dest_sanbo, f"sanbo_ref_{i}.jpg"))
 
     print(f"Reference gallery built safely at {args.out_dir}")
-
-    # Clean up the downloaded dataset
     shutil.rmtree(tmpdir)
 
 if __name__ == "__main__":

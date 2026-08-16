@@ -1,3 +1,6 @@
+import cv2
+import numpy as np
+
 import os
 import re
 import csv
@@ -9,8 +12,6 @@ import hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 import pytz
-import cv2
-import numpy as np
 
 def load_env_safe():
     env_path = Path('.env')
@@ -134,12 +135,14 @@ Date: {date_str}
 {ref_text}
 Rules:
 1. Use only visible evidence from the provided frames.
-2. Do not count individual kibble pieces. Provide a general bowl state progression (e.g., "full -> low" or "empty -> low") based on the start and end of the session, or "unsure" if obstructed.
+2. Do not count individual kibble pieces. Provide a general bowl state progression.
 3. Do not claim machine failure or say "feeding machine not working".
 4. If the cat identity is ambiguous or obstructed due to darkness, return `unsure`.
-5. If the bowl state is obstructed (e.g. cat head in the way), return `unsure`.
-6. Sanbo is the calico cat. Dan is the black-and-white tuxedo cat.
+5. If the bowl state is obstructed, return `unsure`.
+6. Sanbo is the light-colored cat with dark spots (cow/calico). Dan is the dark-colored cat with white markings (tuxedo).
 7. Logitech is a top-down RGB/ambient view. Only rely on visual evidence.
+8. Set 'identity_basis' to 'enhanced + reference-assisted' if reference images are present, otherwise 'raw'.
+9. Set 'visibility' to 'poor', 'usable', or 'good' based on how clearly the cat's markings can be seen in the session frames.
 
 Output ONLY valid JSON matching the exact expected schema below.
 
@@ -150,6 +153,8 @@ Expected JSON schema:
   "date": "{date_str}",
   "clip_name": "session",
   "cat_identity": "Dan | Sanbo | both | none | unsure",
+  "identity_basis": "raw / enhanced + reference-assisted",
+  "visibility": "poor | usable | good",
   "eating_evidence": "yes | no | unsure",
   "bowl_state": "empty | low | half | full | unsure | (e.g. empty -> low)",
   "confidence": 0.0,
@@ -167,6 +172,8 @@ def generate_vlm_schema(out_dir: Path):
         "date": "YYYYMMDD",
         "clip_name": "...",
         "cat_identity": "Dan | Sanbo | both | none | unsure",
+        "identity_basis": "raw / enhanced + reference-assisted",
+        "visibility": "poor / usable / good",
         "eating_evidence": "yes | no | unsure",
         "bowl_state": "empty | low | half | full | unsure",
         "confidence": 0.0,
@@ -348,6 +355,8 @@ def build_vlm_session_report(selected_files, manifest_data, all_results, all_fai
         "session_end_time": end_time_str,
         "total_duration": span_str,
         "cat_identity": cat_identity,
+        "identity_basis": all_results[0].get("identity_basis", "unknown") if all_results else "unknown",
+        "visibility": all_results[0].get("visibility", "unknown") if all_results else "unknown",
         "eating_evidence": eating_evidence,
         "bowl_state_progression": bowl_state_progression,
         "first_recorded_motion_time": first_seen,
@@ -415,27 +424,33 @@ def format_session_report_text(session_data, all_results, all_failed, all_skippe
 
     cat_id = session_data["cat_identity"]
     has_refs = bool(all_results and all_results[0].get('reference_images'))
-    ref_str = " (reference-assisted)" if has_refs else ""
+    
+    basis = session_data.get('identity_basis', 'enhanced + reference-assisted' if has_refs else 'raw')
+    visibility = session_data.get('visibility', 'unknown')
+    conf = session_data.get('confidence', 0.0)
     
     if session_data["possible_food_theft"]:
         if cat_id == "both":
             title = "😿 Possible food theft — Dan & Sanbo at bowl!"
-            cat_line = f"      cat: both{ref_str} ⚠️ possible food theft — verify"
+            cat_line = f"      cat: both ⚠️ possible food theft — verify"
         else:
             title = f"😿 Possible food theft — {cat_id} at Sanbo feeder!"
-            cat_line = f"      cat: {cat_id}{ref_str} ⚠️ Dan at Logitech/Sanbo feeder — verify"
+            cat_line = f"      cat: {cat_id} ⚠️ Dan at Logitech/Sanbo feeder — verify"
     elif cat_id == "Sanbo":
         title = "😸 Sanbo feeding session"
-        cat_line = f"      cat: Sanbo{ref_str}"
+        cat_line = f"      cat: Sanbo"
     elif cat_id == "Dan":
         title = "😸 Dan feeding session"
-        cat_line = f"      cat: Dan{ref_str}"
+        cat_line = f"      cat: Dan"
     else:
         title = f"🐱 {cat_id} feeding session"
-        cat_line = f"      cat: {cat_id}{ref_str}"
+        cat_line = f"      cat: {cat_id}"
 
     lines.append(title)
     lines.append(cat_line)
+    lines.append(f"      identity basis: {basis}")
+    lines.append(f"      visibility: {visibility}")
+    lines.append(f"      confidence: {conf}")
 
     ee = session_data["eating_evidence"]
     ee_flag = " ⚠️ eating uncertain" if ee == "unsure" else (" ⚠️ no eating evidence" if ee == "no" else "")
@@ -483,7 +498,6 @@ def format_session_report_text(session_data, all_results, all_failed, all_skippe
     return "\n".join(lines)
 
 def check_image_domain(img) -> str:
-    import numpy as np
     if len(img.shape) < 3 or img.shape[2] != 3:
         mean_lum = np.mean(img)
         if mean_lum > 30:
@@ -504,6 +518,7 @@ def check_image_domain(img) -> str:
 def validate_vlm_schema(data, expected_date=None, expected_clip_name=None):
     required_fields = [
         "camera", "date", "clip_name", "cat_identity", 
+        "identity_basis", "visibility",
         "eating_evidence", "bowl_state", "confidence", 
         "reasons", "needs_higher_model"
     ]
@@ -850,7 +865,6 @@ def main():
 
     if contact_sheet_frames:
         if len(contact_sheet_frames) > 16:
-            import numpy as np
             indices = np.linspace(0, len(contact_sheet_frames) - 1, 16, dtype=int)
             contact_sheet_frames = [contact_sheet_frames[i] for i in indices]
         make_contact_sheet(contact_sheet_frames, out_dir / "logitech_vlm_contact_sheet_session.jpg")
@@ -964,7 +978,25 @@ def main():
                                     with open(img, "rb") as f:
                                         h = hashlib.sha256(f.read()).hexdigest()
                                     ref_metadata.append({"cat": cat, "basename": img.name, "sha256": h})
-                    image_paths.append(str(contact_sheet_path))
+                    # Bounded Low-Light VLM Preprocessing (Gamma + CLAHE)
+                    # The original contact sheet remains available for audit
+                    enhanced_path = contact_sheet_path.with_name(contact_sheet_path.name.replace(".jpg", "_enhanced.jpg"))
+                    if not enhanced_path.exists():
+                        img = cv2.imread(str(contact_sheet_path))
+                        if img is not None:
+                            gamma = 2.5
+                            invGamma = 1.0 / gamma
+                            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+                            gamma_corrected = cv2.LUT(img, table)
+                            lab = cv2.cvtColor(gamma_corrected, cv2.COLOR_BGR2LAB)
+                            l_channel, a, b = cv2.split(lab)
+                            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+                            cl = clahe.apply(l_channel)
+                            limg = cv2.merge((cl,a,b))
+                            enhanced = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+                            cv2.imwrite(str(enhanced_path), enhanced)
+                    
+                    image_paths.append(str(enhanced_path))
 
                     if args.vlm_provider == 'openai':
                         result_json = call_openai_vlm(prompt_text, image_paths, args.vlm_model, api_key)

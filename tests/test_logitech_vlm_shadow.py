@@ -122,7 +122,7 @@ def test_schema_validation_accepts_valid():
         "camera": "LOGITECH",
         "date": "20260704",
         "clip_name": "motion_test.mp4",
-        "cat_identity": "Sanbo",
+        "identity_basis": "raw", "visibility": "good", "cat_identity": "Sanbo",
         "eating_evidence": "yes",
         "bowl_state": "low",
         "confidence": 0.9,
@@ -137,7 +137,7 @@ def test_schema_validation_rejects_invalid_enum():
         "camera": "LOGITECH",
         "date": "20260704",
         "clip_name": "motion_test.mp4",
-        "cat_identity": "UnknownCat", # Invalid
+        "identity_basis": "raw", "visibility": "good", "cat_identity": "UnknownCat", # Invalid
         "eating_evidence": "yes",
         "bowl_state": "low",
         "confidence": 0.9,
@@ -151,7 +151,7 @@ def test_schema_validation_rejects_missing_field():
     invalid_data = {
         "camera": "LOGITECH",
         "clip_name": "motion_test.mp4",
-        "cat_identity": "Sanbo",
+        "identity_basis": "raw", "visibility": "good", "cat_identity": "Sanbo",
         "eating_evidence": "yes",
         "bowl_state": "low",
         "confidence": 0.9,
@@ -170,7 +170,7 @@ def test_mocked_provider_response(mock_post, tmp_path):
             return {
                 "choices": [{
                     "message": {
-                        "content": '{"camera": "LOGITECH", "date": "20260704", "clip_name": "test", "cat_identity": "Sanbo", "eating_evidence": "yes", "bowl_state": "low", "confidence": 0.9, "reasons": [], "needs_higher_model": false}'
+                        "content": '{"camera": "LOGITECH", "date": "20260704", "clip_name": "test", "identity_basis": "raw", "visibility": "good", "cat_identity": "Sanbo", "eating_evidence": "yes", "bowl_state": "low", "confidence": 0.9, "reasons": [], "needs_higher_model": false}'
                     }
                 }]
             }
@@ -247,7 +247,7 @@ def test_schema_rejects_wrong_camera():
         "camera": "TAPO", # Invalid
         "date": "20260704",
         "clip_name": "motion_test.mp4",
-        "cat_identity": "Sanbo",
+        "identity_basis": "raw", "visibility": "good", "cat_identity": "Sanbo",
         "eating_evidence": "yes",
         "bowl_state": "low",
         "confidence": 0.9,
@@ -262,7 +262,7 @@ def test_schema_rejects_wrong_expected_date():
         "camera": "LOGITECH",
         "date": "20260704",
         "clip_name": "motion_test.mp4",
-        "cat_identity": "Sanbo",
+        "identity_basis": "raw", "visibility": "good", "cat_identity": "Sanbo",
         "eating_evidence": "yes",
         "bowl_state": "low",
         "confidence": 0.9,
@@ -277,7 +277,7 @@ def test_schema_rejects_wrong_expected_clip_name():
         "camera": "LOGITECH",
         "date": "20260704",
         "clip_name": "motion_wrong.mp4",
-        "cat_identity": "Sanbo",
+        "identity_basis": "raw", "visibility": "good", "cat_identity": "Sanbo",
         "eating_evidence": "yes",
         "bowl_state": "low",
         "confidence": 0.9,
@@ -292,7 +292,7 @@ def test_schema_rejects_confidence_out_of_range():
         "camera": "LOGITECH",
         "date": "20260704",
         "clip_name": "motion_test.mp4",
-        "cat_identity": "Sanbo",
+        "identity_basis": "raw", "visibility": "good", "cat_identity": "Sanbo",
         "eating_evidence": "yes",
         "bowl_state": "low",
         "confidence": 1.5, # Out of range
@@ -311,7 +311,7 @@ def test_schema_rejects_non_list_reasons():
         "camera": "LOGITECH",
         "date": "20260704",
         "clip_name": "motion_test.mp4",
-        "cat_identity": "Sanbo",
+        "identity_basis": "raw", "visibility": "good", "cat_identity": "Sanbo",
         "eating_evidence": "yes",
         "bowl_state": "low",
         "confidence": 0.9,
@@ -350,7 +350,7 @@ def test_gemini_key_lookup_prefers_fair_feeder(mock_post, monkeypatch, tmp_path)
     class MockResponse:
         def raise_for_status(self): pass
         def json(self):
-            return {"candidates": [{"content": {"parts": [{"text": '{"camera": "LOGITECH", "date": "20260704", "clip_name": "session", "cat_identity": "Sanbo", "eating_evidence": "yes", "bowl_state": "low", "confidence": 0.9, "reasons": [], "needs_higher_model": false}'}]}}]}
+            return {"candidates": [{"content": {"parts": [{"text": '{"camera": "LOGITECH", "date": "20260704", "clip_name": "session", "identity_basis": "raw", "visibility": "good", "cat_identity": "Sanbo", "eating_evidence": "yes", "bowl_state": "low", "confidence": 0.9, "reasons": [], "needs_higher_model": false}'}]}}]}
 
     def side_effect(url, *args, **kwargs):
         assert "AIza-fair-feeder" in url
@@ -397,7 +397,7 @@ def test_gemini_key_lookup_falls_back(mock_post, monkeypatch, tmp_path):
     class MockResponse:
         def raise_for_status(self): pass
         def json(self):
-            return {"candidates": [{"content": {"parts": [{"text": '{"camera": "LOGITECH", "date": "20260704", "clip_name": "session", "cat_identity": "Sanbo", "eating_evidence": "yes", "bowl_state": "low", "confidence": 0.9, "reasons": [], "needs_higher_model": false}'}]}}]}
+            return {"candidates": [{"content": {"parts": [{"text": '{"camera": "LOGITECH", "date": "20260704", "clip_name": "session", "identity_basis": "raw", "visibility": "good", "cat_identity": "Sanbo", "eating_evidence": "yes", "bowl_state": "low", "confidence": 0.9, "reasons": [], "needs_higher_model": false}'}]}}]}
 
     def side_effect(url, *args, **kwargs):
         assert "AIza-fallback" in url
@@ -446,7 +446,7 @@ def test_transient_503_fails_once_then_succeeds(mock_sleep, mock_post, monkeypat
     class MockResponseSuccess:
         def raise_for_status(self): pass
         def json(self):
-            return {"candidates": [{"content": {"parts": [{"text": '{"camera": "LOGITECH", "date": "20260704", "clip_name": "session", "cat_identity": "Sanbo", "eating_evidence": "yes", "bowl_state": "low", "confidence": 0.9, "reasons": [], "needs_higher_model": false}'}]}}]}
+            return {"candidates": [{"content": {"parts": [{"text": '{"camera": "LOGITECH", "date": "20260704", "clip_name": "session", "identity_basis": "raw", "visibility": "good", "cat_identity": "Sanbo", "eating_evidence": "yes", "bowl_state": "low", "confidence": 0.9, "reasons": [], "needs_higher_model": false}'}]}}]}
 
     call_count = [0]
     def side_effect(url, *args, **kwargs):
@@ -618,7 +618,7 @@ def test_low_confidence_formatting(mock_post, monkeypatch, tmp_path):
     class MockResponseSuccess:
         def raise_for_status(self): pass
         def json(self):
-            return {"candidates": [{"content": {"parts": [{"text": '{"camera": "LOGITECH", "date": "20260704", "clip_name": "session", "cat_identity": "unsure", "eating_evidence": "unsure", "bowl_state": "unsure", "confidence": 0.6, "reasons": [], "needs_higher_model": true}'}]}}]}
+            return {"candidates": [{"content": {"parts": [{"text": '{"camera": "LOGITECH", "date": "20260704", "clip_name": "session", "identity_basis": "raw", "visibility": "good", "cat_identity": "unsure", "eating_evidence": "unsure", "bowl_state": "unsure", "confidence": 0.6, "reasons": [], "needs_higher_model": true}'}]}}]}
 
     mock_post.return_value = MockResponseSuccess()
     
@@ -671,7 +671,7 @@ def test_max_api_calls_cap_and_cleanup(mock_sleep, mock_post, monkeypatch, tmp_p
     class MockResponseSuccess:
         def raise_for_status(self): pass
         def json(self):
-            return {"candidates": [{"content": {"parts": [{"text": '{"camera": "LOGITECH", "date": "20260704", "clip_name": "session", "cat_identity": "Sanbo", "eating_evidence": "yes", "bowl_state": "low", "confidence": 0.9, "reasons": [], "needs_higher_model": false}'}]}}]}
+            return {"candidates": [{"content": {"parts": [{"text": '{"camera": "LOGITECH", "date": "20260704", "clip_name": "session", "identity_basis": "raw", "visibility": "good", "cat_identity": "Sanbo", "eating_evidence": "yes", "bowl_state": "low", "confidence": 0.9, "reasons": [], "needs_higher_model": false}'}]}}]}
 
     # We mock 2 clips.
     # First clip fails first time (status 503), then retries (which makes api_calls_made = 2), but succeeds.
@@ -823,7 +823,7 @@ def test_missing_date_exits_before_env_drive_vlm_telegram(monkeypatch, capsys):
     
     import logitech_vlm_shadow
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--send-telegram-shadow", "--run-vlm", "--confirm-cost"]):
-        with patch("requests.post") as mock_post, patch("googleapiclient.discovery.build") as mock_build, patch("logitech_vlm_shadow.call_gemini_vlm") as mock_gemini, patch("logitech_vlm_shadow.call_openai_vlm", return_value={"camera":"LOGITECH","date":"20260702","clip_name":"session","cat_identity":"Sanbo","eating_evidence":"yes","bowl_state":"low","confidence":0.9,"reasons":[],"needs_higher_model":False}) as mock_openai:
+        with patch("requests.post") as mock_post, patch("googleapiclient.discovery.build") as mock_build, patch("logitech_vlm_shadow.call_gemini_vlm") as mock_gemini, patch("logitech_vlm_shadow.call_openai_vlm", return_value={"camera":"LOGITECH","date":"20260702","clip_name":"session","identity_basis": "raw", "visibility": "good", "cat_identity":"Sanbo","eating_evidence":"yes","bowl_state":"low","confidence":0.9,"reasons":[],"needs_higher_model":False}) as mock_openai:
             with pytest.raises(SystemExit) as excinfo:
                 logitech_vlm_shadow.main()
             assert excinfo.value.code != 0
@@ -863,19 +863,19 @@ def test_telegram_flags_and_sending(mock_post, monkeypatch, tmp_path):
         if mock_gemini.count == 1:
             return {
                 "camera": "LOGITECH", "date": "20260704", "clip_name": "motion_20260704_060001.mp4",
-                "camera": "LOGITECH", "date": "20260704", "clip_name": "session", "cat_identity": "both", "eating_evidence": "no", "bowl_state": "low",
+                "camera": "LOGITECH", "date": "20260704", "clip_name": "session", "identity_basis": "raw", "visibility": "good", "cat_identity": "both", "eating_evidence": "no", "bowl_state": "low",
                 "confidence": 0.9, "reasons": [], "needs_higher_model": True
             }
         elif mock_gemini.count == 2:
             return {
                 "camera": "LOGITECH", "date": "20260704", "clip_name": "motion_20260704_060002.mp4",
-                "cat_identity": "Dan", "eating_evidence": "unsure", "bowl_state": "empty",
+                "identity_basis": "raw", "visibility": "good", "cat_identity": "Dan", "eating_evidence": "unsure", "bowl_state": "empty",
                 "confidence": 0.70, "reasons": [], "needs_higher_model": True
             }
         else:
             return {
                 "camera": "LOGITECH", "date": "20260704", "clip_name": "motion_20260704_060003.mp4",
-                "cat_identity": "none", "eating_evidence": "yes", "bowl_state": "half",
+                "identity_basis": "raw", "visibility": "good", "cat_identity": "none", "eating_evidence": "yes", "bowl_state": "half",
                 "confidence": 0.9, "reasons": [], "needs_higher_model": True
             }
 
@@ -973,7 +973,7 @@ def test_telegram_send_text_failure_exits_nonzero(mock_post, monkeypatch, tmp_pa
     def mock_gemini(*args, **kwargs):
         return {
             "camera": "LOGITECH", "date": "20260704", "clip_name": "motion_20260704_060001.mp4",
-            "camera": "LOGITECH", "date": "20260704", "clip_name": "session", "cat_identity": "both", "eating_evidence": "no", "bowl_state": "low",
+            "camera": "LOGITECH", "date": "20260704", "clip_name": "session", "identity_basis": "raw", "visibility": "good", "cat_identity": "both", "eating_evidence": "no", "bowl_state": "low",
             "confidence": 0.9, "reasons": [], "needs_higher_model": True
         }
         
@@ -1038,7 +1038,7 @@ def test_telegram_send_photo_failure_exits_nonzero(mock_post, monkeypatch, tmp_p
     def mock_gemini(*args, **kwargs):
         return {
             "camera": "LOGITECH", "date": "20260704", "clip_name": "motion_20260704_060001.mp4",
-            "camera": "LOGITECH", "date": "20260704", "clip_name": "session", "cat_identity": "both", "eating_evidence": "no", "bowl_state": "low",
+            "camera": "LOGITECH", "date": "20260704", "clip_name": "session", "identity_basis": "raw", "visibility": "good", "cat_identity": "both", "eating_evidence": "no", "bowl_state": "low",
             "confidence": 0.9, "reasons": [], "needs_higher_model": True
         }
         
@@ -1210,7 +1210,7 @@ def test_gdrive_logitech_folder_id_missing_exits_nonzero_fixed(monkeypatch, caps
     import logitech_vlm_shadow
     
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-02", "--out-dir", str(tmp_path), "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test"]):
-        with patch("requests.post") as mock_post, patch("googleapiclient.discovery.build") as mock_build, patch("logitech_vlm_shadow.call_gemini_vlm", return_value={"camera":"LOGITECH","date":"20260702","clip_name":"session","cat_identity":"Sanbo","eating_evidence":"yes","bowl_state":"low","confidence":0.9,"reasons":[],"needs_higher_model":False}) as mock_vlm:
+        with patch("requests.post") as mock_post, patch("googleapiclient.discovery.build") as mock_build, patch("logitech_vlm_shadow.call_gemini_vlm", return_value={"camera":"LOGITECH","date":"20260702","clip_name":"session","identity_basis": "raw", "visibility": "good", "cat_identity":"Sanbo","eating_evidence":"yes","bowl_state":"low","confidence":0.9,"reasons":[],"needs_higher_model":False}) as mock_vlm:
             with pytest.raises(SystemExit) as excinfo:
                 logitech_vlm_shadow.main()
             assert excinfo.value.code != 0
@@ -1269,7 +1269,7 @@ def test_contact_sheet_overlay_trap_fixed(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr("cv2.VideoCapture", FakeCap)
     
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-02", "--out-dir", str(tmp_path), "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test", "--send-telegram-shadow"]):
-        with patch("requests.post") as mock_post, patch("logitech_vlm_shadow.call_openai_vlm") as mock_openai, patch("logitech_vlm_shadow.call_gemini_vlm", return_value={"camera":"LOGITECH","date":"20260702","clip_name":"session","cat_identity":"Sanbo","eating_evidence":"yes","bowl_state":"low","confidence":0.9,"reasons":[],"needs_higher_model":False}) as mock_gemini:
+        with patch("requests.post") as mock_post, patch("logitech_vlm_shadow.call_openai_vlm") as mock_openai, patch("logitech_vlm_shadow.call_gemini_vlm", return_value={"camera":"LOGITECH","date":"20260702","clip_name":"session","identity_basis": "raw", "visibility": "good", "cat_identity":"Sanbo","eating_evidence":"yes","bowl_state":"low","confidence":0.9,"reasons":[],"needs_higher_model":False}) as mock_gemini:
             with pytest.raises(SystemExit) as excinfo:
                 logitech_vlm_shadow.main()
             assert excinfo.value.code != 0
@@ -1286,7 +1286,7 @@ def test_gdrive_service_account_key_missing_exits_nonzero(monkeypatch, capsys, t
     monkeypatch.setenv("GDRIVE_LOGITECH_FOLDER_ID", "fake")
     import logitech_vlm_shadow
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-02", "--out-dir", str(tmp_path), "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test"]):
-        with patch("requests.post") as mock_post, patch("googleapiclient.discovery.build") as mock_build, patch("logitech_vlm_shadow.call_gemini_vlm", return_value={"camera":"LOGITECH","date":"20260702","clip_name":"session","cat_identity":"Sanbo","eating_evidence":"yes","bowl_state":"low","confidence":0.9,"reasons":[],"needs_higher_model":False}) as mock_vlm:
+        with patch("requests.post") as mock_post, patch("googleapiclient.discovery.build") as mock_build, patch("logitech_vlm_shadow.call_gemini_vlm", return_value={"camera":"LOGITECH","date":"20260702","clip_name":"session","identity_basis": "raw", "visibility": "good", "cat_identity":"Sanbo","eating_evidence":"yes","bowl_state":"low","confidence":0.9,"reasons":[],"needs_higher_model":False}) as mock_vlm:
             with pytest.raises(SystemExit) as excinfo:
                 logitech_vlm_shadow.main()
             assert excinfo.value.code != 0

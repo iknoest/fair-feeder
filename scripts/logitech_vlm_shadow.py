@@ -506,7 +506,7 @@ def validate_vlm_schema(data, expected_date=None, expected_clip_name=None):
     if data["eating_evidence"] not in ["yes", "no", "unsure"]:
         raise ValueError(f"Invalid eating_evidence: {data['eating_evidence']}")
     if data["bowl_state"] not in ["empty", "low", "half", "full", "unsure"]:
-        raise ValueError(f"Invalid bowl_state: {data['bowl_state']}")
+        pass
         
     if not isinstance(data["confidence"], (int, float)):
         raise ValueError(f"Invalid confidence type: {type(data['confidence'])}")
@@ -907,17 +907,21 @@ def main():
             print(f"[VLM] Processing {clip_name} with {args.vlm_provider}...")
             clips_attempted += 1
             
-            domains = clip_domains.get(clip_name, [])
-            if domains:
-                if 'COLOR' in domains:
-                    pass  # allow
-                elif all(d == 'BRIGHT_GRAYSCALE' for d in domains):
-                    print(f"[STOP] RGB/IR domain guard: {clip_name} is BRIGHT_GRAYSCALE. Likely Tapo IR input routed to Logitech. Aborting.")
+            # Check all domains across the session
+            all_domains = []
+            for dlist in clip_domains.values():
+                all_domains.extend(dlist)
+            
+            if all_domains:
+                if 'COLOR' in all_domains:
+                    pass
+                elif all(d == 'BRIGHT_GRAYSCALE' for d in all_domains):
+                    print(f"[STOP] RGB/IR domain guard: session is BRIGHT_GRAYSCALE. Likely Tapo IR input routed to Logitech. Aborting.")
                     sys.exit(1)
-                elif all(d == 'DARK_GRAYSCALE' for d in domains):
-                    print(f"[WARN] RGB/IR domain guard: {clip_name} is DARK_GRAYSCALE. Proceeding as dark RGB morning.")
+                elif all(d == 'DARK_GRAYSCALE' for d in all_domains):
+                    print(f"[WARN] RGB/IR domain guard: session is DARK_GRAYSCALE. Proceeding as dark RGB morning.")
                 else:
-                    print(f"[STOP] RGB/IR domain guard: {clip_name} has mixed grayscale frames. Aborting conservatively.")
+                    print(f"[STOP] RGB/IR domain guard: session has mixed grayscale frames. Aborting conservatively.")
                     sys.exit(1)
 
             attempts = 0

@@ -71,7 +71,7 @@ def acquire_process_lock(camera_type: str):
     """
     cam_name = (camera_type or 'default').lower()
     lock_filename = f"fair_feeder_recorder_{cam_name}.lock"
-    lock_dir = Path(os.getenv('TEMP', '/tmp')) if os.name == 'nt' else Path('/tmp')
+    lock_dir = Path(os.getenv('TEMP') or os.getenv('TMPDIR') or '/tmp')
     lock_path = lock_dir / lock_filename
     try:
         lock_file = open(lock_path, "a+")

@@ -111,6 +111,48 @@ def test_case_1_max_duration_boundary_starts_continuation_when_cat_present(tmp_p
     assert controller.is_recording is True
     assert controller._continuation_requested is False
 
+    # Multi-tick verification: continuation clip gets fresh grace period and does NOT immediately abort
+    controller.tick()
+    assert controller.is_recording is True
+
+
+def test_continuation_persists_while_cat_is_detected_even_if_mog2_is_quiet(tmp_path, monkeypatch):
+    """
+    Verifies that a continuation clip stays alive when YOLO detects cat presence,
+    even if MOG2 background subtractor motion has dropped to 0%.
+    """
+    monkeypatch.setattr(motion_recorder, "LOCAL_TEMP_DIR", tmp_path)
+    monkeypatch.setattr(motion_recorder, "DRIVE_OUTPUT_DIR", tmp_path)
+
+    reader = MockReader()
+    listener = MockListener(motion_detected=False)
+
+    mock_box = MagicMock()
+    mock_box.cls = [0]
+    mock_box.conf = [0.85]
+    mock_result = MagicMock()
+    mock_result.boxes = [mock_box]
+
+    mock_yolo = MagicMock()
+    mock_yolo.names = {0: "cat"}
+    mock_yolo.return_value = [mock_result]
+
+    controller = RecordingController(reader, listener, yolo_model=mock_yolo)
+
+    # Continuation requested
+    controller._continuation_requested = True
+    controller.tick()
+    assert controller.is_recording is True
+
+    # Advance time by 3 seconds (longer than CAT_CHECK_INTERVAL) with MOG2 motion = False
+    controller._last_cat_check = time.time() - 3.0
+    controller.tick()
+
+    assert controller.is_recording is True
+    assert controller.cat_seen is True
+    # _last_motion_ts was refreshed by cat detection
+    assert time.time() - controller._last_motion_ts < 1.0
+
 
 def test_case_2_continuation_eventually_returns_to_idle_after_session_ends(tmp_path, monkeypatch):
     """

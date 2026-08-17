@@ -113,7 +113,7 @@ def make_contact_sheet(frames_data: list, out_path: Path, cols: int = 4):
     contact_sheet = cv2.vconcat(row_images)
     cv2.imwrite(str(out_path), contact_sheet)
 
-def generate_vlm_prompt(out_dir: Path, date_str: str, has_references: bool = False):
+def generate_vlm_prompt(out_dir: Path, date_str: str, session_name: str = "session", has_references: bool = False):
     ref_text = ""
     if has_references:
         ref_text = """
@@ -152,7 +152,7 @@ Expected JSON schema:
 {{
   "camera": "LOGITECH",
   "date": "{date_str}",
-  "clip_name": "session",
+  "clip_name": "{session_name}",
   "cat_identity": "Dan | Sanbo | both | none | unsure",
   "identity_basis": "raw / enhanced + reference-assisted",
   "visibility": "poor | usable | good",
@@ -163,9 +163,13 @@ Expected JSON schema:
   "needs_higher_model": true/false
 }}
 ```"""
-    with open(out_dir / f"logitech_vlm_prompt_session.md", "w") as f:
+    prompt_file = out_dir / f"logitech_vlm_prompt_{session_name}.md"
+    with open(prompt_file, "w") as f:
         f.write(prompt)
-    return out_dir / f"logitech_vlm_prompt_session.md"
+    if session_name != "session":
+        with open(out_dir / "logitech_vlm_prompt_session.md", "w") as f:
+            f.write(prompt)
+    return prompt_file
 
 def generate_vlm_schema(out_dir: Path):
     schema = {
@@ -229,6 +233,54 @@ def format_duration_str(seconds: float) -> str:
     if m > 0:
         return f"{m}m {s}s"
     return f"{s}s"
+
+def group_clips_into_sessions(selected_files, gap_threshold_sec=10):
+    """
+    Groups video clips into distinct feeding sessions based on time gaps.
+    If gap between clip[i-1] end and clip[i] start <= gap_threshold_sec, they belong to the same session.
+    Otherwise, they start a new session.
+    """
+    if not selected_files:
+        return []
+    
+    from datetime import timedelta
+    
+    timed_clips = []
+    for f in selected_files:
+        name = f['name'] if isinstance(f, dict) else str(f)
+        dur = extract_duration_from_filename(name)
+        m = re.search(r'motion_(\d{8})_(\d{6})', name)
+        if m:
+            try:
+                start_dt = datetime.strptime(f"{m.group(1)}{m.group(2)}", "%Y%m%d%H%M%S")
+                end_dt = start_dt + timedelta(seconds=dur)
+                timed_clips.append({'file': f, 'start': start_dt, 'end': end_dt, 'duration': dur, 'name': name})
+            except Exception:
+                pass
+                
+    if not timed_clips:
+        return [[f] for f in selected_files]
+        
+    timed_clips.sort(key=lambda x: x['start'])
+    
+    sessions = []
+    current_session = [timed_clips[0]]
+    
+    for i in range(1, len(timed_clips)):
+        prev_end = current_session[-1]['end']
+        curr_start = timed_clips[i]['start']
+        gap_sec = (curr_start - prev_end).total_seconds()
+        
+        if gap_sec <= gap_threshold_sec:
+            current_session.append(timed_clips[i])
+        else:
+            sessions.append([item['file'] for item in current_session])
+            current_session = [timed_clips[i]]
+            
+    if current_session:
+        sessions.append([item['file'] for item in current_session])
+        
+    return sessions
 
 def build_vlm_session_report(selected_files, manifest_data, all_results, all_failed, all_skipped, search_date, provider, model):
     """
@@ -504,6 +556,81 @@ def format_session_report_text(session_data, all_results, all_failed, all_skippe
 
     return "\n".join(lines)
 
+def format_multi_session_report_text(all_session_data, all_results, all_failed, all_skipped, shadow_header=True):
+    if len(all_session_data) == 1:
+        return format_session_report_text(all_session_data[0], all_results, all_failed, all_skipped, shadow_header=shadow_header)
+        
+    lines = []
+    if shadow_header:
+        lines.append("[SHADOW] Logitech VLM Feeding Report")
+        lines.append("Non-authoritative shadow report. Production report unchanged.")
+    if all_session_data:
+        date = all_session_data[0]["date"]
+        provider = all_session_data[0]["provider"]
+        model = all_session_data[0]["model"]
+        lines.append(f"Date: {date}")
+        lines.append(f"Provider/model: {provider} / {model}")
+        lines.append(f"Recorded Sessions: {len(all_session_data)} distinct event(s)")
+        lines.append("")
+        
+        for i, session_data in enumerate(all_session_data, 1):
+            matching_results = [r for r in all_results if r.get("clip_name") in [f"session_{i}", "session", str(i)]]
+            res = matching_results[0] if matching_results else (all_results[i-1] if i-1 < len(all_results) else {})
+            
+            lines.append(f"=== EVENT {i} ({session_data['session_start_time']}-{session_data['session_end_time']}, {session_data['total_duration']}) ===")
+            lines.append("--- VLM VISUAL CONCLUSIONS ---")
+            
+            cat_id = session_data["cat_identity"]
+            has_refs = bool(res and res.get('reference_images'))
+            basis = session_data.get('identity_basis', 'enhanced + reference-assisted' if has_refs else 'raw')
+            visibility = session_data.get('visibility', 'unknown')
+            conf = session_data.get('confidence', 0.0)
+            
+            if session_data["possible_food_theft"]:
+                if cat_id == "both":
+                    title = "😿 Possible food theft — Dan & Sanbo at bowl!"
+                    cat_line = f"      cat: both ⚠️ possible food theft — verify"
+                else:
+                    title = f"😿 Possible food theft — {cat_id} at Sanbo feeder!"
+                    cat_line = f"      cat: {cat_id} ⚠️ Dan at Logitech/Sanbo feeder — verify"
+            elif cat_id == "Sanbo":
+                title = "😸 Sanbo feeding session"
+                cat_line = f"      cat: Sanbo"
+            elif cat_id == "Dan":
+                title = "😸 Dan feeding session"
+                cat_line = f"      cat: Dan"
+            else:
+                title = f"🐱 {cat_id} feeding session"
+                cat_line = f"      cat: {cat_id}"
+
+            lines.append(title)
+            lines.append(cat_line)
+            lines.append(f"      identity basis: {basis}")
+            lines.append(f"      visibility: {visibility}")
+            lines.append(f"      confidence: {conf}")
+
+            ee = session_data["eating_evidence"]
+            ee_flag = " ⚠️ eating uncertain" if ee == "unsure" else (" ⚠️ no eating evidence" if ee == "no" else "")
+            lines.append(f"   eating: {ee}{ee_flag}")
+            lines.append(f"     bowl: {session_data['bowl_state_progression']}")
+            lines.append(f"     hand: {session_data['hand_human_interaction']}")
+            
+            lines.append("")
+            lines.append("--- RECORDED MOTION METADATA ---")
+            lines.append(f"motion start: {session_data['first_recorded_motion_time']}")
+            lines.append(f"motion duration: ~{session_data['recorded_session_duration']}")
+            lines.append(f"evidence: {session_data['evidence_clip_count']} clip(s) ({session_data['evidence_sampled_frame_count']} frames)")
+            lines.append("")
+            
+            reasons = res.get("reasons", []) if isinstance(res, dict) else []
+            if reasons:
+                lines.append("Observations:")
+                for r in reasons:
+                    lines.append(f"- {r}")
+                lines.append("")
+                
+    return "\n".join(lines).strip()
+
 def check_image_domain(img) -> str:
     if len(img.shape) < 3 or img.shape[2] != 3:
         mean_lum = np.mean(img)
@@ -537,8 +664,10 @@ def validate_vlm_schema(data, expected_date=None, expected_clip_name=None):
         raise ValueError(f"Invalid camera: {data['camera']}")
     if expected_date and data["date"] != expected_date:
         raise ValueError(f"Invalid date: expected {expected_date}, got {data['date']}")
-    if expected_clip_name and data["clip_name"] != expected_clip_name:
-        raise ValueError(f"Invalid clip_name: expected {expected_clip_name}, got {data['clip_name']}")
+    if expected_clip_name:
+        allowed_names = [expected_clip_name] if isinstance(expected_clip_name, str) else list(expected_clip_name)
+        if data["clip_name"] not in allowed_names:
+            raise ValueError(f"Invalid clip_name: expected {expected_clip_name}, got {data['clip_name']}")
             
     if data["cat_identity"] not in ["Dan", "Sanbo", "both", "none", "unsure"]:
         raise ValueError(f"Invalid cat_identity: {data['cat_identity']}")
@@ -779,109 +908,130 @@ def main():
             print(f"  - {f['name']}")
         sys.exit(1)
     
+    sessions = group_clips_into_sessions(selected_files, gap_threshold_sec=10)
+    print(f"ℹ️ {len(selected_files)} clip(s) grouped into {len(sessions)} feeding session(s) (gap threshold: 10s)")
+
     manifest_data = []
     clip_domains = {}
-    contact_sheet_frames = []
-    for f in selected_files:
-        dest_path = out_dir / f['name']
-        download_file(drive, f['id'], dest_path)
-        
-        cap = cv2.VideoCapture(str(dest_path))
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-        
-        # Sample frames
-        sample_indices_labeled = [
-            (0, "start"),
-            (total_frames // 4, "quarter"),
-            (total_frames // 2, "middle"),
-            (3 * total_frames // 4, "three_quarter"),
-            (total_frames - 1, "end")
-        ]
-        
-        bg_frame = None
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        ret, bg_frame = cap.read()
-        
-        first_cat_idx = None
-        for idx in range(1, total_frames, int(fps)):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ret, frame = cap.read()
-            if ret and simple_cat_heuristic(frame, bg_frame):
-                first_cat_idx = idx
-                break
-        
-        if first_cat_idx is not None and first_cat_idx not in [x[0] for x in sample_indices_labeled]:
-            sample_indices_labeled.append((first_cat_idx, "first_motion"))
-            
-        sample_indices_labeled.sort(key=lambda x: x[0])
-        
-        # Deduplicate by frame index, keeping the first label found
-        seen_indices = set()
-        final_samples = []
-        for idx, label in sample_indices_labeled:
-            if idx not in seen_indices and 0 <= idx < total_frames:
-                seen_indices.add(idx)
-                final_samples.append((idx, label))
-        
-        m_filename_time = re.search(r'(\d{8})_(\d{6})', f['name'])
-        clip_start_time_str = f"{m_filename_time.group(1)} {m_filename_time.group(2)}" if m_filename_time else ""
-        
-        for idx, selection_reason in final_samples:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ret, frame = cap.read()
-            if not ret: continue
-            
-            ts = extract_timestamp_calc(f['name'], idx, fps)
-            heuristic_cat = simple_cat_heuristic(frame, bg_frame)
-            
-            if f['name'] not in clip_domains:
-                clip_domains[f['name']] = []
-            clip_domains[f['name']].append(check_image_domain(frame))
-            
-            frame_filename = f"{f['name']}_frame_{idx}.jpg"
-            frame_path = frames_dir / frame_filename
-            cv2.imwrite(str(frame_path), frame)
-            
-            seconds_from_start = round(idx / fps, 2)
-            
-            manifest_data.append({
-                "clip_name": f['name'],
-                "frame_filename": frame_filename,
-                "timestamp": ts,
-                "frame_index": idx,
-                "motion_detected": heuristic_cat,
-                "selection_reason": selection_reason,
-                "clip_start_time_from_filename": clip_start_time_str,
-                "seconds_from_clip_start": seconds_from_start,
-                "source_drive_file_id": f['id']
-            })
-            
-            # Put timestamp on frame for contact sheet
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            cv2.putText(frame, f"Clip: {f['name']}", (10, 30), font, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, f"Time: {seconds_from_start}s ({ts})", (10, 60), font, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, f"Reason: {selection_reason}", (10, 90), font, 0.7, (0, 255, 0), 2)
-            motion_str = "MOTION: YES" if heuristic_cat else "MOTION: NO"
-            motion_color = (0, 0, 255) if heuristic_cat else (255, 0, 0)
-            cv2.putText(frame, motion_str, (10, 120), font, 0.7, motion_color, 2)
-                
-            contact_sheet_frames.append({"frame_data": frame, "name": str(idx)})
-            
-        cap.release()
+    session_manifests = []
+    session_contact_sheets = []
 
-    if contact_sheet_frames:
-        if len(contact_sheet_frames) > 16:
-            indices = np.linspace(0, len(contact_sheet_frames) - 1, 16, dtype=int)
-            contact_sheet_frames = [contact_sheet_frames[i] for i in indices]
-        make_contact_sheet(contact_sheet_frames, out_dir / "logitech_vlm_contact_sheet_session.jpg")
-        
-    generate_vlm_prompt(out_dir, search_date, has_references=bool(args.reference_dir))
+    for s_idx, session_clips in enumerate(sessions, 1):
+        s_name = f"session_{s_idx}" if len(sessions) > 1 else "session"
+        session_manifest = []
+        contact_sheet_frames = []
+
+        for f in session_clips:
+            dest_path = out_dir / f['name']
+            download_file(drive, f['id'], dest_path)
+            
+            cap = cv2.VideoCapture(str(dest_path))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            
+            # Sample frames
+            sample_indices_labeled = [
+                (0, "start"),
+                (total_frames // 4, "quarter"),
+                (total_frames // 2, "middle"),
+                (3 * total_frames // 4, "three_quarter"),
+                (total_frames - 1, "end")
+            ]
+            
+            bg_frame = None
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ret, bg_frame = cap.read()
+            
+            first_cat_idx = None
+            for idx in range(1, total_frames, int(fps)):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ret, frame = cap.read()
+                if ret and simple_cat_heuristic(frame, bg_frame):
+                    first_cat_idx = idx
+                    break
+            
+            if first_cat_idx is not None and first_cat_idx not in [x[0] for x in sample_indices_labeled]:
+                sample_indices_labeled.append((first_cat_idx, "first_motion"))
+                
+            sample_indices_labeled.sort(key=lambda x: x[0])
+            
+            # Deduplicate by frame index, keeping the first label found
+            seen_indices = set()
+            final_samples = []
+            for idx, label in sample_indices_labeled:
+                if idx not in seen_indices and 0 <= idx < total_frames:
+                    seen_indices.add(idx)
+                    final_samples.append((idx, label))
+            
+            m_filename_time = re.search(r'(\d{8})_(\d{6})', f['name'])
+            clip_start_time_str = f"{m_filename_time.group(1)} {m_filename_time.group(2)}" if m_filename_time else ""
+            
+            for idx, selection_reason in final_samples:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ret, frame = cap.read()
+                if not ret: continue
+                
+                ts = extract_timestamp_calc(f['name'], idx, fps)
+                heuristic_cat = simple_cat_heuristic(frame, bg_frame)
+                
+                if f['name'] not in clip_domains:
+                    clip_domains[f['name']] = []
+                clip_domains[f['name']].append(check_image_domain(frame))
+                
+                frame_filename = f"{f['name']}_frame_{idx}.jpg"
+                frame_path = frames_dir / frame_filename
+                cv2.imwrite(str(frame_path), frame)
+                
+                seconds_from_start = round(idx / fps, 2)
+                
+                row = {
+                    "session_id": s_name,
+                    "clip_name": f['name'],
+                    "frame_filename": frame_filename,
+                    "timestamp": ts,
+                    "frame_index": idx,
+                    "motion_detected": heuristic_cat,
+                    "selection_reason": selection_reason,
+                    "clip_start_time_from_filename": clip_start_time_str,
+                    "seconds_from_clip_start": seconds_from_start,
+                    "source_drive_file_id": f['id']
+                }
+                manifest_data.append(row)
+                session_manifest.append(row)
+                
+                # Put timestamp on frame for contact sheet
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                cv2.putText(frame, f"Clip: {f['name']}", (10, 30), font, 0.7, (0, 255, 0), 2)
+                cv2.putText(frame, f"Time: {seconds_from_start}s ({ts})", (10, 60), font, 0.7, (0, 255, 0), 2)
+                cv2.putText(frame, f"Reason: {selection_reason}", (10, 90), font, 0.7, (0, 255, 0), 2)
+                motion_str = "MOTION: YES" if heuristic_cat else "MOTION: NO"
+                motion_color = (0, 0, 255) if heuristic_cat else (255, 0, 0)
+                cv2.putText(frame, motion_str, (10, 120), font, 0.7, motion_color, 2)
+                    
+                contact_sheet_frames.append({"frame_data": frame, "name": str(idx)})
+                
+            cap.release()
+
+        session_manifests.append(session_manifest)
+
+        cs_path = out_dir / f"logitech_vlm_contact_sheet_{s_name}.jpg"
+        if contact_sheet_frames:
+            if len(contact_sheet_frames) > 16:
+                indices = np.linspace(0, len(contact_sheet_frames) - 1, 16, dtype=int)
+                sampled_cs_frames = [contact_sheet_frames[i] for i in indices]
+            else:
+                sampled_cs_frames = contact_sheet_frames
+            make_contact_sheet(sampled_cs_frames, cs_path)
+            if s_idx == 1:
+                make_contact_sheet(sampled_cs_frames, out_dir / "logitech_vlm_contact_sheet_session.jpg")
+            session_contact_sheets.append(cs_path)
+
+        generate_vlm_prompt(out_dir, search_date, session_name=s_name, has_references=bool(args.reference_dir))
         
     manifest_path = out_dir / "logitech_vlm_manifest.csv"
     with open(manifest_path, "w", newline='') as f_csv:
         writer = csv.DictWriter(f_csv, fieldnames=[
-            "clip_name", "frame_filename", "timestamp", "frame_index", "motion_detected",
+            "session_id", "clip_name", "frame_filename", "timestamp", "frame_index", "motion_detected",
             "selection_reason", "clip_start_time_from_filename", "seconds_from_clip_start", "source_drive_file_id"
         ])
         writer.writeheader()
@@ -890,6 +1040,7 @@ def main():
     summary = {
         "date": search_date,
         "selected_clip_names": [f['name'] for f in selected_files],
+        "session_count": len(sessions),
         "extracted_frames_count": len(manifest_data),
         "frames_with_motion_count": sum(1 for row in manifest_data if row["motion_detected"]),
         "schema_path": str(out_dir / "logitech_vlm_expected_schema.json"),
@@ -897,13 +1048,14 @@ def main():
     }
 
     if args.run_vlm:
-        print("[VLM Shadow] Starting real VLM API execution...")
+        print(f"[VLM Shadow] Starting real VLM API execution across {len(sessions)} session(s)...")
         api_calls_made = 0
         all_results = []
         all_failed = []
         all_skipped = []
+        all_session_data = []
         
-        clips_requested = len(selected_files[:args.max_clips])
+        clips_requested = len(sessions)
         clips_attempted = 0
         clips_succeeded = 0
         clips_failed = 0
@@ -913,11 +1065,16 @@ def main():
         import time
         import requests
         
-        for f in [selected_files[0]]:  # Just run ONCE for the whole session
-            clip_name = "session"
-            stem = "session"
-            contact_sheet_path = out_dir / "logitech_vlm_contact_sheet_session.jpg"
-            prompt_path = out_dir / "logitech_vlm_prompt_session.md"
+        for s_idx, (session_clips, session_manifest) in enumerate(zip(sessions, session_manifests), 1):
+            s_name = f"session_{s_idx}" if len(sessions) > 1 else "session"
+            clip_name = s_name
+            stem = s_name
+            contact_sheet_path = out_dir / f"logitech_vlm_contact_sheet_{s_name}.jpg"
+            if not contact_sheet_path.exists():
+                contact_sheet_path = out_dir / "logitech_vlm_contact_sheet_session.jpg"
+            prompt_path = out_dir / f"logitech_vlm_prompt_{s_name}.md"
+            if not prompt_path.exists():
+                prompt_path = out_dir / "logitech_vlm_prompt_session.md"
             
             if not contact_sheet_path.exists() or not prompt_path.exists():
                 continue
@@ -945,29 +1102,32 @@ def main():
                 skipped_due_to_api_cap += 1
                 continue
             
-            print(f"[VLM] Processing {clip_name} with {args.vlm_provider}...")
+            print(f"[VLM] Processing {clip_name} ({len(session_clips)} clip(s)) with {args.vlm_provider}...")
             clips_attempted += 1
             
-            # Check all domains across the session
-            all_domains = []
-            for dlist in clip_domains.values():
-                all_domains.extend(dlist)
+            # Check all domains across this session's clips
+            session_domains = []
+            for f in session_clips:
+                session_domains.extend(clip_domains.get(f['name'], []))
             
-            if all_domains:
-                if 'COLOR' in all_domains:
+            if session_domains:
+                if 'COLOR' in session_domains:
                     pass
-                elif all(d == 'BRIGHT_GRAYSCALE' for d in all_domains):
-                    print(f"[STOP] RGB/IR domain guard: session is BRIGHT_GRAYSCALE. Likely Tapo IR input routed to Logitech. Aborting.")
+                elif all(d == 'BRIGHT_GRAYSCALE' for d in session_domains):
+                    print(f"[STOP] RGB/IR domain guard: {clip_name} is BRIGHT_GRAYSCALE. Likely Tapo IR input routed to Logitech. Aborting.")
                     sys.exit(1)
-                elif all(d == 'DARK_GRAYSCALE' for d in all_domains):
-                    print(f"[WARN] RGB/IR domain guard: session is DARK_GRAYSCALE. Proceeding as dark RGB morning.")
+                elif all(d == 'DARK_GRAYSCALE' for d in session_domains):
+                    print(f"[WARN] RGB/IR domain guard: {clip_name} is DARK_GRAYSCALE. Proceeding as dark RGB morning.")
                 else:
-                    print(f"[STOP] RGB/IR domain guard: session has mixed grayscale frames. Aborting conservatively.")
+                    print(f"[STOP] RGB/IR domain guard: {clip_name} has mixed grayscale frames. Aborting conservatively.")
                     sys.exit(1)
 
             attempts = 0
             max_attempts = 2
             success = False
+            session_results = []
+            session_failed = []
+            session_skipped = []
             
             while attempts < max_attempts:
                 attempts += 1
@@ -1012,7 +1172,7 @@ def main():
                     else:
                         raise NotImplementedError(f"Provider {args.vlm_provider} not supported.")
                         
-                    validate_vlm_schema(result_json, expected_date=search_date, expected_clip_name=clip_name)
+                    validate_vlm_schema(result_json, expected_date=search_date, expected_clip_name=[clip_name, "session"])
                     
                     result_json["provider"] = args.vlm_provider
                     result_json["model"] = args.vlm_model
@@ -1022,11 +1182,13 @@ def main():
                     result_json["reference_images"] = ref_metadata
                     result_json["raw_response_saved"] = False
                     result_json["attempts_made"] = attempts
+                    result_json["session_index"] = s_idx
                     
                     out_path = out_dir / f"logitech_vlm_result_{stem}.json"
                     with open(out_path, "w") as jf:
                         json.dump(result_json, jf, indent=2)
                     all_results.append(result_json)
+                    session_results.append(result_json)
                     print(f"[VLM] Success for {clip_name}.")
                     clips_succeeded += 1
                     success = True
@@ -1059,6 +1221,7 @@ def main():
                             with open(out_path, "w") as jf:
                                 json.dump(failed_json, jf, indent=2)
                             all_skipped.append(failed_json)
+                            session_skipped.append(failed_json)
                             clips_skipped += 1
                             skipped_due_to_api_cap += 1
                             break
@@ -1091,9 +1254,19 @@ def main():
                     with open(out_path, "w") as jf:
                         json.dump(failed_json, jf, indent=2)
                     all_failed.append(failed_json)
+                    session_failed.append(failed_json)
                     clips_failed += 1
                     had_failures = True
                     break
+
+            sess_data = build_vlm_session_report(
+                session_clips, session_manifest, session_results, session_failed, session_skipped,
+                search_date, args.vlm_provider, args.vlm_model
+            )
+            sess_data["session_index"] = s_idx
+            all_session_data.append(sess_data)
+            with open(out_dir / f"logitech_vlm_session_{s_idx}_summary.json", "w") as f_s:
+                json.dump(sess_data, f_s, indent=2)
                     
         # Save aggregates
         with open(out_dir / "logitech_vlm_results.json", "w") as jf:
@@ -1122,23 +1295,25 @@ def main():
         summary["telegram_sent"] = False
         summary["baseline"] = "no baseline"
         summary["note"] = f"real VLM API execution with {args.vlm_provider}"
-        
-        session_data = build_vlm_session_report(
-            selected_files, manifest_data, all_results, all_failed, all_skipped,
-            search_date, args.vlm_provider, args.vlm_model
-        )
-        summary["session"] = session_data
+        summary["sessions"] = all_session_data
+        if all_session_data:
+            summary["session"] = all_session_data[0]
 
         with open(out_dir / "logitech_vlm_shadow_summary.json", "w") as f_sum:
             json.dump(summary, f_sum, indent=2)
             
-        with open(out_dir / "logitech_vlm_session_summary.json", "w") as f_sess:
-            json.dump(session_data, f_sess, indent=2)
+        if all_session_data:
+            with open(out_dir / "logitech_vlm_session_summary.json", "w") as f_sess:
+                json.dump(all_session_data[0], f_sess, indent=2)
 
         if len(all_results) > 0:
-            report_text = format_session_report_text(session_data, all_results, all_failed, all_skipped, shadow_header=True)
+            if len(all_session_data) > 1:
+                report_text = format_multi_session_report_text(all_session_data, all_results, all_failed, all_skipped, shadow_header=True)
+            else:
+                report_text = format_session_report_text(all_session_data[0], all_results, all_failed, all_skipped, shadow_header=True)
         else:
-            report_text = format_vlm_failure_report_text(session_data, all_failed, all_skipped, shadow_header=True)
+            first_sess = all_session_data[0] if all_session_data else {}
+            report_text = format_vlm_failure_report_text(first_sess, all_failed, all_skipped, shadow_header=True)
 
         (out_dir / "logitech_vlm_shadow_report.md").write_text(report_text)
 

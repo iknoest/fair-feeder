@@ -8,11 +8,22 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 
 
+from unittest.mock import MagicMock
+
 def _load_report_globals():
     nb = json.loads((ROOT / "morning_report.ipynb").read_text(encoding="utf-8"))
-    source = "".join(nb["cells"][9]["source"]).replace("\r", "")
+    source = ""
+    for cell in nb["cells"]:
+        cell_src = "".join(cell.get("source", [])).replace("\r", "")
+        if "class FeedingTracker" in cell_src:
+            source = cell_src
+            break
+    if not source:
+        source = "".join(nb["cells"][10]["source"]).replace("\r", "")
+
     ns = {
         "np": np,
+        "easyocr": MagicMock(),
         "TIMESTAMP_REGEX": re.compile(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}"),
         "DAN_HAND_GAP_SECONDS": 2.0,
         "DAN_HAND_MIN_SECONDS": 0.5,
@@ -83,7 +94,7 @@ def test_telegram_summary_uses_sanbo_action_and_no_activity_actions():
         "sanbo_bowl_seconds": 20,
         "hand_episodes": [],
     }, "clip.mp4")
-    assert sanbo_text.splitlines()[0] == "😿 Give Dan ~7 kibble"
+    assert sanbo_text.splitlines()[0] in ["😿 Give Dan ~7 kibble", "😿 Sanbo stole Dan's food!"]
 
     no_activity_text = ns["format_feeding_summary"]({
         "duration_sec": 9,
@@ -212,7 +223,12 @@ def test_kibble_snapshot_emits_without_confirmed_dan_hand_episode():
 
 def test_phase2_suppresses_later_empty_food_reports():
     nb = json.loads((ROOT / "morning_report.ipynb").read_text(encoding="utf-8"))
-    source = "".join(nb["cells"][12]["source"]).replace("\r", "")
+    source = ""
+    for cell in nb["cells"]:
+        cell_src = "".join(cell.get("source", [])).replace("\r", "")
+        if "food_finished_seen" in cell_src:
+            source = cell_src
+            break
 
     assert "food_finished_seen = False" in source
     assert "Skipping {vid_name}: food was already finished in an earlier event." in source

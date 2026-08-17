@@ -565,6 +565,7 @@ class RecordingController:
                     if name == 'cat':
                         self.cat_seen = True
                         self.last_cat_time = datetime.now()
+                        self._last_motion_ts = max(self._last_motion_ts, time.time())
                         elapsed = time.time() - self.recording_start
                         print(f'   🐱 Cat detected! (conf={conf:.0%}, t={elapsed:.0f}s)')
                         return
@@ -580,6 +581,8 @@ class RecordingController:
 
     def _start_recording(self):
         self._base_name = f"motion_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # Reset motion timestamp on start so fresh recording gets full cooldown grace period
+        self._last_motion_ts = time.time()
         # Temporary name (duration added on stop)
         self.temp_path = LOCAL_TEMP_DIR / f'{self._base_name}.mp4'
         # Use the stream's reported FPS so playback matches real wall-clock time
@@ -601,6 +604,20 @@ class RecordingController:
         self.cat_seen = False
         self._last_cat_check = time.time()
         print(f'🔴 Recording started: {self._base_name}')
+
+        # Log camera telemetry for USB camera if applicable
+        if getattr(self.reader, 'is_usb', False):
+            try:
+                import subprocess
+                res = subprocess.run(
+                    ['v4l2-ctl', '-d', str(self.reader.source), '--get-ctrl=gain,auto_exposure,exposure_time_absolute,white_balance_automatic'],
+                    capture_output=True, text=True, timeout=2
+                )
+                if res.returncode == 0:
+                    ctrls = " ".join([line.strip() for line in res.stdout.strip().splitlines() if line.strip()])
+                    log.info(f"📷 USB Camera Telemetry: {ctrls}")
+            except Exception:
+                pass
 
         # Check pre-buffer frames for cat (catches cats already in frame)
         if self.yolo_model and pre_frames:
@@ -1387,6 +1404,7 @@ if __name__ == "__main__":
         log.info('\ud83d\ude80 Monitoring... Press Ctrl+C to stop.')
         
         # Ping Telegram so user knows which camera service is running (e.g. after a reboot/restart)
+        # 📷 Fair Feeder Monitor is LIVE
         cam_label = "LOGITECH" if CAMERA_TYPE == "usb" else "TAPO"
         send_telegram_alert(f"📷 Fair Feeder Monitor [{cam_label}] is LIVE and protecting the bowl! 🐱\nRaspberry Pi 5 is officially monitoring 24/7.")
 

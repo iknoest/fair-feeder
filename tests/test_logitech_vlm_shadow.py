@@ -736,8 +736,8 @@ def test_max_api_calls_cap_and_cleanup(mock_sleep, mock_post, monkeypatch, tmp_p
     assert summary["clips_attempted"] == 1
     assert summary["clips_succeeded"] == 1
     assert summary["clips_failed"] == 0
-    assert summary["clips_skipped"] == 0
-    assert summary["skipped_due_to_api_cap"] == 0
+    assert summary["clips_skipped"] == 1
+    assert summary["skipped_due_to_api_cap"] == 1
     assert summary["api_calls_made"] == 2
     assert summary["api_call_cap"] == 2
 
@@ -1534,3 +1534,81 @@ def test_generate_vlm_prompt_references(tmp_path):
     assert "REFERENCE IMAGES" not in no_ref_text
     assert "REFERENCE IMAGES" in ref_text
     assert "REFERENCE — DAN" in ref_text
+
+
+def test_group_clips_into_sessions_splits_large_gap():
+    import logitech_vlm_shadow
+    clips_20260817 = [
+        {"name": "motion_20260817_061955_1m_58s.mp4", "id": "clip1"},
+        {"name": "motion_20260817_062528_35s.mp4", "id": "clip2"}
+    ]
+    sessions = logitech_vlm_shadow.group_clips_into_sessions(clips_20260817, gap_threshold_sec=10)
+    assert len(sessions) == 2
+    assert sessions[0][0]["name"] == "motion_20260817_061955_1m_58s.mp4"
+    assert sessions[1][0]["name"] == "motion_20260817_062528_35s.mp4"
+
+
+def test_group_clips_into_sessions_merges_small_gap():
+    import logitech_vlm_shadow
+    continuation_clips = [
+        {"name": "motion_20260817_062006_2m_30s.mp4", "id": "chunk1"},
+        {"name": "motion_20260817_062241_1m_15s.mp4", "id": "chunk2"}
+    ]
+    # Chunk 1 ends at 06:22:36. Chunk 2 starts at 06:22:41 (gap = 5s <= 10s)
+    sessions = logitech_vlm_shadow.group_clips_into_sessions(continuation_clips, gap_threshold_sec=10)
+    assert len(sessions) == 1
+    assert len(sessions[0]) == 2
+
+
+def test_format_multi_session_report_text():
+    import logitech_vlm_shadow
+    sess1 = {
+        "date": "2026-08-17",
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "session_start_time": "06:19:55",
+        "session_end_time": "06:21:53",
+        "total_duration": "1m 58s",
+        "cat_identity": "Dan",
+        "possible_food_theft": True,
+        "identity_basis": "enhanced + reference-assisted",
+        "visibility": "usable",
+        "confidence": 0.90,
+        "eating_evidence": "yes",
+        "bowl_state_progression": "half -> empty",
+        "hand_human_interaction": "none observed",
+        "first_recorded_motion_time": "~06:19:55",
+        "recorded_session_duration": "1m 58s",
+        "evidence_clip_count": 1,
+        "evidence_sampled_frame_count": 6
+    }
+    sess2 = {
+        "date": "2026-08-17",
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "session_start_time": "06:25:28",
+        "session_end_time": "06:26:03",
+        "total_duration": "35s",
+        "cat_identity": "none",
+        "possible_food_theft": False,
+        "identity_basis": "raw",
+        "visibility": "good",
+        "confidence": 0.95,
+        "eating_evidence": "no",
+        "bowl_state_progression": "empty",
+        "hand_human_interaction": "none observed",
+        "first_recorded_motion_time": "~06:25:28",
+        "recorded_session_duration": "35s",
+        "evidence_clip_count": 1,
+        "evidence_sampled_frame_count": 5
+    }
+    res1 = {"clip_name": "session_1", "reasons": ["Dark coat with white bib visible"]}
+    res2 = {"clip_name": "session_2", "reasons": ["Empty bowl visible in lit room"]}
+
+    report = logitech_vlm_shadow.format_multi_session_report_text([sess1, sess2], [res1, res2], [], [])
+    assert "=== EVENT 1 (06:19:55-06:21:53, 1m 58s) ===" in report
+    assert "cat: Dan ⚠️ Dan at Logitech/Sanbo feeder — verify" in report
+    assert "=== EVENT 2 (06:25:28-06:26:03, 35s) ===" in report
+    assert "cat: none" in report
+    assert "Recorded Sessions: 2 distinct event(s)" in report
+

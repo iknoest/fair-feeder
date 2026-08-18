@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
+      fail-fast: false
       max-parallel: 1
       matrix:
         camera: [TAPO, LOGITECH]

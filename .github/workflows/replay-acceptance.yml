@@ -1,0 +1,93 @@
+name: Replay Acceptance Delivery
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: replay-acceptance
+  cancel-in-progress: false
+
+jobs:
+  tapo-replay-send:
+    name: TAPO Replay Video Delivery
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install opencv-python-headless requests google-auth google-api-python-client
+
+      - name: Deliver TAPO Replay Video to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
+          GDRIVE_UPLOAD_FOLDER_ID: ${{ secrets.GDRIVE_UPLOAD_FOLDER_ID }}
+          GDRIVE_OUTPUT_FOLDER_ID: ${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}
+        run: |
+          python scripts/send_tapo_replay_test.py
+
+  logitech-vlm-replay:
+    name: Logitech Gemini 2.5 Flash VLM Replay & Delivery
+    needs: tapo-replay-send
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install opencv-python-headless requests google-auth google-api-python-client roboflow
+
+      - name: Prepare VLM References
+        env:
+          ROBOFLOW_API_KEY: ${{ secrets.ROBOFLOW_API_KEY }}
+          ROBOFLOW_WORKSPACE: ${{ secrets.ROBOFLOW_WORKSPACE }}
+        run: |
+          REF_DIR="$RUNNER_TEMP/fair-feeder-reference"
+          python scripts/prepare_vlm_references.py --out-dir "$REF_DIR"
+
+      - name: Run Logitech Gemini VLM Replay & Telegram Send
+        env:
+          GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
+          GDRIVE_LOGITECH_FOLDER_ID: ${{ secrets.GDRIVE_LOGITECH_FOLDER_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FAIR_FEEDER_GEMINI_API_KEY: ${{ secrets.FAIR_FEEDER_GEMINI_API_KEY }}
+        run: |
+          REF_DIR="$RUNNER_TEMP/fair-feeder-reference"
+          
+          python scripts/logitech_vlm_shadow.py \
+            --date 20260817 \
+            --out-dir "/tmp/logitech_vlm_shadow_20260817" \
+            --run-vlm \
+            --confirm-cost \
+            --vlm-provider gemini \
+            --vlm-model gemini-2.5-flash \
+            --send-telegram-shadow \
+            --reference-dir "$REF_DIR" \
+            --custom-header "[SHADOW][TEST] Logitech recorder recovery replay
+REPLAY ACCEPTANCE
+Source footage: 2026-08-17" \
+            --cleanup-downloaded-videos
+            
+          # Clean up ephemeral references immediately
+          rm -rf "$REF_DIR"

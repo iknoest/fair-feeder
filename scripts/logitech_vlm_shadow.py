@@ -465,9 +465,11 @@ def format_vlm_failure_report_text(session_data, all_failed, all_skipped, shadow
 
     return "\n".join(lines)
 
-def format_session_report_text(session_data, all_results, all_failed, all_skipped, shadow_header=True):
+def format_session_report_text(session_data, all_results, all_failed, all_skipped, shadow_header=True, custom_header=None):
     lines = []
-    if shadow_header:
+    if custom_header:
+        lines.append(custom_header)
+    elif shadow_header:
         lines.append("[SHADOW] Logitech VLM Feeding Session Report")
         lines.append("Non-authoritative shadow report. Production report unchanged.")
     lines.append(f"Date: {session_data['date']}")
@@ -556,12 +558,14 @@ def format_session_report_text(session_data, all_results, all_failed, all_skippe
 
     return "\n".join(lines)
 
-def format_multi_session_report_text(all_session_data, all_results, all_failed, all_skipped, shadow_header=True):
+def format_multi_session_report_text(all_session_data, all_results, all_failed, all_skipped, shadow_header=True, custom_header=None):
     if len(all_session_data) == 1:
-        return format_session_report_text(all_session_data[0], all_results, all_failed, all_skipped, shadow_header=shadow_header)
+        return format_session_report_text(all_session_data[0], all_results, all_failed, all_skipped, shadow_header=shadow_header, custom_header=custom_header)
         
     lines = []
-    if shadow_header:
+    if custom_header:
+        lines.append(custom_header)
+    elif shadow_header:
         lines.append("[SHADOW] Logitech VLM Feeding Report")
         lines.append("Non-authoritative shadow report. Production report unchanged.")
     if all_session_data:
@@ -786,6 +790,7 @@ def main():
     parser.add_argument("--cleanup-downloaded-videos", action="store_true", help="Remove downloaded mp4 files from the out-dir after result generation")
     parser.add_argument("--send-telegram-shadow", action="store_true", help="Send a shadow Telegram report")
     parser.add_argument("--reference-dir", type=str, default=None, help="Path to private reference image directory")
+    parser.add_argument("--custom-header", type=str, default=None, help="Custom header text for shadow report")
     args = parser.parse_args()
 
     if args.date is None:
@@ -1308,9 +1313,9 @@ def main():
 
         if len(all_results) > 0:
             if len(all_session_data) > 1:
-                report_text = format_multi_session_report_text(all_session_data, all_results, all_failed, all_skipped, shadow_header=True)
+                report_text = format_multi_session_report_text(all_session_data, all_results, all_failed, all_skipped, shadow_header=True, custom_header=args.custom_header)
             else:
-                report_text = format_session_report_text(all_session_data[0], all_results, all_failed, all_skipped, shadow_header=True)
+                report_text = format_session_report_text(all_session_data[0], all_results, all_failed, all_skipped, shadow_header=True, custom_header=args.custom_header)
         else:
             first_sess = all_session_data[0] if all_session_data else {}
             report_text = format_vlm_failure_report_text(first_sess, all_failed, all_skipped, shadow_header=True)

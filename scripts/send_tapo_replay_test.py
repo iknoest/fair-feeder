@@ -58,28 +58,43 @@ def main():
                         print(f"Download {int(status.progress() * 100)}%", flush=True)
             print(f"Downloaded real source {src_path.name} ({src_path.stat().st_size / 1024 / 1024:.2f} MB)", flush=True)
             
-        # Run replay stitch
-        cap = cv2.VideoCapture(str(src_path))
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        frames = []
-        while True:
-            ret, f = cap.read()
-            if not ret: break
-            frames.append(f)
-        cap.release()
-        
-        # 150s + 20s extension loop
-        extra_frames = frames[-int(20*fps):] if len(frames) >= int(20*fps) else frames
-        all_frames = frames + extra_frames
-        
-        writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-        for f in all_frames:
-            writer.write(f)
-        writer.release()
-        print(f"Generated replay video: {video_path} ({len(all_frames)} frames)", flush=True)
+        # Run replay stitch with ffmpeg (fast) or OpenCV fallback
+        import shutil, subprocess
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if ffmpeg_bin:
+            print("[REPLAY] Stitching continuation replay with ffmpeg...", flush=True)
+            cmd = [
+                ffmpeg_bin, "-y", "-i", str(src_path),
+                "-filter_complex",
+                "[0:v]trim=duration=150,setpts=PTS-STARTPTS[v1];[0:v]trim=start=130:duration=20,setpts=PTS-STARTPTS[v2];[v1][v2]concat=n=2:v=1[outv]",
+                "-map", "[outv]",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                str(video_path)
+            ]
+            subprocess.run(cmd, check=True)
+            print(f"[REPLAY] Generated replay video via ffmpeg: {video_path}", flush=True)
+        else:
+            print("[REPLAY] Stitching continuation replay with OpenCV...", flush=True)
+            cap = cv2.VideoCapture(str(src_path))
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            frames = []
+            while True:
+                ret, f = cap.read()
+                if not ret: break
+                frames.append(f)
+            cap.release()
+            
+            # 150s + 20s extension loop
+            extra_frames = frames[-int(20*fps):] if len(frames) >= int(20*fps) else frames
+            all_frames = frames + extra_frames
+            
+            writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+            for f in all_frames:
+                writer.write(f)
+            writer.release()
+            print(f"[REPLAY] Generated replay video via OpenCV: {video_path} ({len(all_frames)} frames)", flush=True)
 
     # Verify duration
     cap = cv2.VideoCapture(str(video_path))

@@ -10,14 +10,13 @@ on:
         required: false
         default: ''
 
-concurrency:
-  group: morning-report
-  cancel-in-progress: false  # don't cancel a running analysis mid-flight
-
 jobs:
   morning-report:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    concurrency:
+      group: morning-report-${{ matrix.camera }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       max-parallel: 1

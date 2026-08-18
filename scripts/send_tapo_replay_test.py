@@ -68,7 +68,7 @@ def main():
                 "-filter_complex",
                 "[0:v]trim=duration=150,setpts=PTS-STARTPTS[v1];[0:v]trim=start=130:duration=20,setpts=PTS-STARTPTS[v2];[v1][v2]concat=n=2:v=1[outv]",
                 "-map", "[outv]",
-                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                "-c:v", "libx264", "-crf", "26", "-preset", "fast", "-pix_fmt", "yuv420p",
                 str(video_path)
             ]
             subprocess.run(cmd, check=True)

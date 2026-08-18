@@ -54,6 +54,7 @@ import threading
 import logging
 import shutil
 import cv2
+import numpy as np
 from pathlib import Path
 from datetime import datetime
 from collections import deque
@@ -453,8 +454,9 @@ class RecordingController:
 
         if not self.is_recording:
             if self.listener.motion_detected or self._continuation_requested:
+                is_cont = bool(self._continuation_requested)
                 self._continuation_requested = False
-                self._start_recording()
+                self._start_recording(is_continuation=is_cont)
         else:
             # Write frame regardless of motion state
             frame = self.reader.get_latest_frame()
@@ -554,7 +556,7 @@ class RecordingController:
             log.error(traceback.format_exc())
 
     def _check_for_cat(self, frame):
-        """Run YOLO cat detection on the frame."""
+        """Run YOLO cat detection on the frame with low-light fallback."""
         try:
             results = self.yolo_model(frame, imgsz=640, conf=self.YOLO_CONF, verbose=False)
             for r in results:
@@ -569,6 +571,34 @@ class RecordingController:
                         elapsed = time.time() - self.recording_start
                         print(f'   🐱 Cat detected! (conf={conf:.0%}, t={elapsed:.0f}s)')
                         return
+
+            # Low-light enhancement fallback if scene is dark (e.g. Logitech USB camera before sunrise)
+            mean_lum = np.mean(frame)
+            if mean_lum < 40:
+                gamma = 2.5
+                invGamma = 1.0 / gamma
+                table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+                gamma_corrected = cv2.LUT(frame, table)
+                lab = cv2.cvtColor(gamma_corrected, cv2.COLOR_BGR2LAB)
+                l_channel, a, b = cv2.split(lab)
+                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+                cl = clahe.apply(l_channel)
+                limg = cv2.merge((cl,a,b))
+                enhanced = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+
+                results_enh = self.yolo_model(enhanced, imgsz=640, conf=self.YOLO_CONF, verbose=False)
+                for r in results_enh:
+                    for box in r.boxes:
+                        cls_id = int(box.cls[0])
+                        conf = float(box.conf[0])
+                        name = self.yolo_model.names[cls_id]
+                        if name == 'cat':
+                            self.cat_seen = True
+                            self.last_cat_time = datetime.now()
+                            self._last_motion_ts = max(self._last_motion_ts, time.time())
+                            elapsed = time.time() - self.recording_start
+                            print(f'   🐱 Cat detected (low-light enhanced)! (conf={conf:.0%}, t={elapsed:.0f}s)')
+                            return
         except Exception as e:
             print(f'   ⚠️ YOLO detection error: {e}')
 
@@ -579,12 +609,20 @@ class RecordingController:
             return f'{m}m_{s}s'
         return f'{s}s'
 
-    def _start_recording(self):
-        self._base_name = f"motion_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    def _start_recording(self, is_continuation=False):
+        base_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        base_name = f"motion_{base_ts}"
+        temp_path = LOCAL_TEMP_DIR / f"{base_name}.mp4"
+        counter = 1
+        while temp_path.exists():
+            base_name = f"motion_{base_ts}_{counter}"
+            temp_path = LOCAL_TEMP_DIR / f"{base_name}.mp4"
+            counter += 1
+
+        self._base_name = base_name
+        self.temp_path = temp_path
         # Reset motion timestamp on start so fresh recording gets full cooldown grace period
         self._last_motion_ts = time.time()
-        # Temporary name (duration added on stop)
-        self.temp_path = LOCAL_TEMP_DIR / f'{self._base_name}.mp4'
         # Use the stream's reported FPS so playback matches real wall-clock time
         self._declared_fps = getattr(self.reader, 'stream_fps', VIDEO_FPS)
         self.writer = cv2.VideoWriter(
@@ -601,9 +639,12 @@ class RecordingController:
         self.recording_start = time.time()
         self.frames_written = len(pre_frames)
         self._frame_count = len(pre_frames)
-        self.cat_seen = False
+
+        # If this is a continuation from an active feeding session, inherit cat_seen status
+        self.cat_seen = is_continuation
         self._last_cat_check = time.time()
-        print(f'🔴 Recording started: {self._base_name}')
+        tag = " [continuation]" if is_continuation else ""
+        print(f'🔴 Recording started: {self._base_name}{tag}')
 
         # Log camera telemetry for USB camera if applicable
         if getattr(self.reader, 'is_usb', False):
@@ -620,41 +661,55 @@ class RecordingController:
                 pass
 
         # Check pre-buffer frames for cat (catches cats already in frame)
-        if self.yolo_model and pre_frames:
+        if self.yolo_model and pre_frames and not self.cat_seen:
             self._check_for_cat(pre_frames[-1])
 
     def _stop_recording(self):
         if self.writer:
             self.writer.release()
+            self.writer = None
         self.is_recording = False
 
         duration = time.time() - self.recording_start if self.recording_start else 0
         dur_str = self._duration_str(duration)
         final_name = f'{self._base_name}_{dur_str}.mp4'
+        temp_path = self.temp_path
+        cat_seen = self.cat_seen
+        frame_count = self._frame_count
+        declared_fps = self._declared_fps
 
-        if not self.temp_path.exists():
+        if not temp_path.exists():
             print('⬜ Recording stopped (no file)')
             return
 
+        # Perform remux, filtering, and upload in a background thread
+        # so tick() is never blocked and continuation starts immediately
+        threading.Thread(
+            target=self._finalize_recording,
+            args=(temp_path, final_name, dur_str, duration, cat_seen, declared_fps, frame_count),
+            daemon=True
+        ).start()
+
+    def _finalize_recording(self, temp_path, final_name, dur_str, duration, cat_seen, declared_fps, frame_count):
         # Remux if actual frame rate diverged significantly from declared FPS
         # (fixes sped-up playback when RTSP delivers fewer frames than declared)
-        if duration > 0:
+        if duration > 0 and temp_path.exists():
             import subprocess
-            actual_fps = self._frame_count / duration
-            if abs(actual_fps - self._declared_fps) / max(self._declared_fps, 1) > 0.20:
+            actual_fps = frame_count / duration
+            if abs(actual_fps - declared_fps) / max(declared_fps, 1) > 0.20:
                 try:
-                    corrected = str(self.temp_path).replace('.mp4', '_fixed.mp4')
-                    pts_factor = self._declared_fps / actual_fps
+                    corrected = str(temp_path).replace('.mp4', '_fixed.mp4')
+                    pts_factor = declared_fps / actual_fps
                     result = subprocess.run(
-                        ["ffmpeg", "-i", str(self.temp_path),
+                        ["ffmpeg", "-i", str(temp_path),
                          "-vf", f"setpts={pts_factor:.6f}*PTS",
-                         "-r", str(self._declared_fps), "-c:v", "libx264",
+                         "-r", str(declared_fps), "-c:v", "libx264",
                          "-preset", "fast", "-y", corrected],
                         capture_output=True
                     )
                     if result.returncode == 0 and os.path.exists(corrected):
-                        os.replace(corrected, str(self.temp_path))
-                        print(f'   🔧 Remuxed: actual {actual_fps:.1f} fps → declared {self._declared_fps:.1f} fps')
+                        os.replace(corrected, str(temp_path))
+                        print(f'   🔧 Remuxed: actual {actual_fps:.1f} fps → declared {declared_fps:.1f} fps')
                     else:
                         print(f'   ⚠️ Remux failed (ffmpeg rc={result.returncode}), keeping original')
                 except FileNotFoundError:
@@ -663,8 +718,9 @@ class RecordingController:
                     print(f'   ⚠️ Remux error: {e}')
 
         # Cat detection filter: delete if no cat found in any sampled frame
-        if self.yolo_model and not self.cat_seen:
-            self.temp_path.unlink()
+        if self.yolo_model and not cat_seen:
+            if temp_path.exists():
+                temp_path.unlink()
             with self._clips_lock:
                 self.clips_deleted += 1
             print(f'🗑️  Deleted (no cat, {dur_str}): {final_name}')
@@ -672,42 +728,38 @@ class RecordingController:
 
         # Rename with duration and move to Drive
         final_temp = LOCAL_TEMP_DIR / final_name
-        self.temp_path.rename(final_temp)
-        dest = DRIVE_OUTPUT_DIR / final_name
-        shutil.move(str(final_temp), str(dest))
-        with self._clips_lock:
-            self.clips_saved += 1
-        size_mb = dest.stat().st_size / (1024 * 1024)
-        cat_status = '🐱' if self.cat_seen else '❓ no cat'
-        print(f'✅ Saved: {final_name} ({size_mb:.1f} MB) [{cat_status}]')
+        if temp_path.exists():
+            temp_path.rename(final_temp)
+            dest = DRIVE_OUTPUT_DIR / final_name
+            shutil.move(str(final_temp), str(dest))
+            with self._clips_lock:
+                self.clips_saved += 1
+            size_mb = dest.stat().st_size / (1024 * 1024)
+            cat_status = '🐱' if cat_seen else '❓ no cat'
+            print(f'✅ Saved: {final_name} ({size_mb:.1f} MB) [{cat_status}]')
 
-        # Trigger rclone sync if on Raspberry Pi
-        if platform.system() != 'Windows':
-            try:
-                import subprocess
-                
-                # rclone command construction
-                rclone_cmd = ["rclone", "copy", str(DRIVE_OUTPUT_DIR), RCLONE_REMOTE]
-                
-                # If RCLONE_DEST_PATH looks like a Google Drive ID (long alphanumeric), use --drive-root-folder-id
-                # Otherwise, append it to the remote
-                if len(RCLONE_DEST_PATH) > 20 and "/" not in RCLONE_DEST_PATH:
-                    rclone_cmd.extend(["--drive-root-folder-id", RCLONE_DEST_PATH])
-                    print(f'🔄 Triggering rclone to {RCLONE_REMOTE} (Folder ID: {RCLONE_DEST_PATH})...')
-                else:
-                    rclone_cmd[3] = f"{RCLONE_REMOTE}{RCLONE_DEST_PATH}"
-                    print(f'🔄 Triggering rclone to {RCLONE_REMOTE}{RCLONE_DEST_PATH}...')
-                    
-                # Run in the background (fire-and-forget) so it doesn't block the next recording
-                subprocess.Popen(
-                    rclone_cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-            except FileNotFoundError:
-                print('   ⚠️ rclone not found in PATH, skipping auto-sync')
-            except Exception as e:
-                print(f'   ⚠️ rclone launch error: {e}')
+            # Trigger rclone sync if on Raspberry Pi
+            if platform.system() != 'Windows':
+                try:
+                    import subprocess
+                    rclone_cmd = ["rclone", "copy", str(DRIVE_OUTPUT_DIR), RCLONE_REMOTE]
+                    if len(RCLONE_DEST_PATH) > 20 and "/" not in RCLONE_DEST_PATH:
+                        rclone_cmd.extend(["--drive-root-folder-id", RCLONE_DEST_PATH])
+                        print(f'🔄 Triggering rclone to {RCLONE_REMOTE} (Folder ID: {RCLONE_DEST_PATH})...')
+                    else:
+                        rclone_cmd[3] = f"{RCLONE_REMOTE}{RCLONE_DEST_PATH}"
+                        print(f'🔄 Triggering rclone to {RCLONE_REMOTE}{RCLONE_DEST_PATH}...')
+
+                    # Run in the background (fire-and-forget) so it doesn't block
+                    subprocess.Popen(
+                        rclone_cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                except FileNotFoundError:
+                    print('   ⚠️ rclone not found in PATH, skipping auto-sync')
+                except Exception as e:
+                    print(f'   ⚠️ rclone launch error: {e}')
 
 class BowlPositionMonitor:
     """Periodically checks whether the COCO bowl class is framed."""

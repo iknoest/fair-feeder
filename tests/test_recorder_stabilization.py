@@ -210,3 +210,107 @@ def test_case_3_no_cat_false_motion_does_not_create_endless_continuation(tmp_pat
     # Next tick: stays idle!
     controller.tick()
     assert controller.is_recording is False
+
+
+def test_stop_recording_delegates_to_background_thread_without_blocking(tmp_path, monkeypatch):
+    """
+    Verifies that _stop_recording() dispatches finalization (remux/upload/delete)
+    to a background worker thread rather than running synchronously in tick().
+    """
+    monkeypatch.setattr(motion_recorder, "LOCAL_TEMP_DIR", tmp_path)
+    monkeypatch.setattr(motion_recorder, "DRIVE_OUTPUT_DIR", tmp_path)
+
+    reader = MockReader()
+    listener = MockListener(motion_detected=False)
+    controller = RecordingController(reader, listener, yolo_model=None)
+
+    controller._start_recording()
+    assert controller.is_recording is True
+
+    with patch("threading.Thread") as mock_thread:
+        controller._stop_recording()
+        assert controller.is_recording is False
+        assert mock_thread.called
+        assert mock_thread.call_args[1]["daemon"] is True
+
+
+def test_continuation_inherits_cat_seen_and_saves_on_natural_session_end(tmp_path, monkeypatch):
+    """
+    Verifies that a continuation chunk inherits cat_seen=True from the active feeding session,
+    and when the session ends on motion cooldown, the continuation chunk is saved to Drive.
+    """
+    monkeypatch.setattr(motion_recorder, "LOCAL_TEMP_DIR", tmp_path)
+    monkeypatch.setattr(motion_recorder, "DRIVE_OUTPUT_DIR", tmp_path)
+
+    reader = MockReader()
+    listener = MockListener(motion_detected=False)
+    mock_yolo = MagicMock()
+    mock_yolo.names = {0: "cat"}
+
+    controller = RecordingController(reader, listener, yolo_model=mock_yolo)
+
+    # First chunk starts, cat seen, reaches max duration
+    controller._start_recording()
+    controller.cat_seen = True
+    controller.recording_start = time.time() - (MAX_RECORDING_SECS + 1)
+    controller.tick()
+
+    assert controller.is_recording is False
+    assert controller._continuation_requested is True
+
+    # Next tick: continuation chunk starts
+    controller.tick()
+    assert controller.is_recording is True
+    assert controller.cat_seen is True  # Inherited!
+
+    # Create dummy file at temp_path so finalization can move it
+    controller.temp_path.write_bytes(b"dummy video data")
+    saved_name = f"{controller._base_name}_10s.mp4"
+
+    # Verify background finalization runs directly and saves to Drive when cat_seen=True
+    controller._finalize_recording(
+        controller.temp_path,
+        saved_name,
+        "10s",
+        10.0,
+        cat_seen=True,
+        declared_fps=15,
+        frame_count=150
+    )
+
+    saved_file = tmp_path / saved_name
+    assert saved_file.exists()
+
+
+def test_check_for_cat_low_light_enhancement_fallback(tmp_path, monkeypatch):
+    """
+    Verifies that _check_for_cat() enhances dark frames (mean < 40)
+    with Gamma+CLAHE to enable cat detection in low light.
+    """
+    reader = MockReader()
+    listener = MockListener()
+
+    mock_yolo = MagicMock()
+    mock_yolo.names = {0: "cat"}
+
+    # Raw dark frame returns no detections, but enhanced frame returns cat detection
+    def mock_inference(img, *args, **kwargs):
+        mean_val = np.mean(img)
+        mock_res = MagicMock()
+        if mean_val > 50:  # Enhanced frame has higher contrast/brightness
+            mock_box = MagicMock()
+            mock_box.cls = [0]
+            mock_box.conf = [0.75]
+            mock_res.boxes = [mock_box]
+        else:
+            mock_res.boxes = []
+        return [mock_res]
+
+    mock_yolo.side_effect = mock_inference
+    controller = RecordingController(reader, listener, yolo_model=mock_yolo)
+
+    dark_frame = np.full((100, 100, 3), 10, dtype=np.uint8)  # Mean = 10 (< 40)
+    controller.cat_seen = False
+    controller._check_for_cat(dark_frame)
+
+    assert controller.cat_seen is True

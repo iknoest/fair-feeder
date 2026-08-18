@@ -164,6 +164,7 @@ jobs:
           python scripts/prepare_vlm_references.py --out-dir "$REF_DIR"
           
           if [ "${{ github.event.inputs.date_override }}" == "REPLAY_TEST" ]; then
+            CUSTOM_HDR=$'[SHADOW][TEST] Logitech recorder recovery replay\nREPLAY ACCEPTANCE\nSource footage: 2026-08-17'
             python scripts/logitech_vlm_shadow.py \
               --date 20260817 \
               --out-dir "/tmp/logitech_vlm_shadow_20260817" \
@@ -173,9 +174,7 @@ jobs:
               --vlm-model gemini-2.5-flash \
               --send-telegram-shadow \
               --reference-dir "$REF_DIR" \
-              --custom-header "[SHADOW][TEST] Logitech recorder recovery replay
-REPLAY ACCEPTANCE
-Source footage: 2026-08-17" \
+              --custom-header "$CUSTOM_HDR" \
               --cleanup-downloaded-videos
           else
             python scripts/logitech_vlm_shadow.py \

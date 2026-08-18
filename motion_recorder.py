@@ -445,8 +445,10 @@ class RecordingController:
                 self._live_frames = []
                 threading.Thread(target=self._process_and_send_live, args=(frames, sender), daemon=True).start()
 
-        # Track the latest motion event time (from ONVIF listener)
-        if self.listener.last_motion_time:
+        # Track the latest motion event time (from ONVIF / MOG2 listener)
+        if self.listener.motion_detected:
+            self._last_motion_ts = now
+        elif self.listener.last_motion_time:
             self._last_motion_ts = max(self._last_motion_ts,
                                        self.listener.last_motion_time.timestamp())
 
@@ -599,6 +601,16 @@ class RecordingController:
                             elapsed = time.time() - self.recording_start
                             print(f'   🐱 Cat detected (low-light enhanced)! (conf={conf:.0%}, t={elapsed:.0f}s)')
                             return
+
+                # Under extreme low-light on a USB camera without IR LEDs (mean_lum < 15),
+                # preserve motion clip for downstream VLM enhancement and analysis
+                if getattr(self.reader, 'is_usb', False) and mean_lum < 15:
+                    self.cat_seen = True
+                    self.last_cat_time = datetime.now()
+                    self._last_motion_ts = max(self._last_motion_ts, time.time())
+                    elapsed = time.time() - self.recording_start
+                    print(f'   🐱 Low-light USB scene preserved for VLM (mean_lum={mean_lum:.1f}/255, t={elapsed:.0f}s)')
+                    return
         except Exception as e:
             print(f'   ⚠️ YOLO detection error: {e}')
 

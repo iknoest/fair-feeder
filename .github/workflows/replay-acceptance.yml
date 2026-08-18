@@ -2,6 +2,11 @@ name: Replay Acceptance Delivery
 
 on:
   workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for replay acceptance run'
+        required: false
+        default: 'User-visible replay acceptance'
 
 concurrency:
   group: replay-acceptance

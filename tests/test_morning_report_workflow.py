@@ -15,6 +15,14 @@ def test_prepare_job_exists_and_exports_target_date():
     assert 'echo "target_date=${TARGET_DATE}" >> "$GITHUB_OUTPUT"' in text
 
 
+def test_prepare_job_timeout_is_large_enough_for_wait_window():
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "prepare-window:" in text
+    assert "timeout-minutes: 360" in text
+    assert "Wait until feeding window is complete" in text
+
+
 def test_analysis_job_uses_single_source_of_truth_for_target_date():
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
 
@@ -44,5 +52,5 @@ def test_analysis_job_has_fresh_timeout_budget():
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
 
     assert "timeout-minutes: 180" in text
-    assert "timeout-minutes: 25" in text
+    assert "timeout-minutes: 360" in text
     assert "needs: prepare-window" in text

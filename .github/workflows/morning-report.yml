@@ -46,7 +46,7 @@ PY
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import os
-cron = os.getenv('GHA_SCHEDULE_CRON','')
+cron = os.getenv('SCHEDULE_CRON','')
 if cron:
     minute, hour, *_ = cron.split()
     now = datetime.now(timezone.utc)
@@ -61,7 +61,7 @@ PY
 from datetime import datetime,timezone
 from zoneinfo import ZoneInfo
 import os
-cron = os.getenv('GHA_SCHEDULE_CRON','')
+cron = os.getenv('SCHEDULE_CRON','')
 if cron:
     minute, hour, *_ = cron.split()
     now = datetime.now(timezone.utc)

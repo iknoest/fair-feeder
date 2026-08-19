@@ -32,6 +32,11 @@ def test_prepare_exports_heartbeat_and_target_date():
     assert 'amsterdam_local_time' in text
     assert 'target_date' in text
 
+    # ensure the embedded Python reads the env SCHEDULE_CRON (exported by workflow env)
+    assert "os.getenv('SCHEDULE_CRON'" in text
+    # and does not rely on a non-exported shell-only GHA_SCHEDULE_CRON
+    assert "os.getenv('GHA_SCHEDULE_CRON'" not in text
+
 def test_analysis_job_uses_single_source_of_truth_for_target_date_and_heartbeat():
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
 

@@ -100,18 +100,61 @@ def make_contact_sheet(frames_data: list, out_path: Path, cols: int = 4):
     images = [data['frame_data'] for data in frames_data]
     target_w, target_h = 320, 180
     resized = [cv2.resize(img, (target_w, target_h)) for img in images]
-    
+
     rows = (len(resized) + cols - 1) // cols
     total_slots = rows * cols
     for _ in range(total_slots - len(resized)):
         resized.append(np.zeros((target_h, target_w, 3), dtype=np.uint8))
-        
+
     row_images = []
     for r in range(rows):
         row_images.append(cv2.hconcat(resized[r*cols : (r+1)*cols]))
-        
+
     contact_sheet = cv2.vconcat(row_images)
     cv2.imwrite(str(out_path), contact_sheet)
+
+def enhance_image_gamma_clahe(img: np.ndarray, gamma: float = 2.5) -> np.ndarray:
+    """Apply Gamma 2.5 + CLAHE enhancement to low-light RGB frames."""
+    if img is None:
+        return None
+    invGamma = 1.0 / gamma
+    table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+    gamma_corrected = cv2.LUT(img, table)
+    lab = cv2.cvtColor(gamma_corrected, cv2.COLOR_BGR2LAB)
+    l_channel, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    cl = clahe.apply(l_channel)
+    limg = cv2.merge((cl, a, b))
+    return cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+
+def make_comparison_contact_sheet(raw_cs_path: Path, enhanced_cs_path: Path, out_path: Path):
+    """Combine RAW and ENHANCED contact sheets into a single comparison image with clear labels."""
+    raw_img = cv2.imread(str(raw_cs_path))
+    enh_img = cv2.imread(str(enhanced_cs_path))
+    if raw_img is None or enh_img is None:
+        return
+
+    h, w = raw_img.shape[:2]
+    banner_h = 36
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.7
+    thickness = 2
+
+    # Raw block with top banner
+    raw_banner = np.zeros((banner_h, w, 3), dtype=np.uint8)
+    cv2.putText(raw_banner, "[1/2] RAW LOGITECH FOOTAGE (Low-Light Baseline)", (12, 25), font, font_scale, (200, 200, 200), thickness)
+    raw_block = cv2.vconcat([raw_banner, raw_img])
+
+    # Enhanced block with top banner
+    enh_banner = np.zeros((banner_h, w, 3), dtype=np.uint8)
+    cv2.putText(enh_banner, "[2/2] ENHANCED EVIDENCE (Gamma 2.5 + CLAHE - Evaluated by Gemini)", (12, 25), font, font_scale, (0, 255, 255), thickness)
+    enh_block = cv2.vconcat([enh_banner, enh_img])
+
+    # Separator line
+    separator = np.full((6, w, 3), 128, dtype=np.uint8)
+
+    comparison = cv2.vconcat([raw_block, separator, enh_block])
+    cv2.imwrite(str(out_path), comparison)
 
 def generate_vlm_prompt(out_dir: Path, date_str: str, session_name: str = "session", has_references: bool = False):
     ref_text = ""
@@ -123,7 +166,7 @@ REFERENCE — SANBO
 Followed by:
 SESSION EVIDENCE (the contact sheet of the actual feeding session)
 
-Reference images are ONLY for identity comparison. 
+Reference images are ONLY for identity comparison.
 They MUST NOT be used to infer eating, bowl state, hand presence, or food theft in the current session.
 Those behaviors must come ONLY from the SESSION EVIDENCE frames.
 """
@@ -198,12 +241,12 @@ def sanitize_error_message(message: str) -> str:
         s = s.replace(os.environ['FAIR_FEEDER_GEMINI_API_KEY'], "***REDACTED***")
     if 'GEMINI_API_KEY' in os.environ and os.environ['GEMINI_API_KEY']:
         s = s.replace(os.environ['GEMINI_API_KEY'], "***REDACTED***")
-        
+
     if 'TELEGRAM_BOT_TOKEN' in os.environ and os.environ['TELEGRAM_BOT_TOKEN']:
         s = s.replace(os.environ['TELEGRAM_BOT_TOKEN'], "***REDACTED***")
     if 'TELEGRAM_CHAT_ID' in os.environ and os.environ['TELEGRAM_CHAT_ID']:
         s = s.replace(os.environ['TELEGRAM_CHAT_ID'], "***REDACTED***")
-        
+
     if 'GDRIVE_SERVICE_ACCOUNT_KEY' in os.environ and os.environ['GDRIVE_SERVICE_ACCOUNT_KEY']:
         s = s.replace(os.environ['GDRIVE_SERVICE_ACCOUNT_KEY'], "***REDACTED***")
 
@@ -242,9 +285,9 @@ def group_clips_into_sessions(selected_files, gap_threshold_sec=10):
     """
     if not selected_files:
         return []
-    
+
     from datetime import timedelta
-    
+
     timed_clips = []
     for f in selected_files:
         name = f['name'] if isinstance(f, dict) else str(f)
@@ -257,29 +300,29 @@ def group_clips_into_sessions(selected_files, gap_threshold_sec=10):
                 timed_clips.append({'file': f, 'start': start_dt, 'end': end_dt, 'duration': dur, 'name': name})
             except Exception:
                 pass
-                
+
     if not timed_clips:
         return [[f] for f in selected_files]
-        
+
     timed_clips.sort(key=lambda x: x['start'])
-    
+
     sessions = []
     current_session = [timed_clips[0]]
-    
+
     for i in range(1, len(timed_clips)):
         prev_end = current_session[-1]['end']
         curr_start = timed_clips[i]['start']
         gap_sec = (curr_start - prev_end).total_seconds()
-        
+
         if gap_sec <= gap_threshold_sec:
             current_session.append(timed_clips[i])
         else:
             sessions.append([item['file'] for item in current_session])
             current_session = [timed_clips[i]]
-            
+
     if current_session:
         sessions.append([item['file'] for item in current_session])
-        
+
     return sessions
 
 def build_vlm_session_report(selected_files, manifest_data, all_results, all_failed, all_skipped, search_date, provider, model):
@@ -480,11 +523,11 @@ def format_session_report_text(session_data, all_results, all_failed, all_skippe
 
     cat_id = session_data["cat_identity"]
     has_refs = bool(all_results and all_results[0].get('reference_images'))
-    
+
     basis = session_data.get('identity_basis', 'enhanced + reference-assisted' if has_refs else 'raw')
     visibility = session_data.get('visibility', 'unknown')
     conf = session_data.get('confidence', 0.0)
-    
+
     if session_data["possible_food_theft"]:
         if cat_id == "both":
             title = "😿 Possible food theft — Dan & Sanbo at bowl!"
@@ -513,7 +556,7 @@ def format_session_report_text(session_data, all_results, all_failed, all_skippe
     lines.append(f"   eating: {ee}{ee_flag}")
     lines.append(f"     bowl: {session_data['bowl_state_progression']}")
     lines.append(f"     hand: {session_data['hand_human_interaction']}")
-    
+
     lines.append("")
     lines.append("--- RECORDED MOTION METADATA ---")
     lines.append(f"motion start: {session_data['first_recorded_motion_time']}")
@@ -561,7 +604,7 @@ def format_session_report_text(session_data, all_results, all_failed, all_skippe
 def format_multi_session_report_text(all_session_data, all_results, all_failed, all_skipped, shadow_header=True, custom_header=None):
     if len(all_session_data) == 1:
         return format_session_report_text(all_session_data[0], all_results, all_failed, all_skipped, shadow_header=shadow_header, custom_header=custom_header)
-        
+
     lines = []
     if custom_header:
         lines.append(custom_header)
@@ -576,20 +619,20 @@ def format_multi_session_report_text(all_session_data, all_results, all_failed, 
         lines.append(f"Provider/model: {provider} / {model}")
         lines.append(f"Recorded Sessions: {len(all_session_data)} distinct event(s)")
         lines.append("")
-        
+
         for i, session_data in enumerate(all_session_data, 1):
             matching_results = [r for r in all_results if r.get("clip_name") in [f"session_{i}", "session", str(i)]]
             res = matching_results[0] if matching_results else (all_results[i-1] if i-1 < len(all_results) else {})
-            
+
             lines.append(f"=== EVENT {i} ({session_data['session_start_time']}-{session_data['session_end_time']}, {session_data['total_duration']}) ===")
             lines.append("--- VLM VISUAL CONCLUSIONS ---")
-            
+
             cat_id = session_data["cat_identity"]
             has_refs = bool(res and res.get('reference_images'))
             basis = session_data.get('identity_basis', 'enhanced + reference-assisted' if has_refs else 'raw')
             visibility = session_data.get('visibility', 'unknown')
             conf = session_data.get('confidence', 0.0)
-            
+
             if session_data["possible_food_theft"]:
                 if cat_id == "both":
                     title = "😿 Possible food theft — Dan & Sanbo at bowl!"
@@ -618,21 +661,21 @@ def format_multi_session_report_text(all_session_data, all_results, all_failed, 
             lines.append(f"   eating: {ee}{ee_flag}")
             lines.append(f"     bowl: {session_data['bowl_state_progression']}")
             lines.append(f"     hand: {session_data['hand_human_interaction']}")
-            
+
             lines.append("")
             lines.append("--- RECORDED MOTION METADATA ---")
             lines.append(f"motion start: {session_data['first_recorded_motion_time']}")
             lines.append(f"motion duration: ~{session_data['recorded_session_duration']}")
             lines.append(f"evidence: {session_data['evidence_clip_count']} clip(s) ({session_data['evidence_sampled_frame_count']} frames)")
             lines.append("")
-            
+
             reasons = res.get("reasons", []) if isinstance(res, dict) else []
             if reasons:
                 lines.append("Observations:")
                 for r in reasons:
                     lines.append(f"- {r}")
                 lines.append("")
-                
+
     return "\n".join(lines).strip()
 
 def check_image_domain(img) -> str:
@@ -655,15 +698,15 @@ def check_image_domain(img) -> str:
 
 def validate_vlm_schema(data, expected_date=None, expected_clip_name=None):
     required_fields = [
-        "camera", "date", "clip_name", "cat_identity", 
+        "camera", "date", "clip_name", "cat_identity",
         "identity_basis", "visibility",
-        "eating_evidence", "bowl_state", "confidence", 
+        "eating_evidence", "bowl_state", "confidence",
         "reasons", "needs_higher_model"
     ]
     for rf in required_fields:
         if rf not in data:
             raise ValueError(f"Missing required field: {rf}")
-            
+
     if data["camera"] != "LOGITECH":
         raise ValueError(f"Invalid camera: {data['camera']}")
     if expected_date and data["date"] != expected_date:
@@ -672,22 +715,22 @@ def validate_vlm_schema(data, expected_date=None, expected_clip_name=None):
         allowed_names = [expected_clip_name] if isinstance(expected_clip_name, str) else list(expected_clip_name)
         if data["clip_name"] not in allowed_names:
             raise ValueError(f"Invalid clip_name: expected {expected_clip_name}, got {data['clip_name']}")
-            
+
     if data["cat_identity"] not in ["Dan", "Sanbo", "both", "none", "unsure"]:
         raise ValueError(f"Invalid cat_identity: {data['cat_identity']}")
     if data["eating_evidence"] not in ["yes", "no", "unsure"]:
         raise ValueError(f"Invalid eating_evidence: {data['eating_evidence']}")
     if data["bowl_state"] not in ["empty", "low", "half", "full", "unsure"]:
         pass
-        
+
     if not isinstance(data["confidence"], (int, float)):
         raise ValueError(f"Invalid confidence type: {type(data['confidence'])}")
     if not (0.0 <= data["confidence"] <= 1.0):
         raise ValueError(f"Confidence out of range: {data['confidence']}")
-        
+
     if not isinstance(data["reasons"], list) or not all(isinstance(x, str) for x in data["reasons"]):
         raise ValueError("reasons must be a list of strings")
-        
+
     if not isinstance(data["needs_higher_model"], bool):
         raise ValueError("needs_higher_model must be a boolean")
 
@@ -698,12 +741,12 @@ def call_openai_vlm(prompt_text, image_paths, model_name, api_key):
     with open(image_path, "rb") as f:
         img_data = f.read()
     b64_img = base64.b64encode(img_data).decode("utf-8")
-    
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    
+
     payload = {
         "model": model_name,
         "messages": [
@@ -718,11 +761,11 @@ def call_openai_vlm(prompt_text, image_paths, model_name, api_key):
         "response_format": { "type": "json_object" },
         "temperature": 0.0
     }
-    
+
     resp = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
     resp.raise_for_status()
     data = resp.json()
-    
+
     try:
         text_resp = data['choices'][0]['message']['content']
         return json.loads(text_resp)
@@ -741,9 +784,9 @@ def call_gemini_vlm(prompt_text, image_paths, model_name, api_key):
     else:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         headers = {"Content-Type": "application/json"}
-        
+
     parts = [{"text": prompt_text}]
-    
+
     for img_path in image_paths:
         with open(img_path, "rb") as f:
             img_data = f.read()
@@ -754,7 +797,7 @@ def call_gemini_vlm(prompt_text, image_paths, model_name, api_key):
                 "data": b64_img
             }
         })
-    
+
     payload = {
         "contents": [
             {
@@ -767,11 +810,11 @@ def call_gemini_vlm(prompt_text, image_paths, model_name, api_key):
             "response_mime_type": "application/json"
         }
     }
-    
+
     resp = requests.post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
     resp.raise_for_status()
     data = resp.json()
-    
+
     try:
         text_resp = data['candidates'][0]['content']['parts'][0]['text']
         return json.loads(text_resp)
@@ -796,9 +839,9 @@ def main():
     if args.date is None:
         print("[STOP] --date is required to avoid date rollover mistakes.")
         sys.exit(1)
-        
+
     args.date = args.date.replace("-", "")
-    
+
     if args.out_dir is None:
         args.out_dir = f".agent/artifacts/logitech_vlm_shadow_{args.date}"
 
@@ -821,7 +864,7 @@ def main():
         if not args.vlm_provider or not args.vlm_model:
             print("[STOP] --run-vlm requires --vlm-provider and --vlm-model.")
             sys.exit(1)
-            
+
         if args.vlm_provider == 'gemini':
             gdrive_creds_json = os.environ.get('GDRIVE_SERVICE_ACCOUNT_KEY')
             if gdrive_creds_json:
@@ -874,7 +917,7 @@ def main():
         sys.exit(1)
 
     out_dir = Path(args.out_dir)
-    
+
     if out_dir.exists():
         for summary_file in ["summary.json", "logitech_vlm_shadow_summary.json"]:
             s_path = out_dir / summary_file
@@ -891,10 +934,10 @@ def main():
             if f"_{args.date}_" not in mp4_file.name:
                 print(f"[STOP] Stale out-dir guard: {mp4_file.name} does not match --date {args.date}.")
                 sys.exit(1)
-                
+
     frames_dir = out_dir / "logitech_vlm_frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
-    
+
     generate_vlm_schema(out_dir)
 
     search_date = args.date.replace("-", "")
@@ -905,14 +948,32 @@ def main():
 
     selected_files = [f for f in all_files if in_feeding_window(f['name'], search_date)]
     selected_files.sort(key=lambda x: x['name'])
-    
+
     if not selected_files:
-        print(f"[STOP] No selected clips found for --date {args.date} in feeding window 06:18-06:30.")
-        print(f"Drive returned {len(all_files)} total files for that date:")
-        for f in all_files:
-            print(f"  - {f['name']}")
-        sys.exit(1)
-    
+        if not all_files:
+            print(f"[NO_CLIPS] No mp4 video files found in Drive folder for date {search_date}.")
+            print(f"[DIAGNOSTIC] Possible causes: No cat visited the Sanbo feeder, or Pi sync was delayed.")
+            print(f"[STATUS] NO FEEDING EVENT recorded for {args.date}. Exiting cleanly.")
+        else:
+            print(f"[NO_CLIPS] Found {len(all_files)} file(s) for date {search_date}, but none within feeding window 06:18-06:30:")
+            for f in all_files:
+                print(f"  - {f['name']}")
+            print(f"[STATUS] NO FEEDING EVENT within 06:18-06:30 for {args.date}. Exiting cleanly.")
+
+        no_clips_summary = {
+            "date": search_date,
+            "selected_clip_names": [],
+            "session_count": 0,
+            "extracted_frames_count": 0,
+            "frames_with_motion_count": 0,
+            "status": "NO_CLIPS",
+            "total_drive_files_for_date": len(all_files),
+            "note": "No feeding event detected in window; exited cleanly without VLM invocation"
+        }
+        with open(out_dir / "logitech_vlm_summary.json", "w") as jf:
+            json.dump(no_clips_summary, jf, indent=2)
+        sys.exit(0)
+
     sessions = group_clips_into_sessions(selected_files, gap_threshold_sec=10)
     print(f"ℹ️ {len(selected_files)} clip(s) grouped into {len(sessions)} feeding session(s) (gap threshold: 10s)")
 
@@ -929,11 +990,11 @@ def main():
         for f in session_clips:
             dest_path = out_dir / f['name']
             download_file(drive, f['id'], dest_path)
-            
+
             cap = cv2.VideoCapture(str(dest_path))
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-            
+
             # Sample frames
             sample_indices_labeled = [
                 (0, "start"),
@@ -942,11 +1003,11 @@ def main():
                 (3 * total_frames // 4, "three_quarter"),
                 (total_frames - 1, "end")
             ]
-            
+
             bg_frame = None
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             ret, bg_frame = cap.read()
-            
+
             first_cat_idx = None
             for idx in range(1, total_frames, int(fps)):
                 cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
@@ -954,12 +1015,12 @@ def main():
                 if ret and simple_cat_heuristic(frame, bg_frame):
                     first_cat_idx = idx
                     break
-            
+
             if first_cat_idx is not None and first_cat_idx not in [x[0] for x in sample_indices_labeled]:
                 sample_indices_labeled.append((first_cat_idx, "first_motion"))
-                
+
             sample_indices_labeled.sort(key=lambda x: x[0])
-            
+
             # Deduplicate by frame index, keeping the first label found
             seen_indices = set()
             final_samples = []
@@ -967,28 +1028,28 @@ def main():
                 if idx not in seen_indices and 0 <= idx < total_frames:
                     seen_indices.add(idx)
                     final_samples.append((idx, label))
-            
+
             m_filename_time = re.search(r'(\d{8})_(\d{6})', f['name'])
             clip_start_time_str = f"{m_filename_time.group(1)} {m_filename_time.group(2)}" if m_filename_time else ""
-            
+
             for idx, selection_reason in final_samples:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
                 ret, frame = cap.read()
                 if not ret: continue
-                
+
                 ts = extract_timestamp_calc(f['name'], idx, fps)
                 heuristic_cat = simple_cat_heuristic(frame, bg_frame)
-                
+
                 if f['name'] not in clip_domains:
                     clip_domains[f['name']] = []
                 clip_domains[f['name']].append(check_image_domain(frame))
-                
+
                 frame_filename = f"{f['name']}_frame_{idx}.jpg"
                 frame_path = frames_dir / frame_filename
                 cv2.imwrite(str(frame_path), frame)
-                
+
                 seconds_from_start = round(idx / fps, 2)
-                
+
                 row = {
                     "session_id": s_name,
                     "clip_name": f['name'],
@@ -1003,7 +1064,7 @@ def main():
                 }
                 manifest_data.append(row)
                 session_manifest.append(row)
-                
+
                 # Put timestamp on frame for contact sheet
                 font = cv2.FONT_HERSHEY_SIMPLEX
                 cv2.putText(frame, f"Clip: {f['name']}", (10, 30), font, 0.7, (0, 255, 0), 2)
@@ -1012,9 +1073,9 @@ def main():
                 motion_str = "MOTION: YES" if heuristic_cat else "MOTION: NO"
                 motion_color = (0, 0, 255) if heuristic_cat else (255, 0, 0)
                 cv2.putText(frame, motion_str, (10, 120), font, 0.7, motion_color, 2)
-                    
+
                 contact_sheet_frames.append({"frame_data": frame, "name": str(idx)})
-                
+
             cap.release()
 
         session_manifests.append(session_manifest)
@@ -1027,12 +1088,28 @@ def main():
             else:
                 sampled_cs_frames = contact_sheet_frames
             make_contact_sheet(sampled_cs_frames, cs_path)
+            raw_cs_img = cv2.imread(str(cs_path))
+            if raw_cs_img is not None:
+                enhanced_img = enhance_image_gamma_clahe(raw_cs_img, gamma=2.5)
+                enh_cs_path = cs_path.with_name(cs_path.name.replace(".jpg", "_enhanced.jpg"))
+                cv2.imwrite(str(enh_cs_path), enhanced_img)
+                comp_cs_path = cs_path.with_name(cs_path.name.replace(".jpg", "_comparison.jpg"))
+                make_comparison_contact_sheet(cs_path, enh_cs_path, comp_cs_path)
+
             if s_idx == 1:
-                make_contact_sheet(sampled_cs_frames, out_dir / "logitech_vlm_contact_sheet_session.jpg")
+                sess_raw = out_dir / "logitech_vlm_contact_sheet_session.jpg"
+                make_contact_sheet(sampled_cs_frames, sess_raw)
+                sess_raw_img = cv2.imread(str(sess_raw))
+                if sess_raw_img is not None:
+                    sess_enh_img = enhance_image_gamma_clahe(sess_raw_img, gamma=2.5)
+                    sess_enh = out_dir / "logitech_vlm_contact_sheet_session_enhanced.jpg"
+                    cv2.imwrite(str(sess_enh), sess_enh_img)
+                    sess_comp = out_dir / "logitech_vlm_contact_sheet_session_comparison.jpg"
+                    make_comparison_contact_sheet(sess_raw, sess_enh, sess_comp)
             session_contact_sheets.append(cs_path)
 
         generate_vlm_prompt(out_dir, search_date, session_name=s_name, has_references=bool(args.reference_dir))
-        
+
     manifest_path = out_dir / "logitech_vlm_manifest.csv"
     with open(manifest_path, "w", newline='') as f_csv:
         writer = csv.DictWriter(f_csv, fieldnames=[
@@ -1041,7 +1118,7 @@ def main():
         ])
         writer.writeheader()
         writer.writerows(manifest_data)
-        
+
     summary = {
         "date": search_date,
         "selected_clip_names": [f['name'] for f in selected_files],
@@ -1059,7 +1136,7 @@ def main():
         all_failed = []
         all_skipped = []
         all_session_data = []
-        
+
         clips_requested = len(sessions)
         clips_attempted = 0
         clips_succeeded = 0
@@ -1069,7 +1146,7 @@ def main():
         had_failures = False
         import time
         import requests
-        
+
         for s_idx, (session_clips, session_manifest) in enumerate(zip(sessions, session_manifests), 1):
             s_name = f"session_{s_idx}" if len(sessions) > 1 else "session"
             clip_name = s_name
@@ -1080,10 +1157,10 @@ def main():
             prompt_path = out_dir / f"logitech_vlm_prompt_{s_name}.md"
             if not prompt_path.exists():
                 prompt_path = out_dir / "logitech_vlm_prompt_session.md"
-            
+
             if not contact_sheet_path.exists() or not prompt_path.exists():
                 continue
-                
+
             prompt_text = prompt_path.read_text()
             prompt_hash = hashlib.sha256(prompt_text.encode('utf-8')).hexdigest()
 
@@ -1106,15 +1183,15 @@ def main():
                 clips_skipped += 1
                 skipped_due_to_api_cap += 1
                 continue
-            
+
             print(f"[VLM] Processing {clip_name} ({len(session_clips)} clip(s)) with {args.vlm_provider}...")
             clips_attempted += 1
-            
+
             # Check all domains across this session's clips
             session_domains = []
             for f in session_clips:
                 session_domains.extend(clip_domains.get(f['name'], []))
-            
+
             if session_domains:
                 if 'COLOR' in session_domains:
                     pass
@@ -1133,7 +1210,7 @@ def main():
             session_results = []
             session_failed = []
             session_skipped = []
-            
+
             while attempts < max_attempts:
                 attempts += 1
                 api_calls_made += 1
@@ -1167,7 +1244,7 @@ def main():
                             limg = cv2.merge((cl,a,b))
                             enhanced = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
                             cv2.imwrite(str(enhanced_path), enhanced)
-                    
+
                     image_paths.append(str(enhanced_path))
 
                     if args.vlm_provider == 'openai':
@@ -1176,9 +1253,9 @@ def main():
                         result_json = call_gemini_vlm(prompt_text, image_paths, args.vlm_model, api_key)
                     else:
                         raise NotImplementedError(f"Provider {args.vlm_provider} not supported.")
-                        
+
                     validate_vlm_schema(result_json, expected_date=search_date, expected_clip_name=[clip_name, "session"])
-                    
+
                     result_json["provider"] = args.vlm_provider
                     result_json["model"] = args.vlm_model
                     result_json["prompt_hash"] = prompt_hash
@@ -1188,7 +1265,7 @@ def main():
                     result_json["raw_response_saved"] = False
                     result_json["attempts_made"] = attempts
                     result_json["session_index"] = s_idx
-                    
+
                     out_path = out_dir / f"logitech_vlm_result_{stem}.json"
                     with open(out_path, "w") as jf:
                         json.dump(result_json, jf, indent=2)
@@ -1198,16 +1275,16 @@ def main():
                     clips_succeeded += 1
                     success = True
                     break
-                    
+
                 except Exception as e:
                     should_retry = False
                     if isinstance(e, requests.exceptions.HTTPError):
                         status = e.response.status_code
                         if status in [429, 500, 502, 503, 504]:
                             should_retry = True
-                            
+
                     sanitized_msg = sanitize_error_message(str(e))
-                            
+
                     if attempts < max_attempts and should_retry:
                         if api_calls_made >= MAX_API_CALLS_PER_RUN:
                             print(f"[VLM] Transient error {status} for {clip_name}, but API call cap reached. Skipping retry.")
@@ -1230,20 +1307,20 @@ def main():
                             clips_skipped += 1
                             skipped_due_to_api_cap += 1
                             break
-                            
+
                         print(f"[VLM] Transient error {status} for {clip_name}. Retrying in 2 seconds...")
                         time.sleep(2)
                         continue
-                        
+
                     print(f"[VLM] Failed for {clip_name}: {sanitized_msg}")
-                    
+
                     telegram_bound_msg = sanitized_msg
                     if "parse" in sanitized_msg.lower() or "schema" in sanitized_msg.lower() or "json" in sanitized_msg.lower() or isinstance(e, ValueError):
                         telegram_bound_msg = f"{type(e).__name__} - provider response could not be parsed; see local artifact"
                     else:
                         if len(telegram_bound_msg) > 200:
                             telegram_bound_msg = telegram_bound_msg[:197] + "..."
-                            
+
                     failed_json = {
                         "clip_name": clip_name,
                         "provider": args.vlm_provider,
@@ -1272,18 +1349,18 @@ def main():
             all_session_data.append(sess_data)
             with open(out_dir / f"logitech_vlm_session_{s_idx}_summary.json", "w") as f_s:
                 json.dump(sess_data, f_s, indent=2)
-                    
+
         # Save aggregates
         with open(out_dir / "logitech_vlm_results.json", "w") as jf:
             json.dump(all_results, jf, indent=2)
-            
+
         if all_results:
             keys = all_results[0].keys()
             with open(out_dir / "logitech_vlm_results.csv", "w", newline='') as f_csv:
                 writer = csv.DictWriter(f_csv, fieldnames=keys)
                 writer.writeheader()
                 writer.writerows(all_results)
-                
+
         summary["vlm_completed"] = True
         summary["api_calls_made"] = api_calls_made
         summary["api_call_cap"] = MAX_API_CALLS_PER_RUN
@@ -1306,7 +1383,7 @@ def main():
 
         with open(out_dir / "logitech_vlm_shadow_summary.json", "w") as f_sum:
             json.dump(summary, f_sum, indent=2)
-            
+
         if all_session_data:
             with open(out_dir / "logitech_vlm_session_summary.json", "w") as f_sess:
                 json.dump(all_session_data[0], f_sess, indent=2)
@@ -1346,13 +1423,13 @@ def main():
                 "message_starts_with_shadow": tg_text.startswith("[SHADOW]"),
                 "telegram_send_fully_successful": False
             }
-            
+
             import requests
             try:
                 # Send text
                 url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
                 resp = requests.post(url, data={"chat_id": telegram_chat_id, "text": tg_text}, timeout=20)
-                
+
                 try:
                     r_json = resp.json()
                     send_summary["delivery_evidence"].append({
@@ -1363,30 +1440,33 @@ def main():
                     })
                 except Exception:
                     pass
-                
+
                 resp.raise_for_status()
                 send_summary["telegram_text_sent"] = True
-                
-                # Send up to 2 images
+
+                # Send up to 2 comparison images (RAW vs ENHANCED)
                 images_to_send = []
                 for r in all_results:
                     if len(images_to_send) < 2:
-                        cs_path = out_dir / r.get('source_contact_sheet', '')
-                        if cs_path.exists():
-                            images_to_send.append(cs_path)
-                            
+                        raw_name = r.get('source_contact_sheet', '')
+                        comp_path = out_dir / raw_name.replace(".jpg", "_comparison.jpg")
+                        if not comp_path.exists():
+                            comp_path = out_dir / raw_name
+                        if comp_path.exists():
+                            images_to_send.append(comp_path)
+
                 send_summary["telegram_images_attempted"] = len(images_to_send)
                 send_summary["telegram_photos_attempted"] = len(images_to_send)
                 for img_path in images_to_send:
                     photo_url = f"https://api.telegram.org/bot{telegram_token}/sendPhoto"
-                    img_clip_name = img_path.name.replace("logitech_vlm_contact_sheet_", "").replace(".jpg", ".mp4")
+                    img_clip_name = img_path.name.replace("logitech_vlm_contact_sheet_", "").replace("_comparison.jpg", "").replace(".jpg", "")
                     iso_date = f"{args.date[:4]}-{args.date[4:6]}-{args.date[6:8]}"
-                    caption = f"[SHADOW] {iso_date} {img_clip_name}"
+                    caption = f"[SHADOW] {iso_date} {img_clip_name} (RAW vs ENHANCED)"
                     with open(img_path, "rb") as photo_f:
                         files = {"photo": photo_f}
                         data = {"chat_id": telegram_chat_id, "caption": caption}
                         p_resp = requests.post(photo_url, data=data, files=files, timeout=30)
-                        
+
                         try:
                             pr_json = p_resp.json()
                             send_summary["delivery_evidence"].append({
@@ -1397,29 +1477,29 @@ def main():
                             })
                         except Exception:
                             pass
-                            
+
                         p_resp.raise_for_status()
                         send_summary["telegram_images_sent"] += 1
                         send_summary["telegram_photos_sent"] += 1
                         send_summary["attached_contact_sheets"].append(img_path.name)
-                        
+
                 send_summary["total_messages_delivered"] = (1 if send_summary["telegram_text_sent"] else 0) + send_summary["telegram_photos_sent"]
                 send_summary["telegram_send_fully_successful"] = True
-                
+
                 # Print delivery evidence for GitHub Actions logs
                 print("[VLM] Telegram delivery evidence:")
                 for ev in send_summary["delivery_evidence"]:
                     print(f"  - type: {ev.get('type')}, status: {ev.get('status')}, ok: {ev.get('ok')}, message_id: {ev.get('message_id')}")
-                    
+
             except Exception as e:
                 send_summary["telegram_error"] = sanitize_error_message(str(e))
                 send_summary["total_messages_delivered"] = (1 if send_summary["telegram_text_sent"] else 0) + send_summary.get("telegram_photos_sent", 0)
                 print(f"[VLM] Telegram send error: {send_summary['telegram_error']}")
                 had_failures = True
-                
+
             with open(out_dir / "telegram_shadow_send_summary.json", "w") as jf:
                 json.dump(send_summary, jf, indent=2)
-                
+
             # Update logitech_vlm_shadow_summary.json
             summary_path = out_dir / "logitech_vlm_shadow_summary.json"
             if summary_path.exists():
@@ -1432,12 +1512,12 @@ def main():
                 main_sum["telegram_error"] = send_summary["telegram_error"]
                 with open(summary_path, "w") as f_sum:
                     json.dump(main_sum, f_sum, indent=2)
-        
+
         if args.cleanup_downloaded_videos:
             for mp4_file in out_dir.glob("motion_*.mp4"):
                 mp4_file.unlink()
                 print(f"[VLM] Cleaned up downloaded video: {mp4_file.name}")
-        
+
         if had_failures:
             sys.exit(1)
     else:

@@ -113,6 +113,15 @@ def main():
         print("[ERROR] Test video does not exceed 150 seconds! Aborting send.", flush=True)
         sys.exit(1)
 
+    # Size safety guard before sending to Telegram
+    from scripts.telegram_video_guard import compress_video_for_telegram, TELEGRAM_MAX_VIDEO_BYTES
+    ok_size, send_video_path, final_bytes = compress_video_for_telegram(video_path, max_bytes=TELEGRAM_MAX_VIDEO_BYTES)
+    if not ok_size:
+        print(f"[ERROR] Video exceeds safety limit ({final_bytes / 1024 / 1024:.2f} MB > {TELEGRAM_MAX_VIDEO_BYTES / 1024 / 1024:.2f} MB) and compression failed! Aborting send.", flush=True)
+        sys.exit(1)
+
+    print(f"  - Final Send Size: {final_bytes / 1024 / 1024:.2f} MB (Telegram-safe < 45 MB)", flush=True)
+
     caption = (
         "[TEST][TAPO] 150s continuation replay acceptance\n\n"
         "Source: 2026-08-18 real Dan breakfast\n"
@@ -124,8 +133,8 @@ def main():
 
     url = f"https://api.telegram.org/bot{token}/sendVideo"
     print(f"\n[SEND] Delivering test video to Telegram feeder group...", flush=True)
-    with open(video_path, "rb") as vf:
-        files = {"video": (video_path.name, vf, "video/mp4")}
+    with open(send_video_path, "rb") as vf:
+        files = {"video": (send_video_path.name, vf, "video/mp4")}
         data = {
             "chat_id": chat_id,
             "caption": caption,

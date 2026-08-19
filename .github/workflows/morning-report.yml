@@ -120,7 +120,7 @@ jobs:
           echo "TARGET_DATE=${TARGET_DATE}" >> "$GITHUB_ENV"
 
       - name: Run analysis notebook
-        if: github.event.inputs.date_override != 'REPLAY_TEST'
+        if: matrix.camera == 'TAPO' && github.event.inputs.date_override != 'REPLAY_TEST'
         env:
           GITHUB_ACTIONS: 'true'
           GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}

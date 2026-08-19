@@ -74,6 +74,17 @@ task needs them.
   `kibble_dispensed` snapshot from the best clean pre-cat frame.
 - Do not send `kibble_start` snapshots.
 
+## Acceptance and Evidence Invariants
+
+- Distinguish CODE VERIFIED, REPLAY VERIFIED, and LIVE NATURAL VERIFIED.
+- TAPO 150s replay rollover is PASS; natural record-until-cat-leaves is PENDING
+  until confirmed by an uncut natural live feeding session.
+- Low-light USB camera rule is LOW-LIGHT MOTION CLIP PRESERVATION (saving motion
+  clips for downstream VLM enhancement/analysis), NOT treating darkness as cat presence.
+- Feeder identity is camera configuration (TAPO = Dan feeder, LOGITECH = Sanbo feeder);
+  cat identity is model visual inference.
+- Telegram video uploads must be verified $< 45\text{ MB}$ before POST.
+
 ## Runtime Expectations
 
 - Pi-runtime changes should be deployed to the Pi unless the user says not to:

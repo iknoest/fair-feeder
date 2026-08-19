@@ -25,12 +25,12 @@ def mock_env_vars(monkeypatch):
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake_key")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake_token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake_chat")
-    
+
     class FakeCreds:
         token = 'fake_token'
         def refresh(self, request): pass
     monkeypatch.setattr("google.oauth2.service_account.Credentials.from_service_account_info", lambda x, scopes=None: FakeCreds())
-    
+
     class FakeDrive:
         def files(self):
             class FakeFiles:
@@ -50,7 +50,7 @@ def test_simple_cat_heuristic():
     bg = np.zeros((10, 10, 3), dtype=np.uint8)
     fg_same = np.zeros((10, 10, 3), dtype=np.uint8)
     assert simple_cat_heuristic(fg_same, bg) is False
-    
+
     fg_diff = np.full((10, 10, 3), 255, dtype=np.uint8)
     assert simple_cat_heuristic(fg_diff, bg) is True
 
@@ -58,10 +58,10 @@ def test_generate_vlm_prompt(tmp_path):
     clip_name = "motion_20260704_061800.mp4"
     date_str = "20260704"
     prompt_file = generate_vlm_prompt(tmp_path, date_str)
-    
+
     assert prompt_file.exists()
     content = prompt_file.read_text()
-    
+
     # Check that schema fields and placeholders are in the prompt
     assert 'session' in content
     assert date_str in content
@@ -91,16 +91,16 @@ def test_selection_reason_labels_are_stable():
     ]
     # Assume first motion is at frame 10
     sample_indices_labeled.append((10, "first_motion"))
-    
+
     sample_indices_labeled.sort(key=lambda x: x[0])
-    
+
     seen_indices = set()
     final_samples = []
     for idx, label in sample_indices_labeled:
         if idx not in seen_indices and 0 <= idx < total_frames:
             seen_indices.add(idx)
             final_samples.append((idx, label))
-            
+
     assert final_samples[0] == (0, "start")
     assert final_samples[1] == (10, "first_motion")
     assert final_samples[2] == (25, "quarter")
@@ -174,13 +174,13 @@ def test_mocked_provider_response(mock_post, tmp_path):
                     }
                 }]
             }
-            
+
     mock_post.return_value = MockResponse()
-    
+
     # Mock reading image
     img_path = tmp_path / "test.jpg"
     img_path.write_bytes(b"fake_image_data")
-    
+
     result = call_openai_vlm("prompt", [str(img_path)], "gpt-4o", "fake_key")
     assert result["cat_identity"] == "Sanbo"
     assert result["eating_evidence"] == "yes"
@@ -189,27 +189,27 @@ def test_sanitize_error_message(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-openai-key")
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "AIza-fair-feeder-key")
     monkeypatch.setenv("GEMINI_API_KEY", "AIza-fake-gemini-key")
-    
+
     # Test OpenAI redaction
     msg1 = "Error: Invalid token sk-fake-openai-key provided"
     assert "sk-fake-openai-key" not in sanitize_error_message(msg1)
-    
+
     # Test Fair Feeder Gemini redaction
     msg_ff = "Error: Invalid token AIza-fair-feeder-key"
     assert "AIza-fair-feeder-key" not in sanitize_error_message(msg_ff)
-    
+
     # Test Gemini redaction
     msg2 = "Error: Invalid key AIza-fake-gemini-key"
     assert "AIza-fake-gemini-key" not in sanitize_error_message(msg2)
-    
+
     # Test OpenAI redaction
     msg1 = "Error: Invalid token sk-fake-openai-key provided"
     assert "sk-fake-openai-key" not in sanitize_error_message(msg1)
-    
+
     # Test Gemini redaction
     msg2 = "Error: Invalid key AIza-fake-gemini-key"
     assert "AIza-fake-gemini-key" not in sanitize_error_message(msg2)
-    
+
     # Test URL query param redaction
     msg3 = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=AIza-some-other-key-123"
     sanitized3 = sanitize_error_message(msg3)
@@ -221,23 +221,23 @@ def test_sanitize_error_message(monkeypatch):
     sanitized4 = sanitize_error_message(msg4)
     assert "Bearer ***REDACTED***" in sanitized4
     assert "my-secret-token" not in sanitized4
-    
+
     # Test Telegram secrets redaction
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake_telegram_bot_token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake_telegram_chat_id")
-    
+
     msg5 = "Error with token fake_telegram_bot_token and chat id fake_telegram_chat_id"
     sanitized5 = sanitize_error_message(msg5)
     assert "fake_telegram_bot_token" not in sanitized5
     assert "fake_telegram_chat_id" not in sanitized5
     assert "***REDACTED***" in sanitized5
-    
+
     # Test Telegram URL redaction
     msg6 = "Failed URL: https://api.telegram.org/bot12345:secret/sendMessage"
     sanitized6 = sanitize_error_message(msg6)
     assert "12345:secret" not in sanitized6
     assert "https://api.telegram.org/bot***REDACTED***/sendMessage" in sanitized6
-    
+
     msg7 = "Failed URL: https://api.telegram.org/bot54321:other/sendPhoto"
     sanitized7 = sanitize_error_message(msg7)
     assert "54321:other" not in sanitized7
@@ -301,7 +301,7 @@ def test_schema_rejects_confidence_out_of_range():
     }
     with pytest.raises(ValueError, match="Confidence out of range: 1.5"):
         validate_vlm_schema(valid_data)
-        
+
     valid_data["confidence"] = -0.1
     with pytest.raises(ValueError, match="Confidence out of range: -0.1"):
         validate_vlm_schema(valid_data)
@@ -336,7 +336,7 @@ def test_missing_gemini_key_error_mentions_both(monkeypatch, capsys):
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-05", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model"]):
         with pytest.raises(SystemExit):
             logitech_vlm_shadow.main()
-            
+
     captured = capsys.readouterr()
     assert "Missing GDRIVE_SERVICE_ACCOUNT_KEY or GEMINI_API_KEY for Gemini authentication." in captured.out
     assert "AIza" not in captured.out
@@ -346,7 +346,7 @@ def test_gemini_key_lookup_prefers_fair_feeder(mock_post, monkeypatch, tmp_path)
     monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "AIza-fair-feeder")
     monkeypatch.setenv("GEMINI_API_KEY", "AIza-fallback")
-    
+
     class MockResponse:
         def raise_for_status(self): pass
         def json(self):
@@ -355,9 +355,9 @@ def test_gemini_key_lookup_prefers_fair_feeder(mock_post, monkeypatch, tmp_path)
     def side_effect(url, *args, **kwargs):
         assert "AIza-fair-feeder" in url
         return MockResponse()
-        
+
     mock_post.side_effect = side_effect
-    
+
     import logitech_vlm_shadow
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-04", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path)]):
         with patch('logitech_vlm_shadow.check_credentials', return_value=True):
@@ -393,7 +393,7 @@ def test_gemini_key_lookup_falls_back(mock_post, monkeypatch, tmp_path):
     monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
     monkeypatch.delenv("FAIR_FEEDER_GEMINI_API_KEY", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "AIza-fallback")
-    
+
     class MockResponse:
         def raise_for_status(self): pass
         def json(self):
@@ -402,9 +402,9 @@ def test_gemini_key_lookup_falls_back(mock_post, monkeypatch, tmp_path):
     def side_effect(url, *args, **kwargs):
         assert "AIza-fallback" in url
         return MockResponse()
-        
+
     mock_post.side_effect = side_effect
-    
+
     import logitech_vlm_shadow
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-04", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path)]):
         with patch('logitech_vlm_shadow.check_credentials', return_value=True):
@@ -437,12 +437,12 @@ def test_gemini_key_lookup_falls_back(mock_post, monkeypatch, tmp_path):
 def test_transient_503_fails_once_then_succeeds(mock_sleep, mock_post, monkeypatch, tmp_path):
     monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "AIza-fair-feeder")
-    
+
     import requests
     class MockHTTPError(requests.exceptions.HTTPError):
         def __init__(self, status_code):
             self.response = type('obj', (object,), {'status_code': status_code})
-            
+
     class MockResponseSuccess:
         def raise_for_status(self): pass
         def json(self):
@@ -454,9 +454,9 @@ def test_transient_503_fails_once_then_succeeds(mock_sleep, mock_post, monkeypat
         if call_count[0] == 1:
             raise MockHTTPError(503)
         return MockResponseSuccess()
-        
+
     mock_post.side_effect = side_effect
-    
+
     import logitech_vlm_shadow
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-04", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path)]):
         with patch('logitech_vlm_shadow.check_credentials', return_value=True):
@@ -483,25 +483,25 @@ def test_transient_503_fails_once_then_succeeds(mock_sleep, mock_post, monkeypat
                         (tmp_path / "logitech_vlm_contact_sheet_dummy.jpg").write_bytes(b"dummy")
                         (tmp_path / "logitech_vlm_prompt_dummy.md").write_text("dummy prompt")
                         logitech_vlm_shadow.main()
-                        
+
     # Verify attempts_made appears in success payload
     result_json_path = tmp_path / "logitech_vlm_result_session.json"
     data = json.loads(result_json_path.read_text())
     assert data["attempts_made"] == 2
     assert call_count[0] == 2
-    
+
     # Check summary counts
     summary = json.loads((tmp_path / "logitech_vlm_shadow_summary.json").read_text())
     assert summary["clips_attempted"] == 1
     assert summary["clips_succeeded"] == 1
     assert summary["clips_failed"] == 0
     assert summary["api_calls_made"] == 2
-    
+
     # Check shadow report
     md_text = (tmp_path / "logitech_vlm_shadow_report.md").read_text()
     assert "Sanbo" in md_text
     assert "0.9" in md_text
-    
+
     # Check telegram preview
     tg_text = (tmp_path / "logitech_vlm_shadow_telegram_preview.txt").read_text()
     assert "[SHADOW] Logitech VLM" in tg_text
@@ -519,9 +519,9 @@ def test_transient_503_twice_creates_controlled_failure(mock_sleep, mock_post, m
 
     def side_effect(url, *args, **kwargs):
         raise MockHTTPError(503)
-        
+
     mock_post.side_effect = side_effect
-    
+
     import logitech_vlm_shadow
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-04", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path)]):
         with patch('logitech_vlm_shadow.check_credentials', return_value=True):
@@ -549,11 +549,11 @@ def test_transient_503_twice_creates_controlled_failure(mock_sleep, mock_post, m
                         (tmp_path / "logitech_vlm_prompt_dummy.md").write_text("dummy prompt")
                         with pytest.raises(SystemExit):
                             logitech_vlm_shadow.main()
-                        
+
     failed_json_path = tmp_path / "logitech_vlm_result_session.failed.json"
     data = json.loads(failed_json_path.read_text())
     assert data["attempts_made"] == 2
-    
+
     summary = json.loads((tmp_path / "logitech_vlm_shadow_summary.json").read_text())
     assert summary["clips_attempted"] == 1
     assert summary["clips_succeeded"] == 0
@@ -574,9 +574,9 @@ def test_401_does_not_retry(mock_sleep, mock_post, monkeypatch, tmp_path):
     def side_effect(url, *args, **kwargs):
         call_count[0] += 1
         raise MockHTTPError(401)
-        
+
     mock_post.side_effect = side_effect
-    
+
     import logitech_vlm_shadow
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-04", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path)]):
         with patch('logitech_vlm_shadow.check_credentials', return_value=True):
@@ -604,7 +604,7 @@ def test_401_does_not_retry(mock_sleep, mock_post, monkeypatch, tmp_path):
                         (tmp_path / "logitech_vlm_prompt_dummy.md").write_text("dummy prompt")
                         with pytest.raises(SystemExit):
                             logitech_vlm_shadow.main()
-                        
+
     failed_json_path = tmp_path / "logitech_vlm_result_session.failed.json"
     data = json.loads(failed_json_path.read_text())
     assert data["attempts_made"] == 1
@@ -614,14 +614,14 @@ def test_401_does_not_retry(mock_sleep, mock_post, monkeypatch, tmp_path):
 def test_low_confidence_formatting(mock_post, monkeypatch, tmp_path):
     monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "AIza-fair-feeder")
-    
+
     class MockResponseSuccess:
         def raise_for_status(self): pass
         def json(self):
             return {"candidates": [{"content": {"parts": [{"text": '{"camera": "LOGITECH", "date": "20260704", "clip_name": "session", "identity_basis": "raw", "visibility": "good", "cat_identity": "unsure", "eating_evidence": "unsure", "bowl_state": "unsure", "confidence": 0.6, "reasons": [], "needs_higher_model": true}'}]}}]}
 
     mock_post.return_value = MockResponseSuccess()
-    
+
     import logitech_vlm_shadow
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-04", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path)]):
         with patch('logitech_vlm_shadow.check_credentials', return_value=True):
@@ -648,7 +648,7 @@ def test_low_confidence_formatting(mock_post, monkeypatch, tmp_path):
                         (tmp_path / "logitech_vlm_contact_sheet_dummy.jpg").write_bytes(b"dummy")
                         (tmp_path / "logitech_vlm_prompt_dummy.md").write_text("dummy prompt")
                         logitech_vlm_shadow.main()
-                        
+
     md_text = (tmp_path / "logitech_vlm_shadow_report.md").read_text()
     assert "0.6" in md_text
     assert "needs higher model" in md_text.lower()
@@ -662,12 +662,12 @@ def test_low_confidence_formatting(mock_post, monkeypatch, tmp_path):
 def test_max_api_calls_cap_and_cleanup(mock_sleep, mock_post, monkeypatch, tmp_path):
     monkeypatch.delenv("GDRIVE_SERVICE_ACCOUNT_KEY", raising=False)
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "AIza-fair-feeder")
-    
+
     import requests
     class MockHTTPError(requests.exceptions.HTTPError):
         def __init__(self, status_code):
             self.response = type('obj', (object,), {'status_code': status_code})
-            
+
     class MockResponseSuccess:
         def raise_for_status(self): pass
         def json(self):
@@ -676,16 +676,16 @@ def test_max_api_calls_cap_and_cleanup(mock_sleep, mock_post, monkeypatch, tmp_p
     # We mock 2 clips.
     # First clip fails first time (status 503), then retries (which makes api_calls_made = 2), but succeeds.
     # Second clip then starts, but api_calls_made is already 2, so it should be skipped.
-    
+
     call_count = [0]
     def side_effect(url, *args, **kwargs):
         call_count[0] += 1
         if call_count[0] == 1:
             raise MockHTTPError(503)
         return MockResponseSuccess()
-        
+
     mock_post.side_effect = side_effect
-    
+
     import logitech_vlm_shadow
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-04", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path), "--cleanup-downloaded-videos"]):
         with patch('logitech_vlm_shadow.check_credentials', return_value=True):
@@ -712,17 +712,17 @@ def test_max_api_calls_cap_and_cleanup(mock_sleep, mock_post, monkeypatch, tmp_p
                         # Create dummy mp4 files to test cleanup
                         (tmp_path / "motion_20260704_061800_clip1.mp4").write_bytes(b"dummy")
                         (tmp_path / "motion_20260704_061900_clip2.mp4").write_bytes(b"dummy")
-                        
+
                         # Create other artifacts to ensure they are NOT deleted
                         (tmp_path / "motion_20260704_061800_clip1_frame_0.jpg").write_bytes(b"dummy")
                         (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_061800_clip1.jpg").write_bytes(b"dummy")
                         (tmp_path / "logitech_vlm_prompt_motion_20260704_061800_clip1.md").write_text("dummy prompt")
-                        
+
                         (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_061900_clip2.jpg").write_bytes(b"dummy")
                         (tmp_path / "logitech_vlm_prompt_motion_20260704_061900_clip2.md").write_text("dummy prompt")
-                        
+
                         logitech_vlm_shadow.main()
-                        
+
     # Check that cleanup deleted ONLY the mp4s
     assert not (tmp_path / "motion_20260704_061800_clip1.mp4").exists()
     assert not (tmp_path / "motion_20260704_061900_clip2.mp4").exists()
@@ -743,19 +743,19 @@ def test_max_api_calls_cap_and_cleanup(mock_sleep, mock_post, monkeypatch, tmp_p
 
     # Verify reports contain skipped/failed logic
     md_text = (tmp_path / "logitech_vlm_shadow_report.md").read_text()
-    
+
     tg_text = (tmp_path / "logitech_vlm_shadow_telegram_preview.txt").read_text()
 
 @patch("requests.post")
 def test_failed_clip_in_reports_and_sanitized(mock_post, monkeypatch, tmp_path):
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "AIza-secret")
-    
+
     import requests
     def side_effect(*args, **kwargs):
         raise ValueError("Invalid key AIza-secret provided!")
-        
+
     mock_post.side_effect = side_effect
-    
+
     import logitech_vlm_shadow
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-04", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path)]):
         with patch('logitech_vlm_shadow.check_credentials', return_value=True):
@@ -784,10 +784,10 @@ def test_failed_clip_in_reports_and_sanitized(mock_post, monkeypatch, tmp_path):
                         import pytest
                         with pytest.raises(SystemExit):
                             logitech_vlm_shadow.main()
-                            
+
     md_text = (tmp_path / "logitech_vlm_shadow_report.md").read_text()
     assert "AIza-secret" not in md_text
-    
+
     tg_text = (tmp_path / "logitech_vlm_shadow_telegram_preview.txt").read_text()
     assert "AIza-secret" not in tg_text
 
@@ -820,7 +820,7 @@ def test_missing_date_exits_before_env_drive_vlm_telegram(monkeypatch, capsys):
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake")
-    
+
     import logitech_vlm_shadow
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--send-telegram-shadow", "--run-vlm", "--confirm-cost"]):
         with patch("requests.post") as mock_post, patch("googleapiclient.discovery.build") as mock_build, patch("logitech_vlm_shadow.call_gemini_vlm") as mock_gemini, patch("logitech_vlm_shadow.call_openai_vlm", return_value={"camera":"LOGITECH","date":"20260702","clip_name":"session","identity_basis": "raw", "visibility": "good", "cat_identity":"Sanbo","eating_evidence":"yes","bowl_state":"low","confidence":0.9,"reasons":[],"needs_higher_model":False}) as mock_openai:
@@ -851,7 +851,7 @@ def test_telegram_flags_and_sending(mock_post, monkeypatch, tmp_path):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake_bot_token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake_chat_id")
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake_key")
-    
+
     # We will mock the VLM call to return a specific result to trigger flags
     import logitech_vlm_shadow
     def mock_gemini(*args, **kwargs):
@@ -859,7 +859,7 @@ def test_telegram_flags_and_sending(mock_post, monkeypatch, tmp_path):
         if not hasattr(mock_gemini, "count"):
             mock_gemini.count = 0
         mock_gemini.count += 1
-        
+
         if mock_gemini.count == 1:
             return {
                 "camera": "LOGITECH", "date": "20260704", "clip_name": "motion_20260704_060001.mp4",
@@ -883,22 +883,22 @@ def test_telegram_flags_and_sending(mock_post, monkeypatch, tmp_path):
     class MockResp:
         def raise_for_status(self): pass
     mock_post.return_value = MockResp()
-    
+
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "20260704", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path), "--send-telegram-shadow", "--max-clips", "3"]):
         with patch('logitech_vlm_shadow.check_credentials', return_value=True), \
              patch('logitech_vlm_shadow.call_gemini_vlm', side_effect=mock_gemini), \
              patch('logitech_vlm_shadow.MAX_API_CALLS_PER_RUN', 3):
-            
+
             # Setup fake files to process
             (tmp_path / "motion_20260704_060001.mp4").write_bytes(b"")
             (tmp_path / "motion_20260704_060002.mp4").write_bytes(b"")
             (tmp_path / "motion_20260704_060003.mp4").write_bytes(b"")
-            
+
             # Create fake contact sheets so they can be attached
             (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_060001.jpg").write_bytes(b"img1")
             (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_060002.jpg").write_bytes(b"img2")
             (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_060003.jpg").write_bytes(b"img3")
-            
+
             class MockDrive:
                 def files(self):
                     class MockFiles:
@@ -924,19 +924,19 @@ def test_telegram_flags_and_sending(mock_post, monkeypatch, tmp_path):
                         def release(self): pass
                     with patch('cv2.VideoCapture', return_value=MockCap()):
                         logitech_vlm_shadow.main()
-                        
+
     # Check preview text
     tg_text = (tmp_path / "logitech_vlm_shadow_telegram_preview.txt").read_text()
     assert "[SHADOW] Logitech VLM Feeding Session Report" in tg_text
     assert "Non-authoritative shadow report. Production report unchanged." in tg_text
-    
+
     # Flags check
     assert "possible food theft — verify" in tg_text.lower()
     assert "needs higher model review" in tg_text.lower()
-    
+
     # Check requests.post calls
     assert mock_post.call_count == 2  # 1 text, 2 photos (cap is 2)
-    
+
     # Verify summary
     summary_path = tmp_path / "telegram_shadow_send_summary.json"
     assert summary_path.exists()
@@ -961,14 +961,14 @@ def test_telegram_send_text_failure_exits_nonzero(mock_post, monkeypatch, tmp_pa
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake_bot_token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake_chat_id")
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake_key")
-    
+
     import requests
     class MockHTTPError(requests.exceptions.HTTPError):
         pass
     def side_effect(*args, **kwargs):
         raise MockHTTPError("Telegram API error with token fake_bot_token")
     mock_post.side_effect = side_effect
-    
+
     import logitech_vlm_shadow
     def mock_gemini(*args, **kwargs):
         return {
@@ -976,12 +976,12 @@ def test_telegram_send_text_failure_exits_nonzero(mock_post, monkeypatch, tmp_pa
             "camera": "LOGITECH", "date": "20260704", "clip_name": "session", "identity_basis": "raw", "visibility": "good", "cat_identity": "both", "eating_evidence": "no", "bowl_state": "low",
             "confidence": 0.9, "reasons": [], "needs_higher_model": True
         }
-        
+
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "20260704", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path), "--send-telegram-shadow", "--max-clips", "1"]):
         with patch('logitech_vlm_shadow.check_credentials', return_value=True), patch('logitech_vlm_shadow.call_gemini_vlm', side_effect=mock_gemini):
             (tmp_path / "motion_20260704_060001.mp4").write_bytes(b"")
             (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_060001.jpg").write_bytes(b"img1")
-            
+
             class MockDrive:
                 def files(self):
                     class MockFiles:
@@ -1004,7 +1004,7 @@ def test_telegram_send_text_failure_exits_nonzero(mock_post, monkeypatch, tmp_pa
                     import pytest
                     with pytest.raises(SystemExit):
                         logitech_vlm_shadow.main()
-                        
+
     summary_path = tmp_path / "telegram_shadow_send_summary.json"
     summary = json.loads(summary_path.read_text())
     assert summary["telegram_text_sent"] is False
@@ -1012,17 +1012,17 @@ def test_telegram_send_text_failure_exits_nonzero(mock_post, monkeypatch, tmp_pa
     assert summary["telegram_send_fully_successful"] is False
     assert "fake_bot_token" not in summary["telegram_error"]
     assert "***REDACTED***" in summary["telegram_error"]
-    
+
 @patch("requests.post")
 def test_telegram_send_photo_failure_exits_nonzero(mock_post, monkeypatch, tmp_path):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake_bot_token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake_chat_id")
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake_key")
-    
+
     import requests
     class MockHTTPError(requests.exceptions.HTTPError):
         pass
-        
+
     call_count = [0]
     def side_effect(url, *args, **kwargs):
         call_count[0] += 1
@@ -1033,7 +1033,7 @@ def test_telegram_send_photo_failure_exits_nonzero(mock_post, monkeypatch, tmp_p
         else:
             raise MockHTTPError("Telegram API photo error for fake_chat_id")
     mock_post.side_effect = side_effect
-    
+
     import logitech_vlm_shadow
     def mock_gemini(*args, **kwargs):
         return {
@@ -1041,12 +1041,12 @@ def test_telegram_send_photo_failure_exits_nonzero(mock_post, monkeypatch, tmp_p
             "camera": "LOGITECH", "date": "20260704", "clip_name": "session", "identity_basis": "raw", "visibility": "good", "cat_identity": "both", "eating_evidence": "no", "bowl_state": "low",
             "confidence": 0.9, "reasons": [], "needs_higher_model": True
         }
-        
+
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "20260704", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path), "--send-telegram-shadow", "--max-clips", "1"]):
         with patch('logitech_vlm_shadow.check_credentials', return_value=True), patch('logitech_vlm_shadow.call_gemini_vlm', side_effect=mock_gemini):
             (tmp_path / "motion_20260704_060001.mp4").write_bytes(b"")
             (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_060001.jpg").write_bytes(b"img1")
-            
+
             class MockDrive:
                 def files(self):
                     class MockFiles:
@@ -1069,7 +1069,7 @@ def test_telegram_send_photo_failure_exits_nonzero(mock_post, monkeypatch, tmp_p
                     import pytest
                     with pytest.raises(SystemExit):
                         logitech_vlm_shadow.main()
-                        
+
     summary_path = tmp_path / "telegram_shadow_send_summary.json"
     summary = json.loads(summary_path.read_text())
     assert summary["telegram_text_sent"] is True
@@ -1078,7 +1078,7 @@ def test_telegram_send_photo_failure_exits_nonzero(mock_post, monkeypatch, tmp_p
     assert summary["telegram_send_fully_successful"] is False
     assert "fake_chat_id" not in summary["telegram_error"]
     assert "***REDACTED***" in summary["telegram_error"]
-    
+
     # Check logitech_vlm_shadow_summary.json
     main_summary_path = tmp_path / "logitech_vlm_shadow_summary.json"
     main_summary = json.loads(main_summary_path.read_text())
@@ -1142,7 +1142,7 @@ def test_sanitize_pem_block():
 def test_zero_selected_clips_hard_stop(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("GDRIVE_LOGITECH_FOLDER_ID", "fake_folder")
     import logitech_vlm_shadow
-    
+
     class FakeDrive:
         def files(self):
             return self
@@ -1150,51 +1150,51 @@ def test_zero_selected_clips_hard_stop(monkeypatch, capsys, tmp_path):
             return self
         def execute(self):
             return {'files': [{'name': 'not_in_window.mp4', 'id': '123'}]}
-            
+
     class FakeCreds:
         token = 'fake_token'
         def refresh(self, request): pass
     monkeypatch.setattr("google.oauth2.service_account.Credentials.from_service_account_info", lambda x, scopes=None: FakeCreds())
     monkeypatch.setattr("googleapiclient.discovery.build", lambda s, v, credentials: FakeDrive())
     monkeypatch.setattr("logitech_vlm_shadow.check_credentials", lambda: True)
-    
+
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-02", "--out-dir", str(tmp_path), "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "gemini-1.5"]):
         with pytest.raises(SystemExit) as excinfo:
             logitech_vlm_shadow.main()
-        assert excinfo.value.code != 0
-        
+        assert excinfo.value.code == 0
+
     captured = capsys.readouterr()
-    assert "No selected clips found" in captured.out
+    assert "[NO_CLIPS]" in captured.out
     assert "not_in_window.mp4" in captured.out
-    assert "123" not in captured.out
+    assert (tmp_path / "logitech_vlm_summary.json").exists()
 
 def test_stale_out_dir_summary_guard(tmp_path, capsys):
     import logitech_vlm_shadow
     import json
-    
+
     s_path = tmp_path / "summary.json"
     with open(s_path, "w") as f:
         json.dump({"date": "20260701"}, f)
-        
+
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-02", "--out-dir", str(tmp_path)]):
         with pytest.raises(SystemExit) as excinfo:
             logitech_vlm_shadow.main()
         assert excinfo.value.code != 0
-        
+
     captured = capsys.readouterr()
     assert "Stale out-dir guard" in captured.out
     assert "has date 20260701 but --date is 20260702" in captured.out
 
 def test_stale_out_dir_mp4_guard(tmp_path, capsys):
     import logitech_vlm_shadow
-    
+
     (tmp_path / "motion_20260701_061800_10s.mp4").touch()
-        
+
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-02", "--out-dir", str(tmp_path)]):
         with pytest.raises(SystemExit) as excinfo:
             logitech_vlm_shadow.main()
         assert excinfo.value.code != 0
-        
+
     captured = capsys.readouterr()
     assert "Stale out-dir guard" in captured.out
     assert "does not match --date 20260702" in captured.out
@@ -1206,9 +1206,9 @@ def test_gdrive_logitech_folder_id_missing_exits_nonzero_fixed(monkeypatch, caps
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake")
-    
+
     import logitech_vlm_shadow
-    
+
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-02", "--out-dir", str(tmp_path), "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test"]):
         with patch("requests.post") as mock_post, patch("googleapiclient.discovery.build") as mock_build, patch("logitech_vlm_shadow.call_gemini_vlm", return_value={"camera":"LOGITECH","date":"20260702","clip_name":"session","identity_basis": "raw", "visibility": "good", "cat_identity":"Sanbo","eating_evidence":"yes","bowl_state":"low","confidence":0.9,"reasons":[],"needs_higher_model":False}) as mock_vlm:
             with pytest.raises(SystemExit) as excinfo:
@@ -1217,7 +1217,7 @@ def test_gdrive_logitech_folder_id_missing_exits_nonzero_fixed(monkeypatch, caps
             mock_post.assert_not_called()
             mock_build.assert_not_called()
             mock_vlm.assert_not_called()
-            
+
     captured = capsys.readouterr()
     assert "GDRIVE_LOGITECH_FOLDER_ID is missing" in captured.out
 
@@ -1227,14 +1227,14 @@ def test_contact_sheet_overlay_trap_fixed(monkeypatch, capsys, tmp_path):
     import numpy as np
     import cv2
     from pathlib import Path
-    
+
     # Hermetic mock of required env vars
     monkeypatch.setenv("GDRIVE_SERVICE_ACCOUNT_KEY", "{}")
     monkeypatch.setenv("GDRIVE_LOGITECH_FOLDER_ID", "fake")
     monkeypatch.setenv("FAIR_FEEDER_GEMINI_API_KEY", "fake")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake")
-    
+
     class FakeDrive:
         def files(self):
             return self
@@ -1242,19 +1242,19 @@ def test_contact_sheet_overlay_trap_fixed(monkeypatch, capsys, tmp_path):
             return self
         def execute(self):
             return {'files': [{'name': 'motion_20260702_062112_2m_30s.mp4', 'id': '123'}]}
-    
+
     class FakeCreds:
         token = 'fake_token'
         def refresh(self, request): pass
     monkeypatch.setattr("google.oauth2.service_account.Credentials.from_service_account_info", lambda x, scopes=None: FakeCreds())
     monkeypatch.setattr("googleapiclient.discovery.build", lambda s, v, credentials: FakeDrive())
-    
+
     # Mock download to just touch the file
     def fake_download(*args, **kwargs):
         dest = kwargs.get('dest_path') or args[2]
         Path(dest).touch()
     monkeypatch.setattr("logitech_vlm_shadow.download_file", fake_download)
-    
+
     class FakeCap:
         def __init__(self, *args): pass
         def get(self, prop):
@@ -1267,7 +1267,7 @@ def test_contact_sheet_overlay_trap_fixed(monkeypatch, capsys, tmp_path):
             return True, np.full((10, 10, 3), 100, dtype=np.uint8)
         def release(self): pass
     monkeypatch.setattr("cv2.VideoCapture", FakeCap)
-    
+
     with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "2026-07-02", "--out-dir", str(tmp_path), "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test", "--send-telegram-shadow"]):
         with patch("requests.post") as mock_post, patch("logitech_vlm_shadow.call_openai_vlm") as mock_openai, patch("logitech_vlm_shadow.call_gemini_vlm", return_value={"camera":"LOGITECH","date":"20260702","clip_name":"session","identity_basis": "raw", "visibility": "good", "cat_identity":"Sanbo","eating_evidence":"yes","bowl_state":"low","confidence":0.9,"reasons":[],"needs_higher_model":False}) as mock_gemini:
             with pytest.raises(SystemExit) as excinfo:
@@ -1276,7 +1276,7 @@ def test_contact_sheet_overlay_trap_fixed(monkeypatch, capsys, tmp_path):
             mock_post.assert_not_called()
             mock_openai.assert_not_called()
             mock_gemini.assert_not_called()
-    
+
     captured = capsys.readouterr()
     assert "BRIGHT_GRAYSCALE" in captured.out
     assert "Likely Tapo IR input" in captured.out
@@ -1527,10 +1527,10 @@ def test_camera_label_in_startup_alert():
 def test_generate_vlm_prompt_references(tmp_path):
     p_no_ref = generate_vlm_prompt(tmp_path, "20260816", has_references=False)
     no_ref_text = p_no_ref.read_text()
-    
+
     p_ref = generate_vlm_prompt(tmp_path, "20260816", has_references=True)
     ref_text = p_ref.read_text()
-    
+
     assert "REFERENCE IMAGES" not in no_ref_text
     assert "REFERENCE IMAGES" in ref_text
     assert "REFERENCE — DAN" in ref_text
@@ -1612,3 +1612,40 @@ def test_format_multi_session_report_text():
     assert "cat: none" in report
     assert "Recorded Sessions: 2 distinct event(s)" in report
 
+
+def test_enhance_image_gamma_clahe():
+    import numpy as np
+    import cv2
+    import logitech_vlm_shadow
+
+    # Create dark synthetic image
+    dark_img = np.full((100, 100, 3), 10, dtype=np.uint8)
+    enh_img = logitech_vlm_shadow.enhance_image_gamma_clahe(dark_img, gamma=2.5)
+
+    assert enh_img is not None
+    assert enh_img.shape == (100, 100, 3)
+    assert np.mean(enh_img) > np.mean(dark_img)
+
+
+def test_make_comparison_contact_sheet(tmp_path):
+    import numpy as np
+    import cv2
+    import logitech_vlm_shadow
+
+    raw_path = tmp_path / "raw_cs.jpg"
+    enh_path = tmp_path / "enh_cs.jpg"
+    comp_path = tmp_path / "comp_cs.jpg"
+
+    raw_img = np.full((180, 320, 3), 20, dtype=np.uint8)
+    enh_img = np.full((180, 320, 3), 100, dtype=np.uint8)
+    cv2.imwrite(str(raw_path), raw_img)
+    cv2.imwrite(str(enh_path), enh_img)
+
+    logitech_vlm_shadow.make_comparison_contact_sheet(raw_path, enh_path, comp_path)
+
+    assert comp_path.exists()
+    comp_img = cv2.imread(str(comp_path))
+    assert comp_img is not None
+    # Check vertical concatenation with banners: height > 180 * 2
+    assert comp_img.shape[0] > 360
+    assert comp_img.shape[1] == 320

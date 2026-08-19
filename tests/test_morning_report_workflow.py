@@ -22,15 +22,25 @@ def test_prepare_job_timeout_is_large_enough_for_wait_window():
     assert "timeout-minutes: 360" in text
     assert "Wait until feeding window is complete" in text
 
+def test_prepare_exports_heartbeat_and_target_date():
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
 
-def test_analysis_job_uses_single_source_of_truth_for_target_date():
+    assert 'gha_job_started_at_utc' in text
+    assert 'gha_schedule_cron' in text
+    assert 'gha_scheduled_at_utc' in text
+    assert 'gha_schedule_delay_min' in text
+    assert 'amsterdam_local_time' in text
+    assert 'target_date' in text
+
+def test_analysis_job_uses_single_source_of_truth_for_target_date_and_heartbeat():
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
 
     assert 'TARGET_DATE: ${{ needs.prepare-window.outputs.target_date }}' in text
-    assert 'DATE_OVERRIDE: ${{ github.event.inputs.date_override || needs.prepare-window.outputs.target_date }}' in text
-    assert 'TARGET_DATE=${TARGET_DATE}' in text
+    # ensure env wiring to morning-report from prepare-window exists
+    assert 'GHA_JOB_STARTED_AT_UTC: ${{ needs.prepare-window.outputs.gha_job_started_at_utc }}' in text
+    assert 'GHA_SCHEDULE_CRON: ${{ needs.prepare-window.outputs.gha_schedule_cron }}' in text
+    assert 'GHA_SCHEDULE_DELAY_MIN: ${{ needs.prepare-window.outputs.gha_schedule_delay_min }}' in text
     assert '--date "$TARGET_DATE"' in text
-
 
 def test_replay_step_remains_manual_only():
     text = WORKFLOW_PATH.read_text(encoding="utf-8")

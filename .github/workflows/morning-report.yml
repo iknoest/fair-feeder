@@ -17,14 +17,66 @@ jobs:
     timeout-minutes: 360
     outputs:
       target_date: ${{ steps.resolve-target.outputs.target_date }}
+      gha_job_started_at_utc: ${{ steps.resolve-target.outputs.gha_job_started_at_utc }}
+      gha_schedule_cron: ${{ steps.resolve-target.outputs.gha_schedule_cron }}
+      gha_scheduled_at_utc: ${{ steps.resolve-target.outputs.gha_scheduled_at_utc }}
+      gha_schedule_delay_min: ${{ steps.resolve-target.outputs.gha_schedule_delay_min }}
+      amsterdam_local_time: ${{ steps.resolve-target.outputs.amsterdam_local_time }}
     steps:
       - name: Resolve target date and emit diagnostic
         id: resolve-target
         shell: bash
         env:
           DATE_OVERRIDE: ${{ github.event.inputs.date_override }}
+          SCHEDULE_CRON: ${{ github.event.schedule }}
         run: |
           set -euo pipefail
+          # Capture authoritative scheduler heartbeat at job START (pre-wait)
+          GHA_JOB_STARTED_AT_UTC="$(python3 - <<'PY'
+from datetime import datetime, timezone
+print(datetime.now(timezone.utc).isoformat().replace('+00:00','Z'))
+PY
+)"
+          GHA_SCHEDULE_CRON="${SCHEDULE_CRON:-}"
+          if [ -n "$GHA_SCHEDULE_CRON" ]; then
+            minute="$(echo $GHA_SCHEDULE_CRON | awk '{print $1}')"
+            hour="$(echo $GHA_SCHEDULE_CRON | awk '{print $2}')"
+            # compute scheduled_dt iso in UTC for diagnostic only
+            GHA_SCHEDULED_AT_UTC="$(python3 - <<'PY'
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+import os
+cron = os.getenv('GHA_SCHEDULE_CRON','')
+if cron:
+    minute, hour, *_ = cron.split()
+    now = datetime.now(timezone.utc)
+    scheduled = now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+    print(scheduled.isoformat().replace('+00:00','Z'))
+else:
+    print('')
+PY
+)"
+            # compute delay in minutes
+            GHA_SCHEDULE_DELAY_MIN="$(python3 - <<'PY'
+from datetime import datetime,timezone
+from zoneinfo import ZoneInfo
+import os
+cron = os.getenv('GHA_SCHEDULE_CRON','')
+if cron:
+    minute, hour, *_ = cron.split()
+    now = datetime.now(timezone.utc)
+    scheduled = now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+    delay = max(0, round((now - scheduled).total_seconds() / 60))
+    print(delay)
+else:
+    print('')
+PY
+)"
+          else
+            GHA_SCHEDULED_AT_UTC=""
+            GHA_SCHEDULE_DELAY_MIN=""
+          fi
+
           if [ -n "$DATE_OVERRIDE" ]; then
             TRIGGER="workflow_dispatch"
             TARGET_DATE="$DATE_OVERRIDE"
@@ -48,10 +100,22 @@ PY
           echo "TRIGGER: ${TRIGGER}"
           echo "RESOLVED TARGET DATE: ${TARGET_DATE}"
           echo "AMSTERDAM LOCAL TIME: ${AMSTERDAM_TIME}"
+
           echo "target_date=${TARGET_DATE}" >> "$GITHUB_OUTPUT"
+          echo "gha_job_started_at_utc=${GHA_JOB_STARTED_AT_UTC}" >> "$GITHUB_OUTPUT"
+          echo "gha_schedule_cron=${GHA_SCHEDULE_CRON}" >> "$GITHUB_OUTPUT"
+          echo "gha_scheduled_at_utc=${GHA_SCHEDULED_AT_UTC}" >> "$GITHUB_OUTPUT"
+          echo "gha_schedule_delay_min=${GHA_SCHEDULE_DELAY_MIN}" >> "$GITHUB_OUTPUT"
+          echo "amsterdam_local_time=${AMSTERDAM_TIME}" >> "$GITHUB_OUTPUT"
+
+          # expose env for internal step summaries
           echo "TRIGGER=${TRIGGER}" >> "$GITHUB_ENV"
           echo "TARGET_DATE=${TARGET_DATE}" >> "$GITHUB_ENV"
           echo "AMSTERDAM_LOCAL_TIME=${AMSTERDAM_TIME}" >> "$GITHUB_ENV"
+          echo "GHA_JOB_STARTED_AT_UTC=${GHA_JOB_STARTED_AT_UTC}" >> "$GITHUB_ENV"
+          echo "GHA_SCHEDULE_CRON=${GHA_SCHEDULE_CRON}" >> "$GITHUB_ENV"
+          echo "GHA_SCHEDULED_AT_UTC=${GHA_SCHEDULED_AT_UTC}" >> "$GITHUB_ENV"
+          echo "GHA_SCHEDULE_DELAY_MIN=${GHA_SCHEDULE_DELAY_MIN}" >> "$GITHUB_ENV"
 
       - name: Wait until feeding window is complete
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.date_override == ''
@@ -96,6 +160,10 @@ from zoneinfo import ZoneInfo
 print(datetime.now(ZoneInfo('Europe/Amsterdam')).strftime('%Y-%m-%d %H:%M:%S %Z'))
 PY
 )}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- GHA_JOB_STARTED_AT_UTC: ${GHA_JOB_STARTED_AT_UTC:-${{ steps.resolve-target.outputs.gha_job_started_at_utc }}}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- GHA_SCHEDULE_CRON: ${GHA_SCHEDULE_CRON:-${{ steps.resolve-target.outputs.gha_schedule_cron }}}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- GHA_SCHEDULED_AT_UTC: ${GHA_SCHEDULED_AT_UTC:-${{ steps.resolve-target.outputs.gha_scheduled_at_utc }}}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- GHA_SCHEDULE_DELAY_MIN: ${GHA_SCHEDULE_DELAY_MIN:-${{ steps.resolve-target.outputs.gha_schedule_delay_min }}}" >> "$GITHUB_STEP_SUMMARY"
 
   morning-report:
     name: morning-report (${{ matrix.camera }})
@@ -114,34 +182,21 @@ PY
       TARGET_DATE: ${{ needs.prepare-window.outputs.target_date }}
       DATE_OVERRIDE: ${{ github.event.inputs.date_override || needs.prepare-window.outputs.target_date }}
       TRIGGER: ${{ github.event_name }}
+      GHA_JOB_STARTED_AT_UTC: ${{ needs.prepare-window.outputs.gha_job_started_at_utc }}
+      GHA_SCHEDULE_CRON: ${{ needs.prepare-window.outputs.gha_schedule_cron }}
+      GHA_SCHEDULED_AT_UTC: ${{ needs.prepare-window.outputs.gha_scheduled_at_utc }}
+      GHA_SCHEDULE_DELAY_MIN: ${{ needs.prepare-window.outputs.gha_schedule_delay_min }}
+      AMSTERDAM_LOCAL_TIME: ${{ needs.prepare-window.outputs.amsterdam_local_time }}
 
     steps:
-      - name: Record scheduler heartbeat
-        env:
-          SCHEDULED_CRON: ${{ github.event.schedule }}
-          CAMERA_NAME: ${{ matrix.camera }}
+      - name: Record scheduler heartbeat (use pre-wait values)
         run: |
-          python3 - <<'PY' >> "$GITHUB_ENV"
-          import os
-          from datetime import datetime, timezone
-
-          now = datetime.now(timezone.utc)
-          cron = os.environ.get("SCHEDULED_CRON", "")
-          camera = os.environ.get("CAMERA_NAME", "")
-          scheduled = ""
-          delay = ""
-          if cron:
-              minute, hour, *_ = cron.split()
-              scheduled_dt = now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
-              scheduled = scheduled_dt.isoformat().replace("+00:00", "Z")
-              delay = str(max(0, round((now - scheduled_dt).total_seconds() / 60)))
-
-          print(f"GHA_JOB_STARTED_AT_UTC={now.isoformat().replace('+00:00', 'Z')}")
-          print(f"GHA_SCHEDULE_CRON={cron}")
-          print(f"GHA_SCHEDULED_AT_UTC={scheduled}")
-          print(f"GHA_SCHEDULE_DELAY_MIN={delay}")
-          print(f"CAMERA_NAME={camera}")
-          PY
+          echo "GHA_JOB_STARTED_AT_UTC=${GHA_JOB_STARTED_AT_UTC}" >> "$GITHUB_ENV"
+          echo "GHA_SCHEDULE_CRON=${GHA_SCHEDULE_CRON}" >> "$GITHUB_ENV"
+          echo "GHA_SCHEDULED_AT_UTC=${GHA_SCHEDULED_AT_UTC}" >> "$GITHUB_ENV"
+          echo "GHA_SCHEDULE_DELAY_MIN=${GHA_SCHEDULE_DELAY_MIN}" >> "$GITHUB_ENV"
+          echo "AMSTERDAM_LOCAL_TIME=${AMSTERDAM_LOCAL_TIME}" >> "$GITHUB_ENV"
+          echo "CAMERA_NAME=${{ matrix.camera }}" >> "$GITHUB_ENV"
 
       - name: Show resolved target date
         run: |

@@ -58,6 +58,7 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 from collections import deque
+import queue
 
 try:
     import fcntl
@@ -492,8 +493,23 @@ class RecordingController:
         self.last_cat_time = self._find_last_cat_time()
         self._live_request_sender = None
         self._live_frames = []
-        self._live_start_time = 0
         self._continuation_requested = False
+        self._finalization_queue = queue.Queue()
+        self._finalization_thread = threading.Thread(target=self._finalization_worker, daemon=True)
+        self._finalization_thread.start()
+
+    def _finalization_worker(self):
+        """Processes completed recordings sequentially in the background."""
+        while True:
+            try:
+                job = self._finalization_queue.get()
+                if job is None:
+                    break
+                self._finalize_recording(*job)
+            except Exception as e:
+                log.error(f"⚠️ Finalization worker error: {e}")
+            finally:
+                self._finalization_queue.task_done()
 
     def _find_last_cat_time(self):
         """Scans the output directory for the most recent cat clip timestamp."""
@@ -612,7 +628,7 @@ class RecordingController:
             log.info(f"   - Remuxing with ffmpeg (pts_factor={pts_factor:.4f})...")
             import subprocess
             subprocess.run(
-                ["ffmpeg", "-i", str(temp_path),
+                ["ffmpeg", "-threads", "1", "-i", str(temp_path),
                  "-vf", f"setpts={pts_factor:.6f}*PTS",
                  "-r", str(fps), "-c:v", "libx264",
                  "-preset", "fast", "-y", corrected],
@@ -786,16 +802,24 @@ class RecordingController:
             print('⬜ Recording stopped (no file)')
             return
 
-        # Perform remux, filtering, and upload in a background thread
+        # Queue clip for sequential, bounded background finalization
         # so tick() is never blocked and continuation starts immediately
-        threading.Thread(
-            target=self._finalize_recording,
-            args=(temp_path, final_name, dur_str, duration, cat_seen, declared_fps, frame_count),
-            daemon=True
-        ).start()
+        self._finalization_queue.put(
+            (temp_path, final_name, dur_str, duration, cat_seen, declared_fps, frame_count)
+        )
 
     def _finalize_recording(self, temp_path, final_name, dur_str, duration, cat_seen, declared_fps, frame_count):
-        # Remux if actual frame rate diverged significantly from declared FPS
+        # 1. Cat detection filter FIRST: delete immediately if no cat found in any sampled frame.
+        # This prevents wasteful ffmpeg re-encoding of empty/rejected false-motion clips.
+        if self.yolo_model and not cat_seen:
+            if temp_path.exists():
+                temp_path.unlink()
+            with self._clips_lock:
+                self.clips_deleted += 1
+            print(f'🗑️  Deleted (no cat, {dur_str}): {final_name}')
+            return
+
+        # 2. Only for verified cat clips (or when yolo_model is None), remux if actual FPS diverged
         # (fixes sped-up playback when RTSP delivers fewer frames than declared)
         if duration > 0 and temp_path.exists():
             import subprocess
@@ -805,7 +829,7 @@ class RecordingController:
                     corrected = str(temp_path).replace('.mp4', '_fixed.mp4')
                     pts_factor = declared_fps / actual_fps
                     result = subprocess.run(
-                        ["ffmpeg", "-i", str(temp_path),
+                        ["ffmpeg", "-threads", "1", "-i", str(temp_path),
                          "-vf", f"setpts={pts_factor:.6f}*PTS",
                          "-r", str(declared_fps), "-c:v", "libx264",
                          "-preset", "fast", "-y", corrected],
@@ -821,16 +845,7 @@ class RecordingController:
                 except Exception as e:
                     print(f'   ⚠️ Remux error: {e}')
 
-        # Cat detection filter: delete if no cat found in any sampled frame
-        if self.yolo_model and not cat_seen:
-            if temp_path.exists():
-                temp_path.unlink()
-            with self._clips_lock:
-                self.clips_deleted += 1
-            print(f'🗑️  Deleted (no cat, {dur_str}): {final_name}')
-            return
-
-        # Rename with duration and move to Drive
+        # 3. Rename with duration and move to Drive
         final_temp = LOCAL_TEMP_DIR / final_name
         if temp_path.exists():
             temp_path.rename(final_temp)
@@ -842,7 +857,7 @@ class RecordingController:
             cat_status = '🐱' if cat_seen else '❓ no cat'
             print(f'✅ Saved: {final_name} ({size_mb:.1f} MB) [{cat_status}]')
 
-            # Trigger rclone sync if on Raspberry Pi
+            # 4. Trigger bounded rclone sync if on Raspberry Pi
             if platform.system() != 'Windows':
                 try:
                     import subprocess
@@ -854,14 +869,17 @@ class RecordingController:
                         rclone_cmd[3] = f"{RCLONE_REMOTE}{RCLONE_DEST_PATH}"
                         print(f'🔄 Triggering rclone to {RCLONE_REMOTE}{RCLONE_DEST_PATH}...')
 
-                    # Run in the background (fire-and-forget) so it doesn't block
-                    subprocess.Popen(
+                    # Run sequentially in background worker so rclone processes never accumulate
+                    subprocess.run(
                         rclone_cmd,
                         stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
+                        stderr=subprocess.DEVNULL,
+                        timeout=120,
                     )
                 except FileNotFoundError:
                     print('   ⚠️ rclone not found in PATH, skipping auto-sync')
+                except subprocess.TimeoutExpired:
+                    print('   ⚠️ rclone sync timed out after 120s')
                 except Exception as e:
                     print(f'   ⚠️ rclone launch error: {e}')
 

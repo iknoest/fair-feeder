@@ -212,10 +212,10 @@ def test_case_3_no_cat_false_motion_does_not_create_endless_continuation(tmp_pat
     assert controller.is_recording is False
 
 
-def test_stop_recording_delegates_to_background_thread_without_blocking(tmp_path, monkeypatch):
+def test_stop_recording_queues_without_blocking(tmp_path, monkeypatch):
     """
-    Verifies that _stop_recording() dispatches finalization (remux/upload/delete)
-    to a background worker thread rather than running synchronously in tick().
+    Verifies that _stop_recording() queues finalization (remux/upload/delete)
+    to a background worker queue rather than blocking tick() or spawning unbounded threads.
     """
     monkeypatch.setattr(motion_recorder, "LOCAL_TEMP_DIR", tmp_path)
     monkeypatch.setattr(motion_recorder, "DRIVE_OUTPUT_DIR", tmp_path)
@@ -227,11 +227,80 @@ def test_stop_recording_delegates_to_background_thread_without_blocking(tmp_path
     controller._start_recording()
     assert controller.is_recording is True
 
-    with patch("threading.Thread") as mock_thread:
-        controller._stop_recording()
-        assert controller.is_recording is False
-        assert mock_thread.called
-        assert mock_thread.call_args[1]["daemon"] is True
+    # Call _stop_recording
+    controller._stop_recording()
+    assert controller.is_recording is False
+
+
+def test_finalize_recording_deletes_immediately_without_running_ffmpeg_when_no_cat(tmp_path, monkeypatch):
+    """
+    Verifies that a false motion clip (cat_seen=False) is deleted immediately
+    WITHOUT executing any ffmpeg subprocess/transcoding.
+    """
+    monkeypatch.setattr(motion_recorder, "LOCAL_TEMP_DIR", tmp_path)
+    monkeypatch.setattr(motion_recorder, "DRIVE_OUTPUT_DIR", tmp_path)
+
+    reader = MockReader()
+    listener = MockListener(motion_detected=False)
+    mock_yolo = MagicMock()
+    mock_yolo.names = {0: "cat"}
+    controller = RecordingController(reader, listener, yolo_model=mock_yolo)
+
+    dummy_file = tmp_path / "motion_test_5s.mp4"
+    dummy_file.write_bytes(b"dummy video data")
+
+    with patch("subprocess.run") as mock_subproc:
+        controller._finalize_recording(
+            dummy_file,
+            "motion_test_5s.mp4",
+            "5s",
+            5.0,
+            cat_seen=False,
+            declared_fps=25.0,
+            frame_count=20,  # 4 fps vs declared 25 fps (>20% diverged)
+        )
+        # ffmpeg must NOT be called for rejected clips!
+        assert not mock_subproc.called
+
+    assert not dummy_file.exists()
+    assert controller.clips_deleted == 1
+    assert controller.clips_saved == 0
+
+
+def test_finalize_recording_remuxes_with_threads_1_when_cat_present(tmp_path, monkeypatch):
+    """
+    Verifies that a verified cat clip (cat_seen=True) runs ffmpeg with -threads 1
+    when actual fps diverges by >20% from declared fps.
+    """
+    monkeypatch.setattr(motion_recorder, "LOCAL_TEMP_DIR", tmp_path)
+    monkeypatch.setattr(motion_recorder, "DRIVE_OUTPUT_DIR", tmp_path)
+
+    reader = MockReader()
+    listener = MockListener(motion_detected=False)
+    mock_yolo = MagicMock()
+    mock_yolo.names = {0: "cat"}
+    controller = RecordingController(reader, listener, yolo_model=mock_yolo)
+
+    dummy_file = tmp_path / "motion_cat_5s.mp4"
+    dummy_file.write_bytes(b"dummy video data")
+
+    with patch("subprocess.run") as mock_subproc:
+        mock_subproc.return_value = MagicMock(returncode=0)
+        controller._finalize_recording(
+            dummy_file,
+            "motion_cat_5s.mp4",
+            "5s",
+            5.0,
+            cat_seen=True,
+            declared_fps=25.0,
+            frame_count=50,  # 10 fps vs declared 25 fps (>20% diverged)
+        )
+        assert mock_subproc.called
+        # Check that -threads 1 was passed to ffmpeg
+        ffmpeg_cmd = mock_subproc.call_args_list[0][0][0]
+        assert ffmpeg_cmd[0] == "ffmpeg"
+        assert "-threads" in ffmpeg_cmd
+        assert ffmpeg_cmd[ffmpeg_cmd.index("-threads") + 1] == "1"
 
 
 def test_continuation_inherits_cat_seen_and_saves_on_natural_session_end(tmp_path, monkeypatch):

@@ -13,7 +13,29 @@ from motion_recorder import (
 )
 
 
-def test_first_call_tapo_sends_notification(tmp_path):
+def test_default_startup_notification_disabled_sends_zero_messages(tmp_path, monkeypatch):
+    # Ensure opt-in flag is unset / 0
+    monkeypatch.delenv("FAIR_FEEDER_STARTUP_NOTIFY", raising=False)
+    state_dir = tmp_path / "state"
+    boot_file = tmp_path / "boot_id"
+    boot_file.write_text("boot-uuid-1111\n")
+
+    alerts = []
+    with patch("motion_recorder.send_telegram_alert", side_effect=alerts.append):
+        sent = send_startup_notification_once_per_boot(
+            camera_type="rtsp",
+            state_dir=state_dir,
+            boot_id_file=boot_file,
+        )
+
+    # Must be disabled by default: returns False, sends ZERO alerts
+    assert sent is False
+    assert len(alerts) == 0
+    assert not (state_dir / "startup_notified_rtsp.txt").exists()
+
+
+def test_first_call_tapo_sends_notification_when_opted_in(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAIR_FEEDER_STARTUP_NOTIFY", "1")
     state_dir = tmp_path / "state"
     boot_file = tmp_path / "boot_id"
     boot_file.write_text("boot-uuid-1111\n")
@@ -36,7 +58,8 @@ def test_first_call_tapo_sends_notification(tmp_path):
     assert tapo_state.read_text().strip() == "boot-uuid-1111"
 
 
-def test_second_call_same_tapo_same_boot_suppresses(tmp_path):
+def test_second_call_same_tapo_same_boot_suppresses(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAIR_FEEDER_STARTUP_NOTIFY", "1")
     state_dir = tmp_path / "state"
     boot_file = tmp_path / "boot_id"
     boot_file.write_text("boot-uuid-1111\n")
@@ -54,7 +77,8 @@ def test_second_call_same_tapo_same_boot_suppresses(tmp_path):
         assert len(alerts) == 1  # Suppressed!
 
 
-def test_logitech_same_boot_sends_once_independently(tmp_path):
+def test_logitech_same_boot_sends_once_independently(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAIR_FEEDER_STARTUP_NOTIFY", "1")
     state_dir = tmp_path / "state"
     boot_file = tmp_path / "boot_id"
     boot_file.write_text("boot-uuid-1111\n")
@@ -79,7 +103,8 @@ def test_logitech_same_boot_sends_once_independently(tmp_path):
         assert len(alerts) == 2
 
 
-def test_new_boot_id_resets_and_sends_again(tmp_path):
+def test_new_boot_id_resets_and_sends_again(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAIR_FEEDER_STARTUP_NOTIFY", "1")
     state_dir = tmp_path / "state"
     boot_file = tmp_path / "boot_id"
     boot_file.write_text("boot-uuid-1111\n")
@@ -99,7 +124,8 @@ def test_new_boot_id_resets_and_sends_again(tmp_path):
         assert (state_dir / "startup_notified_rtsp.txt").read_text().strip() == "boot-uuid-2222"
 
 
-def test_state_file_write_failure_does_not_crash(tmp_path):
+def test_state_file_write_failure_does_not_crash(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAIR_FEEDER_STARTUP_NOTIFY", "1")
     boot_file = tmp_path / "boot_id"
     boot_file.write_text("boot-uuid-1111\n")
 

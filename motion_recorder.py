@@ -274,14 +274,22 @@ def send_startup_notification_once_per_boot(
     state_dir: Path | None = None,
     boot_id_file: Path | None = None,
     message: str | None = None,
+    force_enabled: bool | None = None,
 ) -> bool:
     """
     Sends the LIVE startup alert to Telegram at most once per system boot for each camera.
-    Uses Linux /proc/sys/kernel/random/boot_id + persistent state file in writable runtime dir.
-    Returns True if notification was sent, False if suppressed.
+    DISABLED BY DEFAULT to prevent restart spam. Requires FAIR_FEEDER_STARTUP_NOTIFY=1 to opt-in.
+    Returns True if notification was sent, False if disabled or suppressed.
     """
     cam_name = (camera_type or 'default').lower()
     cam_label = "LOGITECH" if cam_name == "usb" else "TAPO"
+
+    # Opt-in check: disabled by default
+    startup_notify_env = os.getenv('FAIR_FEEDER_STARTUP_NOTIFY', '').strip().lower()
+    is_enabled = force_enabled if force_enabled is not None else startup_notify_env in ('1', 'true', 'yes', 'on')
+    if not is_enabled:
+        log.info(f"Startup LIVE notification for [{cam_label}] is disabled by default (FAIR_FEEDER_STARTUP_NOTIFY unset/0).")
+        return False
 
     current_boot_id = get_system_boot_id(boot_id_file)
 

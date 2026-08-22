@@ -16,14 +16,14 @@ HOW TO RUN FROM TERMINAL:
    cd /home/pi5/Feeder/fair-feeder
    source .venv/bin/activate
    python motion_recorder.py
-   
+
    Stop with: Ctrl+C
 
 2. 24/7 BACKGROUND MODE (keeps running, even if terminal closes):
    cd /home/pi5/Feeder/fair-feeder
    source .venv/bin/activate
    nohup python motion_recorder.py > motion_recorder.log 2>&1 &
-   
+
    Monitor logs with: tail -f motion_recorder.log
    Stop with: pkill -f motion_recorder.py
 
@@ -132,7 +132,7 @@ RCLONE_REMOTE = os.getenv('RCLONE_REMOTE', CONFIG_RCLONE_REMOTE)
 RCLONE_DEST_PATH = os.getenv('RCLONE_DEST_PATH', CONFIG_RCLONE_DEST)
 
 RTSP_PORT  = 554
-RTSP_STREAM = 'stream1' 
+RTSP_STREAM = 'stream1'
 
 # Use TCP transport for more reliable RTSP connection (proven to work on Raspberry Pi)
 RTSP_URL = f'rtsp://{CAMERA_USER}:{CAMERA_PASS}@{CAMERA_IP}:{RTSP_PORT}/{RTSP_STREAM}'
@@ -146,19 +146,18 @@ else:
     CAMERA_SOURCE = RTSP_URL_TCP
     log.info(f"Setting up RTSP Camera at {CAMERA_IP}")
 
-PRE_BUFFER_SECONDS  = 3      
-COOLDOWN_SECONDS    = 5      
-MAX_RECORDING_SECS  = 150    
-VIDEO_FPS           = 15     
+PRE_BUFFER_SECONDS  = 3
+COOLDOWN_SECONDS    = 5
+MAX_RECORDING_SECS  = 150
+VIDEO_FPS           = 15
 
 BOWL_CHECK_INTERVAL_SECONDS = int(os.getenv('BOWL_CHECK_INTERVAL_SECONDS', '30'))
 BOWL_BAD_SECONDS = int(os.getenv('BOWL_BAD_SECONDS', '600'))
 BOWL_ALERT_COOLDOWN_SECONDS = int(os.getenv('BOWL_ALERT_COOLDOWN_SECONDS', '21600'))
+BOWL_RECOVERY_CONSECUTIVE_CHECKS = int(os.getenv('BOWL_RECOVERY_CONSECUTIVE_CHECKS', '3'))
 BOWL_CENTER_MIN = float(os.getenv('BOWL_CENTER_MIN', '0.25'))
 BOWL_CENTER_MAX = float(os.getenv('BOWL_CENTER_MAX', '0.75'))
 BOWL_EDGE_MARGIN = float(os.getenv('BOWL_EDGE_MARGIN', '0.02'))
-BOWL_CONF = float(os.getenv('BOWL_CONF', '0.25'))
-
 BOWL_CONF = float(os.getenv('BOWL_CONF', '0.25'))
 
 import platform
@@ -194,20 +193,20 @@ def get_telegram_credentials():
     """Fetches Telegram credentials from env or Infisical."""
     bot_token = os.getenv('TelegramBotToken')
     chat_id = os.getenv('TelegramChatId')
-    
+
     # 2. If not in env, use Infisical REST API (No SDK required for Pi ARM compatibility)
     if not bot_token or not chat_id:
         client_id = os.getenv('INFISICAL_ID')
         client_secret = os.getenv('INFISICAL_SECRET')
         proj_id = os.getenv('INFISICAL_PROJECT_ID')
-        
+
         if client_id and client_secret and proj_id:
             try:
-                r = requests.post('https://app.infisical.com/api/v1/auth/universal-auth/login', 
+                r = requests.post('https://app.infisical.com/api/v1/auth/universal-auth/login',
                                   json={'clientId': client_id, 'clientSecret': client_secret}, timeout=10)
                 if r.status_code == 200:
                     token = r.json()['accessToken']
-                    r2 = requests.get(f'https://app.infisical.com/api/v3/secrets/raw?workspaceId={proj_id}&environment=dev', 
+                    r2 = requests.get(f'https://app.infisical.com/api/v3/secrets/raw?workspaceId={proj_id}&environment=dev',
                                       headers={'Authorization': f'Bearer {token}'}, timeout=10)
                     if r2.status_code == 200:
                         secrets = r2.json().get('secrets', [])
@@ -227,7 +226,7 @@ def send_telegram_alert(message):
         group_id = os.getenv('ALLOWED_GROUP_ID')
         if group_id:
             chat_id = group_id
-        
+
         if bot_token and chat_id:
             url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
             payload = {"chat_id": chat_id, "text": message}
@@ -235,14 +234,99 @@ def send_telegram_alert(message):
                 requests.post(url, json=payload, timeout=5)
                 first_line = message.splitlines()[0] if message else 'message'
                 log.info(f'Telegram sent: {first_line}')
-                log.info("📲 Telegram startup message sent.")
+                log.info("📲 Telegram message sent.")
             except Exception as e:
                 log.warning(f"⚠️ Failed to send Telegram: {e}")
         else:
             log.info("No Telegram credentials found; skipped msg.")
-            
+
     except Exception as e:
         log.warning(f"⚠️ Telegram config error: {e}")
+
+def get_system_boot_id(boot_id_file: Path | None = None) -> str:
+    """Returns the Linux kernel boot ID, or a fallback deterministic boot ID string."""
+    env_boot_id = os.getenv('FAIR_FEEDER_BOOT_ID')
+    if env_boot_id:
+        return env_boot_id.strip()
+
+    target_file = boot_id_file or Path('/proc/sys/kernel/random/boot_id')
+    try:
+        if target_file.exists():
+            content = target_file.read_text(encoding='utf-8').strip()
+            if content:
+                return content
+    except Exception as e:
+        log.debug(f"Could not read boot_id from {target_file}: {e}")
+
+    try:
+        uptime_file = Path('/proc/uptime')
+        if uptime_file.exists():
+            uptime_sec = float(uptime_file.read_text(encoding='utf-8').split()[0])
+            approx_boot = int((time.time() - uptime_sec) / 10) * 10
+            return f"proc-uptime-{approx_boot}"
+    except Exception:
+        pass
+
+    return "default-boot-session"
+
+def send_startup_notification_once_per_boot(
+    camera_type: str,
+    state_dir: Path | None = None,
+    boot_id_file: Path | None = None,
+    message: str | None = None,
+) -> bool:
+    """
+    Sends the LIVE startup alert to Telegram at most once per system boot for each camera.
+    Uses Linux /proc/sys/kernel/random/boot_id + persistent state file in writable runtime dir.
+    Returns True if notification was sent, False if suppressed.
+    """
+    cam_name = (camera_type or 'default').lower()
+    cam_label = "LOGITECH" if cam_name == "usb" else "TAPO"
+
+    current_boot_id = get_system_boot_id(boot_id_file)
+
+    # Determine state directory
+    if state_dir is None:
+        state_dir_env = os.getenv('FAIR_FEEDER_STATE_DIR')
+        if state_dir_env:
+            state_dir = Path(state_dir_env)
+        else:
+            runtime_dir = os.getenv('XDG_RUNTIME_DIR')
+            if runtime_dir and Path(runtime_dir).is_dir():
+                state_dir = Path(runtime_dir) / 'fair-feeder'
+            else:
+                state_dir = Path(os.getenv('TEMP') or os.getenv('TMPDIR') or '/tmp') / 'fair-feeder-state'
+
+    state_file = state_dir / f"startup_notified_{cam_name}.txt"
+
+    # Check if already notified for this boot
+    try:
+        if state_file.exists():
+            recorded_boot_id = state_file.read_text(encoding='utf-8').strip()
+            if recorded_boot_id == current_boot_id and current_boot_id != "default-boot-session":
+                log.info(f"📲 Startup notification for [{cam_label}] already sent for boot {current_boot_id[:8]} (suppressed duplicate).")
+                return False
+    except Exception as e:
+        log.warning(f"⚠️ Could not check startup notification state file {state_file}: {e}")
+
+    # Send the Telegram alert
+    if message is None:
+        message = (
+            f"📷 Fair Feeder Monitor [{cam_label}] is LIVE and protecting the bowl! 🐱\n"
+            f"Raspberry Pi 5 is officially monitoring 24/7."
+        )
+
+    send_telegram_alert(message)
+
+    # Persist state
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(current_boot_id, encoding='utf-8')
+        log.info(f"Recorded startup notification state for [{cam_label}] (boot {current_boot_id[:8]}).")
+    except Exception as e:
+        log.warning(f"⚠️ Could not write startup notification state file {state_file}: {e}")
+
+    return True
 
 # ── CLASSES ────────────────────────────────────────────────────────
 
@@ -279,18 +363,18 @@ class FrameMotionDetector:
         try:
             # Downscale for faster processing
             small = cv2.resize(frame, (320, 180))
-            
+
             # Apply background subtraction
             fg_mask = self.bg_subtractor.apply(small)
-            
+
             # Count non-zero pixels (moving pixels)
             motion_pixels = cv2.countNonZero(fg_mask)
             total_pixels = 320 * 180
             motion_percent = (motion_pixels / total_pixels) * 100
-            
+
             # Threshold check
             self.motion_detected = motion_percent > self.threshold_percent
-            
+
             if self.motion_detected:
                 self.last_motion_time = datetime.now()
         except Exception as e:
@@ -334,18 +418,18 @@ class CameraFrameReader:
             # Try with TCP transport first (more reliable on Raspberry Pi)
             log.info('Attempting TCP transport...')
             self.cap = cv2.VideoCapture(self.source)
-            
+
             # Fallback to UDP if TCP fails
             if not self.cap.isOpened():
                 log.warning('TCP failed, trying UDP...')
                 # Remove ?rtsp_transport=tcp if present for fallback
                 udp_source = self.source.split('?')[0] if isinstance(self.source, str) else self.source
                 self.cap = cv2.VideoCapture(udp_source)
-        
+
         if not self.cap.isOpened():
             log.error(f'Camera source {self.source} could not be opened.')
             sys.exit(1)
-        
+
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
@@ -410,7 +494,7 @@ class RecordingController:
             clips = list(DRIVE_OUTPUT_DIR.glob('motion_*.mp4'))
             if not clips:
                 return None
-            
+
             # Sort by filename which contains timestamp
             latest = sorted(clips)[-1].name
             # Extract 20260518_213615
@@ -436,7 +520,7 @@ class RecordingController:
             frame = self.reader.get_latest_frame()
             if frame is not None:
                 self._live_frames.append(frame)
-            
+
             # Capture for 5 seconds
             if now - self._live_start_time >= 5:
                 sender = self._live_request_sender
@@ -492,16 +576,16 @@ class RecordingController:
         if not frames:
             log.warning("Live stream requested but no frames were captured.")
             return
-        
+
         log.info(f"🎞️ Processing {len(frames)} frames for live stream request...")
         try:
             temp_name = f"live_{CAMERA_TYPE}_{int(time.time())}.mp4"
             temp_path = LOCAL_TEMP_DIR / temp_name
-            
+
             # Use reported FPS
             fps = getattr(self.reader, 'stream_fps', VIDEO_FPS)
             log.info(f"   - Writing video at {fps} fps to {temp_path}")
-            
+
             writer = cv2.VideoWriter(
                 str(temp_path),
                 cv2.VideoWriter_fourcc(*'mp4v'), fps,
@@ -516,7 +600,7 @@ class RecordingController:
             actual_duration = 5.0 # We know we waited 5 seconds
             actual_fps = len(frames) / actual_duration
             pts_factor = fps / actual_fps if actual_fps > 0 else 1.0
-            
+
             log.info(f"   - Remuxing with ffmpeg (pts_factor={pts_factor:.4f})...")
             import subprocess
             subprocess.run(
@@ -526,7 +610,7 @@ class RecordingController:
                  "-preset", "fast", "-y", corrected],
                 capture_output=True
             )
-            
+
             final_path = corrected if os.path.exists(corrected) else str(temp_path)
 
             # Send to Telegram
@@ -535,23 +619,23 @@ class RecordingController:
             if not self.bot_token:
                 log.error("   ❌ Cannot send live stream: bot_token is not initialized.")
                 return
-                
+
             url = f"https://api.telegram.org/bot{self.bot_token}/sendVideo"
             with open(final_path, 'rb') as f:
                 resp = requests.post(url, data={
-                    'chat_id': sender_id, 
+                    'chat_id': sender_id,
                     'caption': f'📺 Live Stream ({cam_label})'
                 }, files={'video': f}, timeout=60)
-            
+
             if resp.status_code == 200:
                 log.info("   ✅ Live stream sent successfully!")
             else:
                 log.error(f"   ❌ Telegram upload failed (HTTP {resp.status_code}): {resp.text}")
-            
+
             # Cleanup
             if os.path.exists(temp_path): os.unlink(temp_path)
             if os.path.exists(corrected): os.unlink(corrected)
-            
+
         except Exception as e:
             log.error(f"⚠️ Live stream error: {e}")
             import traceback
@@ -776,13 +860,15 @@ class RecordingController:
 class BowlPositionMonitor:
     """Periodically checks whether the COCO bowl class is framed."""
 
-    def __init__(self, reader, yolo_model=None):
+    def __init__(self, reader, yolo_model=None, controller=None):
         self.reader = reader
         self.yolo_model = yolo_model
+        self.controller = controller
         self._last_check = 0
         self._bad_since = None
         self._last_alert = 0
         self._alert_active = False
+        self._consecutive_good = 0
         self._status_lock = threading.Lock()
         self._last_status = {
             'enabled': bool(yolo_model),
@@ -794,6 +880,26 @@ class BowlPositionMonitor:
             'ok': bool(yolo_model),
             'reason': 'not checked yet' if yolo_model else 'monitor off',
         }
+
+    def _is_active_cat_feeding_session(self) -> bool:
+        """Check if an active cat feeding session or recording is taking place."""
+        if not self.controller:
+            return False
+
+        if getattr(self.controller, 'is_recording', False):
+            return True
+
+        if getattr(self.controller, 'cat_seen', False):
+            return True
+
+        last_cat = getattr(self.controller, 'last_cat_time', None)
+        if last_cat and (datetime.now() - last_cat).total_seconds() < 60:
+            return True
+
+        if getattr(self.controller, '_continuation_requested', False):
+            return True
+
+        return False
 
     def tick(self):
         if not self.yolo_model:
@@ -812,13 +918,30 @@ class BowlPositionMonitor:
         self._set_status(status)
         ok = status['ok']
         reason = status['reason']
-        if ok:
-            if self._alert_active and CAMERA_TYPE == 'rtsp':
-                send_telegram_alert('✅🥣 Bowl position recovered. Camera sees the bowl in frame again.')
-            self._bad_since = None
-            self._alert_active = False
+
+        # Check if an active cat feeding session is occluding the bowl
+        if self._is_active_cat_feeding_session():
+            if self._bad_since is not None and not self._alert_active:
+                log.debug("Bowl occluded during active cat feeding/recording; resetting bad accumulator.")
+                self._bad_since = None
+            self._consecutive_good = 0
             return
 
+        if ok:
+            self._consecutive_good += 1
+            if self._alert_active:
+                if self._consecutive_good >= BOWL_RECOVERY_CONSECUTIVE_CHECKS:
+                    if CAMERA_TYPE == 'rtsp':
+                        send_telegram_alert('✅🥣 Bowl position recovered. Camera sees the bowl in frame again.')
+                    self._alert_active = False
+                    self._bad_since = None
+            else:
+                if self._consecutive_good >= BOWL_RECOVERY_CONSECUTIVE_CHECKS:
+                    self._bad_since = None
+            return
+
+        # Bowl not detected / bad while idle
+        self._consecutive_good = 0
         if self._bad_since is None:
             self._bad_since = now
             log.warning(f'Bowl position bad: {reason}')
@@ -831,16 +954,16 @@ class BowlPositionMonitor:
         if bad_seconds < BOWL_BAD_SECONDS:
             return
 
-        if now - self._last_alert < BOWL_ALERT_COOLDOWN_SECONDS:
+        if self._last_alert > 0 and (now - self._last_alert < BOWL_ALERT_COOLDOWN_SECONDS):
             return
 
         minutes = round(bad_seconds / 60)
         log.warning(f'Bowl position alert firing after {minutes} min: {reason}')
-        alert_title = '🥣? Bowl not detected' if reason == 'not detected' else '👀? Camera position alert'
+        alert_title = '🥣? Bowl not reliably visible' if reason == 'not detected' else '👀? Camera position alert'
         send_telegram_alert(
             f'{alert_title}\n'
             f'Bowl has been {reason} for ~{minutes} min.\n'
-            f'Please check the Tapo camera position.'
+            f'Please check the Tapo camera view and bowl position.'
         )
         self._last_alert = now
         self._alert_active = True
@@ -1181,7 +1304,7 @@ class TelegramCommandListener:
             # Prevent double messages for global commands (only Tapo responds)
             if cmd in ('/help', '/start', '/weight') and CAMERA_TYPE != 'rtsp':
                 return
-            
+
             # If it's a logitech streaming request, only respond if we are the USB camera
             if cmd == '/streaming_logitech' and CAMERA_TYPE != 'usb':
                 return
@@ -1226,7 +1349,7 @@ class TelegramCommandListener:
                 size_cmd.extend(['--drive-root-folder-id', RCLONE_DEST_PATH])
             else:
                 size_cmd[2] = f"{RCLONE_REMOTE}{RCLONE_DEST_PATH}"
-                
+
             _res = _sp.run(size_cmd, capture_output=True, text=True, timeout=30)
             if _res.returncode == 0:
                 _rdata = _json.loads(_res.stdout)
@@ -1418,11 +1541,11 @@ if __name__ == "__main__":
     # 4. To stop the recorder:
     #    pkill -f motion_recorder.py
     # ──────────────────────────────────────────────────────────────────────
-    
+
     log.info('='*60)
     log.info('  Fair Feeder — Motion Recorder with Cat Detection')
     log.info('='*60)
-    
+
     # Enforce single-instance process lock per camera type
     lock_handle = acquire_process_lock(CAMERA_TYPE)
     if lock_handle is None:
@@ -1431,10 +1554,10 @@ if __name__ == "__main__":
     # Initialize detectors
     yolo_model = None
     bowl_monitor_model = None
-    
+
     # Fetch Telegram credentials early so they can be passed to the controller
     cmd_bot_token, cmd_chat_id = get_telegram_credentials()
-    
+
     try:
         from ultralytics import YOLO
         yolo_model = YOLO('yolov8n.pt')
@@ -1463,14 +1586,12 @@ if __name__ == "__main__":
         listener.start()
         reader.start()
         controller = RecordingController(reader, listener, yolo_model=yolo_model, bot_token=cmd_bot_token)
-        bowl_monitor = BowlPositionMonitor(reader, yolo_model=bowl_monitor_model)
+        bowl_monitor = BowlPositionMonitor(reader, yolo_model=bowl_monitor_model, controller=controller)
         log.info('')
         log.info('\ud83d\ude80 Monitoring... Press Ctrl+C to stop.')
-        
-        # Ping Telegram so user knows which camera service is running (e.g. after a reboot/restart)
-        # 📷 Fair Feeder Monitor is LIVE
-        cam_label = "LOGITECH" if CAMERA_TYPE == "usb" else "TAPO"
-        send_telegram_alert(f"📷 Fair Feeder Monitor [{cam_label}] is LIVE and protecting the bowl! 🐱\nRaspberry Pi 5 is officially monitoring 24/7.")
+
+        # Ping Telegram once per boot so user knows camera service is running
+        send_startup_notification_once_per_boot(CAMERA_TYPE)
 
         # Start Telegram command listener (two-way health check)
         cmd_bot_token, cmd_chat_id = get_telegram_credentials()

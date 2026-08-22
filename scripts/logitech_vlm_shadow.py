@@ -156,6 +156,192 @@ def make_comparison_contact_sheet(raw_cs_path: Path, enhanced_cs_path: Path, out
     comparison = cv2.vconcat([raw_block, separator, enh_block])
     cv2.imwrite(str(out_path), comparison)
 
+def extract_semantic_keyframes(cap, total_frames: int, fps: float, bg_frame: np.ndarray = None) -> list:
+    """
+    Extract semantic keyframes:
+    1. pre_feed_baseline: earliest stable bowl frame before motion/cat starts
+    2. first_approach: first detected motion frame
+    3. early_eating: ~25% into the motion window
+    4. mid_eating: ~50% into the motion window
+    5. late_eating: ~75% into the motion window
+    6. post_feed: post-feeding/exit frame after eating
+    """
+    if total_frames <= 0:
+        return []
+
+    if bg_frame is None:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        ret, bg_frame = cap.read()
+
+    step = max(1, int(fps))
+    motion_indices = []
+    for idx in range(0, total_frames, step):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ret, frame = cap.read()
+        if ret and simple_cat_heuristic(frame, bg_frame):
+            motion_indices.append(idx)
+
+    labeled_samples = []
+
+    if motion_indices:
+        first_motion_idx = motion_indices[0]
+        last_motion_idx = motion_indices[-1]
+
+        # 1. Pre-feed baseline: before first motion starts (e.g. frame 0 or max(0, first_motion - 2s))
+        pre_feed_idx = 0
+        if first_motion_idx > int(fps):
+            pre_feed_idx = max(0, first_motion_idx - int(fps * 1.5))
+        labeled_samples.append((pre_feed_idx, "pre_feed_baseline"))
+
+        # 2. First approach
+        labeled_samples.append((first_motion_idx, "first_approach"))
+
+        # Eating window: between first motion and last motion
+        motion_span = max(1, last_motion_idx - first_motion_idx)
+        if motion_span > int(fps * 2):
+            # 3. Early eating (~25%)
+            early_idx = min(total_frames - 1, first_motion_idx + int(motion_span * 0.25))
+            labeled_samples.append((early_idx, "early_eating"))
+
+            # 4. Mid eating (~50%)
+            mid_idx = min(total_frames - 1, first_motion_idx + int(motion_span * 0.50))
+            labeled_samples.append((mid_idx, "mid_eating"))
+
+            # 5. Late eating (~75%)
+            late_idx = min(total_frames - 1, first_motion_idx + int(motion_span * 0.75))
+            labeled_samples.append((late_idx, "late_eating"))
+        else:
+            mid_idx = min(total_frames - 1, first_motion_idx + motion_span // 2)
+            labeled_samples.append((mid_idx, "mid_eating"))
+
+        # 6. Post-feed: end of clip or after last motion
+        post_feed_idx = total_frames - 1
+        labeled_samples.append((post_feed_idx, "post_feed"))
+
+    else:
+        # No motion detected - fallback to baseline, early, mid, late, post
+        labeled_samples = [
+            (0, "pre_feed_baseline"),
+            (total_frames // 4, "early_eating"),
+            (total_frames // 2, "mid_eating"),
+            (3 * total_frames // 4, "late_eating"),
+            (total_frames - 1, "post_feed")
+        ]
+
+    # Deduplicate and sort by frame index
+    labeled_samples.sort(key=lambda x: x[0])
+    seen = set()
+    final_samples = []
+    for idx, label in labeled_samples:
+        clamped_idx = max(0, min(total_frames - 1, idx))
+        if clamped_idx not in seen:
+            seen.add(clamped_idx)
+            final_samples.append((clamped_idx, label))
+
+    return final_samples
+
+def make_before_after_comparison(frames_by_reason: dict, out_path: Path):
+    """
+    Create a compact, high-signal before/after comparison image:
+    [PRE-FEED] [EATING (optional)] [POST-FEED]
+    """
+    pre_frame = frames_by_reason.get("pre_feed_baseline")
+    post_frame = frames_by_reason.get("post_feed")
+    eating_frame = (
+        frames_by_reason.get("mid_eating")
+        or frames_by_reason.get("early_eating")
+        or frames_by_reason.get("late_eating")
+        or frames_by_reason.get("first_approach")
+    )
+
+    target_w, target_h = 480, 270
+    banner_h = 32
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    items = []
+    if pre_frame is not None:
+        items.append(("PRE-FEED BASELINE", pre_frame))
+    if eating_frame is not None:
+        items.append(("FEEDING ACTIVITY", eating_frame))
+    if post_frame is not None:
+        items.append(("POST-FEED", post_frame))
+
+    if not items:
+        return None
+
+    rendered_blocks = []
+    for title, img_data in items:
+        raw_img = img_data['frame']
+        ts = img_data.get('timestamp', '')
+        # Apply enhancement
+        enh = enhance_image_gamma_clahe(raw_img, gamma=2.5)
+        resized = cv2.resize(enh, (target_w, target_h))
+
+        banner = np.zeros((banner_h, target_w, 3), dtype=np.uint8)
+        header_text = f"{title} ({ts})" if ts else title
+        cv2.putText(banner, header_text, (10, 22), font, 0.50, (0, 255, 255), 1)
+        block = cv2.vconcat([banner, resized])
+        rendered_blocks.append(block)
+
+    comparison_img = cv2.hconcat(rendered_blocks)
+    cv2.imwrite(str(out_path), comparison_img)
+    return out_path
+
+def generate_enhanced_video(raw_mp4_path: Path, output_mp4_path: Path, gamma: float = 2.5) -> Path:
+    """
+    Applies Gamma 2.5 + CLAHE frame-by-frame on raw video on CI/runner.
+    Verifies size using telegram_video_guard.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    try:
+        from telegram_video_guard import compress_video_for_telegram
+    except ImportError:
+        try:
+            from scripts.telegram_video_guard import compress_video_for_telegram
+        except ImportError:
+            compress_video_for_telegram = None
+
+    raw_mp4_path = Path(raw_mp4_path)
+    output_mp4_path = Path(output_mp4_path)
+
+    cap = cv2.VideoCapture(str(raw_mp4_path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+
+    temp_raw_enh = output_mp4_path.with_name(f"temp_raw_{output_mp4_path.name}")
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(str(temp_raw_enh), fourcc, fps, (width, height))
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1000000
+    frames_read = 0
+    while frames_read < total_frames:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            break
+        enh_frame = enhance_image_gamma_clahe(frame, gamma=gamma)
+        writer.write(enh_frame)
+        frames_read += 1
+
+    cap.release()
+    writer.release()
+
+    if not temp_raw_enh.exists() or temp_raw_enh.stat().st_size == 0:
+        return output_mp4_path
+
+    if compress_video_for_telegram:
+        success, final_path, size_bytes = compress_video_for_telegram(temp_raw_enh, output_path=output_mp4_path)
+        if temp_raw_enh.exists() and final_path != temp_raw_enh:
+            temp_raw_enh.unlink()
+        return final_path
+    else:
+        if temp_raw_enh.exists():
+            if output_mp4_path.exists():
+                output_mp4_path.unlink()
+            temp_raw_enh.rename(output_mp4_path)
+        return output_mp4_path
+
 def generate_vlm_prompt(out_dir: Path, date_str: str, session_name: str = "session", has_references: bool = False):
     ref_text = ""
     if has_references:
@@ -178,15 +364,16 @@ Date: {date_str}
 {ref_text}
 Rules:
 1. Use only visible evidence from the provided frames.
-2. Do not count individual kibble pieces. Provide a general bowl state progression.
-3. Do not claim machine failure or say "feeding machine not working".
-4. If the cat identity is ambiguous or obstructed due to darkness, return `unsure`.
-5. If the bowl state is obstructed, return `unsure`.
-6. Sanbo is the light-colored cat with dark spots (cow/calico). Dan is the dark-colored cat with white markings (tuxedo).
-7. Logitech is a top-down RGB/ambient view. Only rely on visual evidence.
-8. Set 'identity_basis' to 'enhanced + reference-assisted' if reference images are present, otherwise 'raw'.
-9. Set 'visibility' to 'poor', 'usable', or 'good'. Note that if the underlying capture is extremely dark (even if pre-processing/enhancement recovers usable contrast), visibility should not be labeled 'good'.
-10. Calibrate your confidence carefully. A low-light, reference-assisted result should rarely reach 1.0 certainty, even if pre-processing makes markings easier to inspect.
+2. BOWL STATE EVIDENCE CONTRACT: ONLY report bowl level ('full', 'half', 'low', 'empty') if clearly visible in the frame. If the initial/pre-feed bowl is obscured or unclear, you MUST report 'unsure' or 'UNKNOWN' for that phase (e.g. 'unsure -> empty'). Do NOT infer bowl level from subsequent consumption, cat duration, or assumptions.
+3. Do not count individual kibble pieces. Provide a general bowl state progression grounded strictly in visible frames.
+4. Do not claim machine failure or say "feeding machine not working".
+5. If the cat identity is ambiguous or obstructed due to darkness, return `unsure`.
+6. If the bowl state is obstructed, return `unsure`.
+7. Sanbo is the light-colored cat with dark spots (cow/calico). Dan is the dark-colored cat with white markings (tuxedo).
+8. Logitech is a top-down RGB/ambient view. Only rely on visual evidence.
+9. Set 'identity_basis' to 'enhanced + reference-assisted' if reference images are present, otherwise 'raw'.
+10. Set 'visibility' to 'poor', 'usable', or 'good'. Note that if the underlying capture is extremely dark (even if pre-processing/enhancement recovers usable contrast), visibility should not be labeled 'good'.
+11. Calibrate your confidence carefully. A low-light, reference-assisted result should rarely reach 1.0 certainty, even if pre-processing makes markings easier to inspect.
 
 Output ONLY valid JSON matching the exact expected schema below.
 
@@ -200,7 +387,7 @@ Expected JSON schema:
   "identity_basis": "raw / enhanced + reference-assisted",
   "visibility": "poor | usable | good",
   "eating_evidence": "yes | no | unsure",
-  "bowl_state": "empty | low | half | full | unsure | (e.g. empty -> low)",
+  "bowl_state": "empty | low | half | full | unsure | (e.g. unsure -> empty)",
   "confidence": 0.0,
   "reasons": ["short visual reasons..."],
   "needs_higher_model": true/false
@@ -479,12 +666,12 @@ def format_vlm_failure_report_text(session_data, all_failed, all_skipped, shadow
     if shadow_header:
         lines.append("[SHADOW][LOGITECH] ⚠️ VLM analysis failed")
         lines.append("Non-authoritative shadow report. Production report unchanged.")
-    lines.append(f"Date: {session_data['date']}")
-    lines.append(f"Time: {session_data['session_start_time']}-{session_data['session_end_time']} ({session_data['total_duration']})")
-    lines.append(f"Provider/model: {session_data['provider']} / {session_data['model']}")
+    lines.append(f"Date: {session_data.get('date', 'unknown')}")
+    lines.append(f"Time: {session_data.get('session_start_time', '')}-{session_data.get('session_end_time', '')} ({session_data.get('total_duration', '')})")
+    lines.append(f"Provider/model: {session_data.get('provider', '')} / {session_data.get('model', '')}")
     lines.append("")
-    lines.append(f"Evidence prepared: {session_data['evidence_clip_count']} clip(s) / {session_data['evidence_sampled_frame_count']} frame(s)")
-    lines.append(f"VLM analysis: FAILED (0/{session_data['evidence_clip_count']} clips succeeded)")
+    lines.append(f"Evidence prepared: {session_data.get('evidence_clip_count', 0)} clip(s) / {session_data.get('evidence_sampled_frame_count', 0)} frame(s)")
+    lines.append(f"VLM analysis: FAILED (0/{session_data.get('evidence_clip_count', 0)} clips succeeded)")
     lines.append("")
     lines.append("No cat/eating/bowl conclusion was produced.")
     lines.append("Production report unchanged.")
@@ -675,6 +862,99 @@ def format_multi_session_report_text(all_session_data, all_results, all_failed, 
                 for r in reasons:
                     lines.append(f"- {r}")
                 lines.append("")
+
+    return "\n".join(lines).strip()
+
+def is_meaningful_feeding_event(session_data, result=None) -> bool:
+    """
+    Determines whether a feeding event has real user-facing feeding value.
+    Returns False when cat_identity is 'none' AND eating_evidence is 'no' (and no anomaly/theft/human interaction).
+    """
+    cat_id = str(session_data.get("cat_identity", "none")).strip().lower()
+    eating = str(session_data.get("eating_evidence", "no")).strip().lower()
+    theft = bool(session_data.get("possible_food_theft", False))
+    hand = str(session_data.get("hand_human_interaction", "none")).strip().lower()
+
+    if theft:
+        return True
+    if hand not in ["none", "no", "none observed", ""]:
+        return True
+    if cat_id in ["none", "no"] and eating in ["no", "none"]:
+        return False
+    return True
+
+def format_compact_session_text(session_data, result=None, shadow_header=True, custom_header=None) -> str:
+    """Compact, high-signal Telegram report format."""
+    lines = []
+    cat_id = session_data.get("cat_identity", "unknown")
+    eating = session_data.get("eating_evidence", "unknown")
+    theft = session_data.get("possible_food_theft", False)
+    bowl = session_data.get("bowl_state_progression", "unsure")
+    conf = session_data.get("confidence", 0.0)
+    vis = session_data.get("visibility", "poor")
+    has_refs = bool(result and result.get('reference_images'))
+    basis = session_data.get('identity_basis', 'enhanced + reference-assisted' if has_refs else 'raw')
+
+    # Title line
+    if custom_header:
+        lines.append(custom_header)
+    elif shadow_header:
+        if theft:
+            lines.append(f"[SHADOW][LOGITECH] 😿 Possible food theft at Sanbo feeder!")
+        elif cat_id == "Sanbo" and eating == "yes":
+            lines.append(f"[SHADOW][LOGITECH] 😸 Sanbo ate at Sanbo feeder")
+        elif cat_id == "Dan" and eating == "yes":
+            lines.append(f"[SHADOW][LOGITECH] 😸 Dan ate at Sanbo feeder")
+        elif eating == "yes":
+            lines.append(f"[SHADOW][LOGITECH] 😸 {cat_id} ate at Sanbo feeder")
+        else:
+            lines.append(f"[SHADOW][LOGITECH] 🐱 {cat_id} activity at Sanbo feeder")
+
+    start_t = session_data.get("session_start_time", "")
+    end_t = session_data.get("session_end_time", "")
+    dur_t = session_data.get("total_duration", "")
+    lines.append(f"{start_t}–{end_t} · {dur_t}")
+    lines.append(f"Confidence: {conf:.2f} · visibility {vis}")
+    lines.append(f"Bowl: {bowl}")
+    lines.append(f"Evidence: {basis}")
+
+    if theft:
+        lines.append("⚠️ Possible food theft")
+    if cat_id in ["unsure", "unknown"]:
+        lines.append("⚠️ Identity unsure")
+    if eating == "unsure":
+        lines.append("⚠️ Eating uncertain")
+    hand = str(session_data.get("hand_human_interaction", "")).lower()
+    if hand and hand not in ["none", "no", "none observed"]:
+        lines.append("⚠️ Human interaction")
+
+    return "\n".join(lines)
+
+def format_compact_multi_session_text(all_session_data, all_results, all_failed, all_skipped, shadow_header=True, custom_header=None) -> str:
+    """Formats multiple events compactly, suppressing non-meaningful events."""
+    meaningful_pairs = []
+    for i, sess in enumerate(all_session_data, 1):
+        matching_results = [r for r in all_results if r.get("clip_name") in [f"session_{i}", "session", str(i)]]
+        res = matching_results[0] if matching_results else (all_results[i-1] if i-1 < len(all_results) else {})
+        if is_meaningful_feeding_event(sess, res):
+            meaningful_pairs.append((sess, res))
+
+    if not meaningful_pairs:
+        return ""
+
+    if len(meaningful_pairs) == 1:
+        sess, res = meaningful_pairs[0]
+        return format_compact_session_text(sess, res, shadow_header=shadow_header, custom_header=custom_header)
+
+    lines = []
+    if custom_header:
+        lines.append(custom_header)
+    elif shadow_header:
+        lines.append("[SHADOW][LOGITECH] Multiple feeding sessions detected")
+
+    for sess, res in meaningful_pairs:
+        lines.append("")
+        lines.append(format_compact_session_text(sess, res, shadow_header=False))
 
     return "\n".join(lines).strip()
 
@@ -986,6 +1266,7 @@ def main():
         s_name = f"session_{s_idx}" if len(sessions) > 1 else "session"
         session_manifest = []
         contact_sheet_frames = []
+        session_frames_by_reason = {}
 
         for f in session_clips:
             dest_path = out_dir / f['name']
@@ -995,39 +1276,11 @@ def main():
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
 
-            # Sample frames
-            sample_indices_labeled = [
-                (0, "start"),
-                (total_frames // 4, "quarter"),
-                (total_frames // 2, "middle"),
-                (3 * total_frames // 4, "three_quarter"),
-                (total_frames - 1, "end")
-            ]
-
             bg_frame = None
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             ret, bg_frame = cap.read()
 
-            first_cat_idx = None
-            for idx in range(1, total_frames, int(fps)):
-                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-                ret, frame = cap.read()
-                if ret and simple_cat_heuristic(frame, bg_frame):
-                    first_cat_idx = idx
-                    break
-
-            if first_cat_idx is not None and first_cat_idx not in [x[0] for x in sample_indices_labeled]:
-                sample_indices_labeled.append((first_cat_idx, "first_motion"))
-
-            sample_indices_labeled.sort(key=lambda x: x[0])
-
-            # Deduplicate by frame index, keeping the first label found
-            seen_indices = set()
-            final_samples = []
-            for idx, label in sample_indices_labeled:
-                if idx not in seen_indices and 0 <= idx < total_frames:
-                    seen_indices.add(idx)
-                    final_samples.append((idx, label))
+            final_samples = extract_semantic_keyframes(cap, total_frames, fps, bg_frame)
 
             m_filename_time = re.search(r'(\d{8})_(\d{6})', f['name'])
             clip_start_time_str = f"{m_filename_time.group(1)} {m_filename_time.group(2)}" if m_filename_time else ""
@@ -1064,6 +1317,7 @@ def main():
                 }
                 manifest_data.append(row)
                 session_manifest.append(row)
+                session_frames_by_reason[selection_reason] = {"frame": frame.copy(), "timestamp": ts, "reason": selection_reason}
 
                 # Put timestamp on frame for contact sheet
                 font = cv2.FONT_HERSHEY_SIMPLEX
@@ -1079,6 +1333,12 @@ def main():
             cap.release()
 
         session_manifests.append(session_manifest)
+
+        # Generate compact before/after comparison image for user
+        ba_path = out_dir / f"logitech_vlm_before_after_{s_name}.jpg"
+        make_before_after_comparison(session_frames_by_reason, ba_path)
+        if s_idx == 1:
+            make_before_after_comparison(session_frames_by_reason, out_dir / "logitech_vlm_before_after_session.jpg")
 
         cs_path = out_dir / f"logitech_vlm_contact_sheet_{s_name}.jpg"
         if contact_sheet_frames:
@@ -1399,7 +1659,13 @@ def main():
 
         (out_dir / "logitech_vlm_shadow_report.md").write_text(report_text)
 
-        tg_text = report_text
+        # Prepare compact Telegram preview text
+        if len(all_results) > 0:
+            tg_text = format_compact_multi_session_text(all_session_data, all_results, all_failed, all_skipped, shadow_header=True, custom_header=args.custom_header)
+        else:
+            first_sess = all_session_data[0] if all_session_data else {}
+            tg_text = format_vlm_failure_report_text(first_sess, all_failed, all_skipped, shadow_header=True)
+
         (out_dir / "logitech_vlm_shadow_telegram_preview.txt").write_text(tg_text)
 
         if args.send_telegram_shadow:
@@ -1408,11 +1674,11 @@ def main():
                 "telegram_text_sent": False,
                 "telegram_images_attempted": 0,
                 "telegram_images_sent": 0,
-                "telegram_photos_attempted": 0,
-                "telegram_photos_sent": 0,
-                "telegram_image_cap": 2,
-                "attached_contact_sheets": [],
+                "telegram_videos_attempted": 0,
+                "telegram_videos_sent": 0,
+                "attached_media": [],
                 "delivery_evidence": [],
+                "suppressed_no_feeding": False,
                 "is_failure_report": len(all_results) == 0,
                 "is_analysis_report": len(all_results) > 0,
                 "total_messages_delivered": 0,
@@ -1424,81 +1690,119 @@ def main():
                 "telegram_send_fully_successful": False
             }
 
-            import requests
-            try:
-                # Send text
-                url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
-                resp = requests.post(url, data={"chat_id": telegram_chat_id, "text": tg_text}, timeout=20)
+            # Check if there are meaningful sessions
+            meaningful_sessions = []
+            for i, sess in enumerate(all_session_data, 1):
+                matching_results = [r for r in all_results if r.get("clip_name") in [f"session_{i}", "session", str(i)]]
+                res = matching_results[0] if matching_results else (all_results[i-1] if i-1 < len(all_results) else {})
+                if is_meaningful_feeding_event(sess, res):
+                    meaningful_sessions.append((i, sess, res))
 
-                try:
-                    r_json = resp.json()
-                    send_summary["delivery_evidence"].append({
-                        "type": "text",
-                        "status": resp.status_code,
-                        "ok": r_json.get("ok"),
-                        "message_id": r_json.get("result", {}).get("message_id")
-                    })
-                except Exception:
-                    pass
-
-                resp.raise_for_status()
-                send_summary["telegram_text_sent"] = True
-
-                # Send up to 2 comparison images (RAW vs ENHANCED)
-                images_to_send = []
-                for r in all_results:
-                    if len(images_to_send) < 2:
-                        raw_name = r.get('source_contact_sheet', '')
-                        comp_path = out_dir / raw_name.replace(".jpg", "_comparison.jpg")
-                        if not comp_path.exists():
-                            comp_path = out_dir / raw_name
-                        if comp_path.exists():
-                            images_to_send.append(comp_path)
-
-                send_summary["telegram_images_attempted"] = len(images_to_send)
-                send_summary["telegram_photos_attempted"] = len(images_to_send)
-                for img_path in images_to_send:
-                    photo_url = f"https://api.telegram.org/bot{telegram_token}/sendPhoto"
-                    img_clip_name = img_path.name.replace("logitech_vlm_contact_sheet_", "").replace("_comparison.jpg", "").replace(".jpg", "")
-                    iso_date = f"{args.date[:4]}-{args.date[4:6]}-{args.date[6:8]}"
-                    caption = f"[SHADOW] {iso_date} {img_clip_name} (RAW vs ENHANCED)"
-                    with open(img_path, "rb") as photo_f:
-                        files = {"photo": photo_f}
-                        data = {"chat_id": telegram_chat_id, "caption": caption}
-                        p_resp = requests.post(photo_url, data=data, files=files, timeout=30)
-
-                        try:
-                            pr_json = p_resp.json()
-                            send_summary["delivery_evidence"].append({
-                                "type": "photo",
-                                "status": p_resp.status_code,
-                                "ok": pr_json.get("ok"),
-                                "message_id": pr_json.get("result", {}).get("message_id")
-                            })
-                        except Exception:
-                            pass
-
-                        p_resp.raise_for_status()
-                        send_summary["telegram_images_sent"] += 1
-                        send_summary["telegram_photos_sent"] += 1
-                        send_summary["attached_contact_sheets"].append(img_path.name)
-
-                send_summary["total_messages_delivered"] = (1 if send_summary["telegram_text_sent"] else 0) + send_summary["telegram_photos_sent"]
+            if len(all_results) > 0 and (not meaningful_sessions or not tg_text.strip()):
+                print("[VLM] No meaningful feeding activity detected (e.g. cat=none & eating=no). Suppressing Telegram transmission.")
+                send_summary["suppressed_no_feeding"] = True
                 send_summary["telegram_send_fully_successful"] = True
+                with open(out_dir / "telegram_shadow_send_summary.json", "w") as jf:
+                    json.dump(send_summary, jf, indent=2)
+            else:
+                import requests
+                try:
+                    # 1. Send text
+                    url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+                    resp = requests.post(url, data={"chat_id": telegram_chat_id, "text": tg_text}, timeout=20)
 
-                # Print delivery evidence for GitHub Actions logs
-                print("[VLM] Telegram delivery evidence:")
-                for ev in send_summary["delivery_evidence"]:
-                    print(f"  - type: {ev.get('type')}, status: {ev.get('status')}, ok: {ev.get('ok')}, message_id: {ev.get('message_id')}")
+                    try:
+                        r_json = resp.json()
+                        send_summary["delivery_evidence"].append({
+                            "type": "text",
+                            "status": resp.status_code,
+                            "ok": r_json.get("ok"),
+                            "message_id": r_json.get("result", {}).get("message_id")
+                        })
+                    except Exception:
+                        pass
 
-            except Exception as e:
-                send_summary["telegram_error"] = sanitize_error_message(str(e))
-                send_summary["total_messages_delivered"] = (1 if send_summary["telegram_text_sent"] else 0) + send_summary.get("telegram_photos_sent", 0)
-                print(f"[VLM] Telegram send error: {send_summary['telegram_error']}")
-                had_failures = True
+                    resp.raise_for_status()
+                    send_summary["telegram_text_sent"] = True
 
-            with open(out_dir / "telegram_shadow_send_summary.json", "w") as jf:
-                json.dump(send_summary, jf, indent=2)
+                    # 2. Send compact before/after images and enhanced videos for meaningful sessions
+                    for (i, sess, res) in meaningful_sessions:
+                        s_name = f"session_{i}" if len(all_session_data) > 1 else "session"
+                        ba_path = out_dir / f"logitech_vlm_before_after_{s_name}.jpg"
+                        if not ba_path.exists():
+                            ba_path = out_dir / "logitech_vlm_before_after_session.jpg"
+                        if not ba_path.exists():
+                            ba_path = out_dir / f"logitech_vlm_contact_sheet_{s_name}_comparison.jpg"
+                        if not ba_path.exists():
+                            ba_path = out_dir / f"logitech_vlm_contact_sheet_{s_name}.jpg"
+
+                        if ba_path.exists():
+                            send_summary["telegram_images_attempted"] += 1
+                            photo_url = f"https://api.telegram.org/bot{telegram_token}/sendPhoto"
+                            iso_date = f"{args.date[:4]}-{args.date[4:6]}-{args.date[6:8]}"
+                            caption = f"[SHADOW] {iso_date} {s_name} Pre-feed vs Post-feed (Enhanced)"
+                            with open(ba_path, "rb") as photo_f:
+                                p_resp = requests.post(photo_url, data={"chat_id": telegram_chat_id, "caption": caption}, files={"photo": photo_f}, timeout=30)
+                                try:
+                                    pr_json = p_resp.json()
+                                    send_summary["delivery_evidence"].append({
+                                        "type": "photo",
+                                        "status": p_resp.status_code,
+                                        "ok": pr_json.get("ok"),
+                                        "message_id": pr_json.get("result", {}).get("message_id")
+                                    })
+                                except Exception:
+                                    pass
+                                p_resp.raise_for_status()
+                                send_summary["telegram_images_sent"] += 1
+                                send_summary["attached_media"].append(ba_path.name)
+
+                        # Generate runner-side enhanced video and send
+                        session_clips = sessions[i-1] if i-1 < len(sessions) else []
+                        if session_clips:
+                            raw_clip_path = out_dir / session_clips[0]['name']
+                            if raw_clip_path.exists():
+                                enh_video_path = out_dir / f"logitech_vlm_{s_name}_enhanced.mp4"
+                                if not enh_video_path.exists():
+                                    print(f"[VLM] Generating runner-side enhanced video for {raw_clip_path.name}...")
+                                    generate_enhanced_video(raw_clip_path, enh_video_path)
+
+                                if enh_video_path.exists() and enh_video_path.stat().st_size > 0:
+                                    send_summary["telegram_videos_attempted"] += 1
+                                    vid_url = f"https://api.telegram.org/bot{telegram_token}/sendVideo"
+                                    vid_caption = f"[SHADOW] {sess.get('session_start_time','')}-{sess.get('session_end_time','')} Enhanced Video"
+                                    with open(enh_video_path, "rb") as vid_f:
+                                        v_resp = requests.post(vid_url, data={"chat_id": telegram_chat_id, "caption": vid_caption, "supports_streaming": True}, files={"video": vid_f}, timeout=60)
+                                        try:
+                                            vr_json = v_resp.json()
+                                            send_summary["delivery_evidence"].append({
+                                                "type": "video",
+                                                "status": v_resp.status_code,
+                                                "ok": vr_json.get("ok"),
+                                                "message_id": vr_json.get("result", {}).get("message_id")
+                                            })
+                                        except Exception:
+                                            pass
+                                        v_resp.raise_for_status()
+                                        send_summary["telegram_videos_sent"] += 1
+                                        send_summary["attached_media"].append(enh_video_path.name)
+
+                    send_summary["total_messages_delivered"] = (1 if send_summary["telegram_text_sent"] else 0) + send_summary["telegram_images_sent"] + send_summary["telegram_videos_sent"]
+                    send_summary["telegram_send_fully_successful"] = True
+
+                    # Print delivery evidence for GitHub Actions logs
+                    print("[VLM] Telegram delivery evidence:")
+                    for ev in send_summary["delivery_evidence"]:
+                        print(f"  - type: {ev.get('type')}, status: {ev.get('status')}, ok: {ev.get('ok')}, message_id: {ev.get('message_id')}")
+
+                except Exception as e:
+                    send_summary["telegram_error"] = sanitize_error_message(str(e))
+                    send_summary["total_messages_delivered"] = (1 if send_summary["telegram_text_sent"] else 0) + send_summary.get("telegram_images_sent", 0) + send_summary.get("telegram_videos_sent", 0)
+                    print(f"[VLM] Telegram send error: {send_summary['telegram_error']}")
+                    had_failures = True
+
+                with open(out_dir / "telegram_shadow_send_summary.json", "w") as jf:
+                    json.dump(send_summary, jf, indent=2)
 
             # Update logitech_vlm_shadow_summary.json
             summary_path = out_dir / "logitech_vlm_shadow_summary.json"
@@ -1507,9 +1811,10 @@ def main():
                     main_sum = json.load(f_sum)
                 main_sum["telegram_sent"] = send_summary["telegram_text_sent"]
                 main_sum["telegram_images_sent"] = send_summary["telegram_images_sent"]
-                main_sum["telegram_photos_sent"] = send_summary["telegram_photos_sent"]
+                main_sum["telegram_videos_sent"] = send_summary["telegram_videos_sent"]
                 main_sum["total_messages_delivered"] = send_summary["total_messages_delivered"]
                 main_sum["telegram_error"] = send_summary["telegram_error"]
+                main_sum["suppressed_no_feeding"] = send_summary.get("suppressed_no_feeding", False)
                 with open(summary_path, "w") as f_sum:
                     json.dump(main_sum, f_sum, indent=2)
 

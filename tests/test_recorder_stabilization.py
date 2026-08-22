@@ -383,3 +383,35 @@ def test_check_for_cat_low_light_enhancement_fallback(tmp_path, monkeypatch):
     controller._check_for_cat(dark_frame)
 
     assert controller.cat_seen is True
+
+
+def test_get_v4l2_device_path():
+    from motion_recorder import get_v4l2_device_path
+    assert get_v4l2_device_path(0) == "/dev/video0"
+    assert get_v4l2_device_path("0") == "/dev/video0"
+    assert get_v4l2_device_path("/dev/video1") == "/dev/video1"
+
+
+def test_camera_frame_reader_applies_gain_and_handles_failures(monkeypatch):
+    from motion_recorder import CameraFrameReader
+    import cv2
+
+    mock_cap = MagicMock()
+    mock_cap.isOpened.return_value = True
+    mock_cap.get.side_effect = lambda prop: 1280 if prop == cv2.CAP_PROP_FRAME_WIDTH else (720 if prop == cv2.CAP_PROP_FRAME_HEIGHT else 10.0)
+
+    with patch("cv2.VideoCapture", return_value=mock_cap), \
+         patch("subprocess.run") as mock_run, \
+         patch("threading.Thread") as mock_thread:
+
+        mock_run.return_value = MagicMock(returncode=0)
+        reader = CameraFrameReader(source=0)
+        reader.start()
+
+        # Check that v4l2-ctl was called with /dev/video0 and --set-ctrl=gain=255
+        assert mock_run.called
+        call_args = mock_run.call_args_list[0][0][0]
+        assert call_args[0] == "v4l2-ctl"
+        assert "-d" in call_args
+        assert call_args[call_args.index("-d") + 1] == "/dev/video0"
+        assert "--set-ctrl=gain=255" in call_args

@@ -397,6 +397,15 @@ class FrameMotionDetector:
         except Exception as e:
             log.warning(f"⚠️ Failed to reset background subtractor: {e}")
 
+def get_v4l2_device_path(source) -> str:
+    """Returns valid device path for v4l2-ctl e.g. /dev/video0."""
+    if isinstance(source, int):
+        return f"/dev/video{source}"
+    src_str = str(source).strip()
+    if src_str.isdigit():
+        return f"/dev/video{src_str}"
+    return src_str
+
 class CameraFrameReader:
     def __init__(self, source, buffer_seconds=3, fps=15):
         self.source, self.fps = source, fps
@@ -414,14 +423,21 @@ class CameraFrameReader:
             self.cap = cv2.VideoCapture(self.source)
             # Set resolution for USB camera (Logitech C925e supports 1080p)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
             # Maximize analog gain for low-light morning feeds
+            dev_path = get_v4l2_device_path(self.source)
             import subprocess
             try:
-                subprocess.run(['v4l2-ctl', '-d', self.source, '-c', 'gain=255'], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
+                res = subprocess.run(
+                    ['v4l2-ctl', '-d', dev_path, '--set-ctrl=gain=255'],
+                    capture_output=True, text=True, timeout=3
+                )
+                if res.returncode == 0:
+                    log.info(f"📷 Applied Logitech USB Camera gain=255 on {dev_path}")
+                else:
+                    log.warning(f"⚠️ Failed to set gain=255 on {dev_path} (rc={res.returncode}): {res.stderr.strip()}")
+            except Exception as e:
+                log.warning(f"⚠️ Error applying v4l2 camera controls on {dev_path}: {e}")
         else:
             log.info(f'Connecting to RTSP: rtsp://****:****@{CAMERA_IP}:{RTSP_PORT}/{RTSP_STREAM}')
             # Try with TCP transport first (more reliable on Raspberry Pi)
@@ -768,17 +784,20 @@ class RecordingController:
 
         # Log camera telemetry for USB camera if applicable
         if getattr(self.reader, 'is_usb', False):
+            dev_path = get_v4l2_device_path(getattr(self.reader, 'source', 0))
             try:
                 import subprocess
                 res = subprocess.run(
-                    ['v4l2-ctl', '-d', str(self.reader.source), '--get-ctrl=gain,auto_exposure,exposure_time_absolute,white_balance_automatic'],
+                    ['v4l2-ctl', '-d', dev_path, '--get-ctrl=gain,auto_exposure,exposure_time_absolute,white_balance_automatic'],
                     capture_output=True, text=True, timeout=2
                 )
                 if res.returncode == 0:
                     ctrls = " ".join([line.strip() for line in res.stdout.strip().splitlines() if line.strip()])
                     log.info(f"📷 USB Camera Telemetry: {ctrls}")
-            except Exception:
-                pass
+                else:
+                    log.warning(f"⚠️ Could not read USB camera telemetry on {dev_path}: {res.stderr.strip()}")
+            except Exception as e:
+                log.warning(f"⚠️ Error reading USB camera telemetry on {dev_path}: {e}")
 
         # Check pre-buffer frames for cat (catches cats already in frame)
         if self.yolo_model and pre_frames and not self.cat_seen:

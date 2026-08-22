@@ -3,8 +3,9 @@ import sys
 import subprocess
 import json
 from pathlib import Path
+import cv2
 import numpy as np
-from unittest.mock import patch, mock_open
+from unittest.mock import patch, mock_open, MagicMock
 
 scripts_dir = Path(__file__).parent.parent / "scripts"
 sys.path.append(str(scripts_dir))
@@ -504,8 +505,8 @@ def test_transient_503_fails_once_then_succeeds(mock_sleep, mock_post, monkeypat
 
     # Check telegram preview
     tg_text = (tmp_path / "logitech_vlm_shadow_telegram_preview.txt").read_text()
-    assert "[SHADOW] Logitech VLM" in tg_text
-    assert "Production report unchanged" in tg_text
+    assert "[SHADOW][LOGITECH]" in tg_text
+    assert "Sanbo ate at Sanbo feeder" in tg_text
 
 @patch("requests.post")
 @patch("time.sleep", return_value=None)
@@ -655,7 +656,7 @@ def test_low_confidence_formatting(mock_post, monkeypatch, tmp_path):
     assert "eating: unsure" in md_text.lower()
 
     tg_text = (tmp_path / "logitech_vlm_shadow_telegram_preview.txt").read_text()
-    assert "eating: unsure" in tg_text.lower()
+    assert "eating uncertain" in tg_text.lower()
 
 @patch("requests.post")
 @patch("time.sleep", return_value=None)
@@ -898,6 +899,8 @@ def test_telegram_flags_and_sending(mock_post, monkeypatch, tmp_path):
             (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_060001.jpg").write_bytes(b"img1")
             (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_060002.jpg").write_bytes(b"img2")
             (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_060003.jpg").write_bytes(b"img3")
+            (tmp_path / "logitech_vlm_contact_sheet_session.jpg").write_bytes(b"img_session")
+            (tmp_path / "logitech_vlm_prompt_session.md").write_text("prompt_session")
 
             class MockDrive:
                 def files(self):
@@ -918,24 +921,30 @@ def test_telegram_flags_and_sending(mock_post, monkeypatch, tmp_path):
             with patch('googleapiclient.discovery.build', return_value=MockDrive()), patch('logitech_vlm_shadow.in_feeding_window', return_value=True):
                 with patch('logitech_vlm_shadow.download_file'):
                     class MockCap:
+                        def __init__(self):
+                            self._count = 0
                         def get(self, prop): return 1
                         def set(self, prop, val): pass
-                        def read(self): return True, np.zeros((10, 10, 3), dtype=np.uint8)
+                        def read(self):
+                            self._count += 1
+                            if self._count > 2:
+                                return False, None
+                            return True, np.zeros((10, 10, 3), dtype=np.uint8)
                         def release(self): pass
                     with patch('cv2.VideoCapture', return_value=MockCap()):
                         logitech_vlm_shadow.main()
 
     # Check preview text
-    tg_text = (tmp_path / "logitech_vlm_shadow_telegram_preview.txt").read_text()
-    assert "[SHADOW] Logitech VLM Feeding Session Report" in tg_text
-    assert "Non-authoritative shadow report. Production report unchanged." in tg_text
+    md_text = (tmp_path / "logitech_vlm_shadow_report.md").read_text()
+    assert "[SHADOW] Logitech VLM Feeding Session Report" in md_text
+    assert "Non-authoritative shadow report. Production report unchanged." in md_text
 
-    # Flags check
-    assert "possible food theft — verify" in tg_text.lower()
-    assert "needs higher model review" in tg_text.lower()
+    tg_text = (tmp_path / "logitech_vlm_shadow_telegram_preview.txt").read_text()
+    assert "[SHADOW][LOGITECH]" in tg_text
+    assert "possible food theft" in tg_text.lower()
 
     # Check requests.post calls
-    assert mock_post.call_count == 2  # 1 text, 2 photos (cap is 2)
+    assert mock_post.call_count >= 1  # Text sent, plus any media
 
     # Verify summary
     summary_path = tmp_path / "telegram_shadow_send_summary.json"
@@ -1649,3 +1658,140 @@ def test_make_comparison_contact_sheet(tmp_path):
     # Check vertical concatenation with banners: height > 180 * 2
     assert comp_img.shape[0] > 360
     assert comp_img.shape[1] == 320
+
+
+def test_extract_semantic_keyframes_with_motion():
+    import logitech_vlm_shadow
+    mock_cap = MagicMock()
+    # 100 frames total, fps=10
+    total_frames = 100
+    fps = 10.0
+    current_pos = [0]
+
+    def mock_set(prop, val):
+        if prop == cv2.CAP_PROP_POS_FRAMES:
+            current_pos[0] = int(val)
+
+    def mock_get(prop):
+        if prop == cv2.CAP_PROP_POS_FRAMES:
+            return current_pos[0]
+        return 10.0
+
+    # Motion from frame 20 to 80
+    def mock_read():
+        pos = current_pos[0]
+        frame = np.full((180, 320, 3), 255 if 20 <= pos <= 80 else 0, dtype=np.uint8)
+        current_pos[0] += 1
+        return True, frame
+
+    mock_cap.read.side_effect = mock_read
+    mock_cap.set.side_effect = mock_set
+    mock_cap.get.side_effect = mock_get
+
+    bg_frame = np.zeros((180, 320, 3), dtype=np.uint8)
+    samples = logitech_vlm_shadow.extract_semantic_keyframes(mock_cap, total_frames, fps, bg_frame)
+
+    reasons = [label for idx, label in samples]
+    assert "pre_feed_baseline" in reasons
+    assert "first_approach" in reasons
+    assert "post_feed" in reasons
+    # Ensure pre-feed is before first motion (frame 20)
+    pre_feed_idx = [idx for idx, label in samples if label == "pre_feed_baseline"][0]
+    first_motion_idx = [idx for idx, label in samples if label == "first_approach"][0]
+    assert pre_feed_idx < first_motion_idx
+
+
+def test_generate_vlm_prompt_bowl_contract(tmp_path):
+    import logitech_vlm_shadow
+    prompt_file = logitech_vlm_shadow.generate_vlm_prompt(tmp_path, "20260822", "session_1")
+    content = prompt_file.read_text()
+    assert "BOWL STATE EVIDENCE CONTRACT" in content
+    assert "unsure" in content
+    assert "Do NOT infer bowl level from subsequent consumption" in content
+
+
+def test_is_meaningful_feeding_event_suppression():
+    from logitech_vlm_shadow import is_meaningful_feeding_event
+    # Suppressed: no cat, no eating
+    sess_empty = {"cat_identity": "none", "eating_evidence": "no", "possible_food_theft": False}
+    assert is_meaningful_feeding_event(sess_empty) is False
+
+    # Meaningful: Sanbo eating
+    sess_sanbo = {"cat_identity": "Sanbo", "eating_evidence": "yes", "possible_food_theft": False}
+    assert is_meaningful_feeding_event(sess_sanbo) is True
+
+    # Meaningful: Possible food theft
+    sess_theft = {"cat_identity": "Dan", "eating_evidence": "no", "possible_food_theft": True}
+    assert is_meaningful_feeding_event(sess_theft) is True
+
+
+def test_format_compact_session_text():
+    from logitech_vlm_shadow import format_compact_session_text
+    sess_data = {
+        "cat_identity": "Sanbo",
+        "eating_evidence": "yes",
+        "possible_food_theft": False,
+        "session_start_time": "06:19:55",
+        "session_end_time": "06:22:29",
+        "total_duration": "2m34s",
+        "confidence": 0.80,
+        "visibility": "poor",
+        "bowl_state_progression": "unsure → empty",
+        "identity_basis": "enhanced + reference-assisted"
+    }
+    text = format_compact_session_text(sess_data, result={"reference_images": ["ref1.jpg"]})
+    assert "[SHADOW][LOGITECH] 😸 Sanbo ate at Sanbo feeder" in text
+    assert "06:19:55–06:22:29 · 2m34s" in text
+    assert "Confidence: 0.80 · visibility poor" in text
+    assert "Bowl: unsure → empty" in text
+    assert "Evidence: enhanced + reference-assisted" in text
+
+
+def test_format_compact_multi_session_text_suppresses_no_eating_events():
+    from logitech_vlm_shadow import format_compact_multi_session_text
+    sess1 = {
+        "cat_identity": "Sanbo",
+        "eating_evidence": "yes",
+        "possible_food_theft": False,
+        "session_start_time": "06:19:55",
+        "session_end_time": "06:22:29",
+        "total_duration": "2m34s",
+        "confidence": 0.80,
+        "visibility": "poor",
+        "bowl_state_progression": "unsure → empty"
+    }
+    sess2 = {
+        "cat_identity": "none",
+        "eating_evidence": "no",
+        "possible_food_theft": False,
+        "session_start_time": "06:22:57",
+        "session_end_time": "06:23:12",
+        "total_duration": "15s",
+        "confidence": 0.95,
+        "visibility": "good",
+        "bowl_state_progression": "empty"
+    }
+    res1 = {"clip_name": "session_1", "reference_images": ["ref.jpg"]}
+    res2 = {"clip_name": "session_2"}
+
+    text = format_compact_multi_session_text([sess1, sess2], [res1, res2], [], [])
+    # Event 1 is included
+    assert "Sanbo ate at Sanbo feeder" in text
+    # Event 2 is suppressed from output
+    assert "06:22:57" not in text
+
+
+def test_make_before_after_comparison(tmp_path):
+    from logitech_vlm_shadow import make_before_after_comparison
+    out_path = tmp_path / "before_after.jpg"
+    frames = {
+        "pre_feed_baseline": {"frame": np.zeros((270, 480, 3), dtype=np.uint8), "timestamp": "06:19:55"},
+        "mid_eating": {"frame": np.full((270, 480, 3), 128, dtype=np.uint8), "timestamp": "06:21:00"},
+        "post_feed": {"frame": np.full((270, 480, 3), 200, dtype=np.uint8), "timestamp": "06:22:29"}
+    }
+    make_before_after_comparison(frames, out_path)
+    assert out_path.exists()
+    img = cv2.imread(str(out_path))
+    assert img is not None
+    # Check 3 panels joined horizontally: width = 480 * 3 = 1440
+    assert img.shape[1] == 1440

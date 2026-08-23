@@ -76,6 +76,7 @@ def compress_video_for_telegram(
         raise FileNotFoundError(f"Input video does not exist: {input_path}")
 
     current_size = input_path.stat().st_size
+    output_specified = output_path is not None
     if output_path is None:
         output_path = input_path.with_name(f"{input_path.stem}_tg_safe.mp4")
     else:
@@ -85,16 +86,17 @@ def compress_video_for_telegram(
     if not ffmpeg_bin:
         # No ffmpeg available - check if already under limit
         if current_size <= max_bytes:
+            if output_specified and output_path != input_path and not output_path.exists():
+                shutil.copy2(input_path, output_path)
+                return True, output_path, current_size
             return True, input_path, current_size
         return False, input_path, current_size
 
     duration = get_video_duration_sec(input_path) or 150.0
     target_kbps = calculate_target_bitrate_kbps(duration, max_bytes=max_bytes)
 
-    # If already under limit and has faststart/h264, we can optionally reuse,
-    # but running a fast re-mux or targeted encode guarantees size safety.
-    if current_size <= max_bytes and not output_path.exists():
-        # Video is already safe; return input
+    # If input is already output and under limit, no re-encoding required
+    if input_path == output_path and current_size <= max_bytes:
         return True, input_path, current_size
 
     # Build robust ffmpeg command with bitrate cap and CRF safety

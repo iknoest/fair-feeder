@@ -1795,3 +1795,67 @@ def test_make_before_after_comparison(tmp_path):
     assert img is not None
     # Check 3 panels joined horizontally: width = 480 * 3 = 1440
     assert img.shape[1] == 1440
+
+
+def test_generate_enhanced_video_returns_existing_output_path_when_under_45mb(tmp_path):
+    from logitech_vlm_shadow import generate_enhanced_video
+    raw_path = tmp_path / "raw.mp4"
+    out_path = tmp_path / "enh.mp4"
+
+    # Write synthetic 10-frame video
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(str(raw_path), fourcc, 10.0, (320, 180))
+    for _ in range(10):
+        writer.write(np.full((180, 320, 3), 30, dtype=np.uint8))
+    writer.release()
+
+    res = generate_enhanced_video(raw_path, out_path)
+    assert res == out_path
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+    assert out_path.stat().st_size < 45 * 1024 * 1024
+
+
+def test_generate_enhanced_video_multi_clip_session_stitches_duration(tmp_path):
+    from logitech_vlm_shadow import generate_enhanced_video
+    clip1_path = tmp_path / "motion_20260823_060001_10s.mp4"
+    clip2_path = tmp_path / "motion_20260823_060012_10s.mp4"
+    out_path = tmp_path / "session_enhanced.mp4"
+
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    w1 = cv2.VideoWriter(str(clip1_path), fourcc, 10.0, (320, 180))
+    for _ in range(10):
+        w1.write(np.full((180, 320, 3), 20, dtype=np.uint8))
+    w1.release()
+
+    w2 = cv2.VideoWriter(str(clip2_path), fourcc, 10.0, (320, 180))
+    for _ in range(15):
+        w2.write(np.full((180, 320, 3), 40, dtype=np.uint8))
+    w2.release()
+
+    res = generate_enhanced_video([clip1_path, clip2_path], out_path)
+    assert res == out_path
+    assert out_path.exists()
+
+    cap = cv2.VideoCapture(str(out_path))
+    total_f = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    assert total_f == 25  # 10 + 15 frames stitched
+
+
+def test_compress_video_for_telegram_creates_output_path(tmp_path):
+    from telegram_video_guard import compress_video_for_telegram
+    raw_path = tmp_path / "raw.mp4"
+    out_path = tmp_path / "compressed.mp4"
+
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(str(raw_path), fourcc, 10.0, (320, 180))
+    for _ in range(10):
+        writer.write(np.full((180, 320, 3), 30, dtype=np.uint8))
+    writer.release()
+
+    success, final_p, size_b = compress_video_for_telegram(raw_path, output_path=out_path)
+    assert success is True
+    assert out_path.exists()
+    assert size_b > 0
+    assert size_b < 45 * 1024 * 1024

@@ -326,8 +326,13 @@ def generate_enhanced_video(
     # Read geometry from first valid clip
     cap_first = cv2.VideoCapture(str(raw_mp4_paths[0]))
     fps = cap_first.get(cv2.CAP_PROP_FPS) or 25.0
+    if fps <= 0 or fps > 120:
+        fps = 10.0
     width = int(cap_first.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
     height = int(cap_first.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+    if width < 32 or height < 32:
+        width = 1280
+        height = 720
     cap_first.release()
 
     temp_raw_enh = output_mp4_path.with_name(f"temp_raw_{output_mp4_path.name}")
@@ -338,12 +343,18 @@ def generate_enhanced_video(
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     writer = cv2.VideoWriter(str(temp_raw_enh), fourcc, fps, (width, height))
+    if not writer.isOpened():
+        raise RuntimeError(f"OpenCV VideoWriter failed to open {temp_raw_enh} with fourcc={fourcc}, fps={fps}, size=({width}, {height})")
 
+    frames_read = 0
+    frames_written = 0
     for clip_p in raw_mp4_paths:
         cap = cv2.VideoCapture(str(clip_p))
+        if hasattr(cap, "isOpened") and not cap.isOpened():
+            continue
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1000000
-        frames_read = 0
-        while frames_read < total_frames:
+        clip_read = 0
+        while clip_read < total_frames:
             ret, frame = cap.read()
             if not ret or frame is None:
                 break
@@ -352,28 +363,46 @@ def generate_enhanced_video(
                 enh_frame = cv2.resize(enh_frame, (width, height))
             writer.write(enh_frame)
             frames_read += 1
+            frames_written += 1
+            clip_read += 1
         cap.release()
 
     writer.release()
 
-    if not temp_raw_enh.exists() or temp_raw_enh.stat().st_size == 0:
-        return output_mp4_path
+    if frames_written == 0 or not temp_raw_enh.exists() or temp_raw_enh.stat().st_size == 0:
+        if temp_raw_enh.exists():
+            temp_raw_enh.unlink()
+        raise RuntimeError(f"Zero frames written to intermediate video {temp_raw_enh}")
 
-    # Always ensure the final file exists and is located at output_mp4_path
+    # Validate intermediate video before compression
+    try:
+        from telegram_video_guard import validate_video_content, compress_video_for_telegram
+    except ImportError:
+        try:
+            from scripts.telegram_video_guard import validate_video_content, compress_video_for_telegram
+        except ImportError:
+            validate_video_content = None
+            compress_video_for_telegram = None
+
+    if validate_video_content:
+        is_val, val_msg, _ = validate_video_content(temp_raw_enh)
+        if not is_val:
+            if temp_raw_enh.exists():
+                temp_raw_enh.unlink()
+            raise RuntimeError(f"Intermediate enhanced video validation failed: {val_msg}")
+
+    # Compress and validate final H.264 video for Telegram delivery
     if compress_video_for_telegram:
         success, final_path, size_bytes = compress_video_for_telegram(temp_raw_enh, output_path=output_mp4_path)
-        if final_path != output_mp4_path:
+        if not success:
             if temp_raw_enh.exists():
-                if output_mp4_path.exists():
-                    output_mp4_path.unlink()
-                temp_raw_enh.rename(output_mp4_path)
-            final_path = output_mp4_path
-        else:
-            if temp_raw_enh.exists() and temp_raw_enh != output_mp4_path:
                 temp_raw_enh.unlink()
+            raise RuntimeError(f"compress_video_for_telegram failed to produce valid Telegram video for {output_mp4_path.name}")
+        if temp_raw_enh.exists() and temp_raw_enh.resolve() != final_path.resolve():
+            temp_raw_enh.unlink()
         return final_path
     else:
-        if temp_raw_enh.exists():
+        if temp_raw_enh.resolve() != output_mp4_path.resolve():
             if output_mp4_path.exists():
                 output_mp4_path.unlink()
             temp_raw_enh.rename(output_mp4_path)
@@ -1149,6 +1178,7 @@ def main():
     parser.add_argument("--max-clips", type=int, default=2, help="Max clips to process in VLM API")
     parser.add_argument("--cleanup-downloaded-videos", action="store_true", help="Remove downloaded mp4 files from the out-dir after result generation")
     parser.add_argument("--send-telegram-shadow", action="store_true", help="Send a shadow Telegram report")
+    parser.add_argument("--send-still-images", action="store_true", help="Optionally send static before/after images in Telegram")
     parser.add_argument("--reference-dir", type=str, default=None, help="Path to private reference image directory")
     parser.add_argument("--custom-header", type=str, default=None, help="Custom header text for shadow report")
     args = parser.parse_args()
@@ -1762,37 +1792,40 @@ def main():
                     resp.raise_for_status()
                     send_summary["telegram_text_sent"] = True
 
-                    # 2. Send compact before/after images and enhanced videos for meaningful sessions
+                    # 2. For meaningful sessions, send ONE compact playable enhanced video (and optionally photo if explicitly configured)
                     for (i, sess, res) in meaningful_sessions:
                         s_name = f"session_{i}" if len(all_session_data) > 1 else "session"
-                        ba_path = out_dir / f"logitech_vlm_before_after_{s_name}.jpg"
-                        if not ba_path.exists():
-                            ba_path = out_dir / "logitech_vlm_before_after_session.jpg"
-                        if not ba_path.exists():
-                            ba_path = out_dir / f"logitech_vlm_contact_sheet_{s_name}_comparison.jpg"
-                        if not ba_path.exists():
-                            ba_path = out_dir / f"logitech_vlm_contact_sheet_{s_name}.jpg"
 
-                        if ba_path.exists():
-                            send_summary["telegram_images_attempted"] += 1
-                            photo_url = f"https://api.telegram.org/bot{telegram_token}/sendPhoto"
-                            iso_date = f"{args.date[:4]}-{args.date[4:6]}-{args.date[6:8]}"
-                            caption = f"[SHADOW] {iso_date} {s_name} Pre-feed vs Post-feed (Enhanced)"
-                            with open(ba_path, "rb") as photo_f:
-                                p_resp = requests.post(photo_url, data={"chat_id": telegram_chat_id, "caption": caption}, files={"photo": photo_f}, timeout=30)
-                                try:
-                                    pr_json = p_resp.json()
-                                    send_summary["delivery_evidence"].append({
-                                        "type": "photo",
-                                        "status": p_resp.status_code,
-                                        "ok": pr_json.get("ok"),
-                                        "message_id": pr_json.get("result", {}).get("message_id")
-                                    })
-                                except Exception:
-                                    pass
-                                p_resp.raise_for_status()
-                                send_summary["telegram_images_sent"] += 1
-                                send_summary["attached_media"].append(ba_path.name)
+                        # Optionally send before/after still image if --send-still-images is explicitly enabled
+                        if getattr(args, "send_still_images", False):
+                            ba_path = out_dir / f"logitech_vlm_before_after_{s_name}.jpg"
+                            if not ba_path.exists():
+                                ba_path = out_dir / "logitech_vlm_before_after_session.jpg"
+                            if not ba_path.exists():
+                                ba_path = out_dir / f"logitech_vlm_contact_sheet_{s_name}_comparison.jpg"
+                            if not ba_path.exists():
+                                ba_path = out_dir / f"logitech_vlm_contact_sheet_{s_name}.jpg"
+
+                            if ba_path.exists():
+                                send_summary["telegram_images_attempted"] += 1
+                                photo_url = f"https://api.telegram.org/bot{telegram_token}/sendPhoto"
+                                iso_date = f"{args.date[:4]}-{args.date[4:6]}-{args.date[6:8]}"
+                                caption = f"[SHADOW] {iso_date} {s_name} Pre-feed vs Post-feed (Enhanced)"
+                                with open(ba_path, "rb") as photo_f:
+                                    p_resp = requests.post(photo_url, data={"chat_id": telegram_chat_id, "caption": caption}, files={"photo": photo_f}, timeout=30)
+                                    try:
+                                        pr_json = p_resp.json()
+                                        send_summary["delivery_evidence"].append({
+                                            "type": "photo",
+                                            "status": p_resp.status_code,
+                                            "ok": pr_json.get("ok"),
+                                            "message_id": pr_json.get("result", {}).get("message_id")
+                                        })
+                                    except Exception:
+                                        pass
+                                    p_resp.raise_for_status()
+                                    send_summary["telegram_images_sent"] += 1
+                                    send_summary["attached_media"].append(ba_path.name)
 
                         # Generate runner-side enhanced session video and send
                         session_clips = sessions[i-1] if i-1 < len(sessions) else []
@@ -1806,47 +1839,57 @@ def main():
                                 else:
                                     final_video_path = enh_video_target
 
-                                if final_video_path and final_video_path.exists() and final_video_path.stat().st_size > 0:
-                                    video_size = final_video_path.stat().st_size
-                                    vid_dur = None
-                                    try:
-                                        from telegram_video_guard import get_video_duration_sec
-                                        vid_dur = get_video_duration_sec(final_video_path)
-                                    except Exception:
-                                        pass
+                                # Rigorously validate video content before sending
+                                is_val, val_msg, val_details = False, "unknown", {}
+                                try:
+                                    from telegram_video_guard import validate_video_content
+                                    is_val, val_msg, val_details = validate_video_content(final_video_path)
+                                except Exception as e:
+                                    val_msg = str(e)
 
-                                    if video_size < 45 * 1024 * 1024:
-                                        send_summary["telegram_videos_attempted"] += 1
-                                        vid_url = f"https://api.telegram.org/bot{telegram_token}/sendVideo"
-                                        start_t = sess.get('session_start_time', '')
-                                        end_t = sess.get('session_end_time', '')
-                                        dur_t = sess.get('total_duration', '')
-                                        vid_caption = f"[SHADOW][LOGITECH] Enhanced feeding video\n{start_t}–{end_t} · {dur_t}"
-                                        with open(final_video_path, "rb") as vid_f:
-                                            v_resp = requests.post(
-                                                vid_url,
-                                                data={"chat_id": telegram_chat_id, "caption": vid_caption, "supports_streaming": True},
-                                                files={"video": vid_f},
-                                                timeout=120
-                                            )
-                                            vr_json = {}
-                                            try:
-                                                vr_json = v_resp.json()
-                                            except Exception:
-                                                pass
-                                            video_ev = {
-                                                "type": "video",
-                                                "status": v_resp.status_code,
-                                                "ok": vr_json.get("ok", False),
-                                                "message_id": vr_json.get("result", {}).get("message_id"),
-                                                "generated_path": final_video_path.name,
-                                                "final_size_bytes": video_size,
-                                                "duration_sec": vid_dur
-                                            }
-                                            send_summary["delivery_evidence"].append(video_ev)
-                                            v_resp.raise_for_status()
-                                            send_summary["telegram_videos_sent"] += 1
-                                            send_summary["attached_media"].append(final_video_path.name)
+                                if not is_val:
+                                    print(f"[VLM] ⚠️ Enhanced video validation failed: {val_msg}, skipping Telegram video send")
+                                    continue
+
+                                video_size = final_video_path.stat().st_size
+                                vid_dur = val_details.get("duration_sec")
+                                if video_size < 45 * 1024 * 1024:
+                                    send_summary["telegram_videos_attempted"] += 1
+                                    vid_url = f"https://api.telegram.org/bot{telegram_token}/sendVideo"
+                                    start_t = sess.get('session_start_time', '')
+                                    end_t = sess.get('session_end_time', '')
+                                    dur_t = sess.get('total_duration', '')
+                                    vid_caption = f"[SHADOW][LOGITECH] Enhanced feeding video\n{start_t}–{end_t} · {dur_t}"
+                                    with open(final_video_path, "rb") as vid_f:
+                                        v_resp = requests.post(
+                                            vid_url,
+                                            data={"chat_id": telegram_chat_id, "caption": vid_caption, "supports_streaming": True},
+                                            files={"video": vid_f},
+                                            timeout=120
+                                        )
+                                        vr_json = {}
+                                        try:
+                                            vr_json = v_resp.json()
+                                        except Exception:
+                                            pass
+                                        video_ev = {
+                                            "type": "video",
+                                            "status": v_resp.status_code,
+                                            "ok": vr_json.get("ok", False),
+                                            "message_id": vr_json.get("result", {}).get("message_id"),
+                                            "generated_path": final_video_path.name,
+                                            "sha256": val_details.get("sha256"),
+                                            "codec": val_details.get("codec"),
+                                            "pix_fmt": val_details.get("pix_fmt"),
+                                            "width": val_details.get("width"),
+                                            "height": val_details.get("height"),
+                                            "final_size_bytes": video_size,
+                                            "duration_sec": vid_dur
+                                        }
+                                        send_summary["delivery_evidence"].append(video_ev)
+                                        v_resp.raise_for_status()
+                                        send_summary["telegram_videos_sent"] += 1
+                                        send_summary["attached_media"].append(final_video_path.name)
 
                     send_summary["total_messages_delivered"] = (1 if send_summary["telegram_text_sent"] else 0) + send_summary["telegram_images_sent"] + send_summary["telegram_videos_sent"]
                     send_summary["telegram_send_fully_successful"] = True

@@ -882,10 +882,12 @@ def test_telegram_flags_and_sending(mock_post, monkeypatch, tmp_path):
 
     # Mock requests.post to succeed
     class MockResp:
+        status_code = 200
+        def json(self): return {"ok": True, "result": {"message_id": 123}}
         def raise_for_status(self): pass
     mock_post.return_value = MockResp()
 
-    with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "20260704", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path), "--send-telegram-shadow", "--max-clips", "3"]):
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "20260704", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path), "--send-telegram-shadow", "--send-still-images", "--max-clips", "3"]):
         with patch('logitech_vlm_shadow.check_credentials', return_value=True), \
              patch('logitech_vlm_shadow.call_gemini_vlm', side_effect=mock_gemini), \
              patch('logitech_vlm_shadow.MAX_API_CALLS_PER_RUN', 3):
@@ -921,17 +923,22 @@ def test_telegram_flags_and_sending(mock_post, monkeypatch, tmp_path):
             with patch('googleapiclient.discovery.build', return_value=MockDrive()), patch('logitech_vlm_shadow.in_feeding_window', return_value=True):
                 with patch('logitech_vlm_shadow.download_file'):
                     class MockCap:
-                        def __init__(self):
+                        def __init__(self, *args, **kwargs):
                             self._count = 0
-                        def get(self, prop): return 1
+                        def isOpened(self): return True
+                        def get(self, prop): return 10
                         def set(self, prop, val): pass
                         def read(self):
                             self._count += 1
-                            if self._count > 2:
+                            if self._count > 5:
                                 return False, None
-                            return True, np.zeros((10, 10, 3), dtype=np.uint8)
+                            f = np.zeros((180, 320, 3), dtype=np.uint8)
+                            f[:, :, 0] = 30
+                            f[:, :, 1] = 45
+                            f[:, :, 2] = 60
+                            return True, f
                         def release(self): pass
-                    with patch('cv2.VideoCapture', return_value=MockCap()):
+                    with patch('cv2.VideoCapture', side_effect=MockCap):
                         logitech_vlm_shadow.main()
 
     # Check preview text
@@ -1051,7 +1058,7 @@ def test_telegram_send_photo_failure_exits_nonzero(mock_post, monkeypatch, tmp_p
             "confidence": 0.9, "reasons": [], "needs_higher_model": True
         }
 
-    with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "20260704", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path), "--send-telegram-shadow", "--max-clips", "1"]):
+    with patch("sys.argv", ["logitech_vlm_shadow.py", "--date", "20260704", "--run-vlm", "--confirm-cost", "--vlm-provider", "gemini", "--vlm-model", "test-model", "--out-dir", str(tmp_path), "--send-telegram-shadow", "--send-still-images", "--max-clips", "1"]):
         with patch('logitech_vlm_shadow.check_credentials', return_value=True), patch('logitech_vlm_shadow.call_gemini_vlm', side_effect=mock_gemini):
             (tmp_path / "motion_20260704_060001.mp4").write_bytes(b"")
             (tmp_path / "logitech_vlm_contact_sheet_motion_20260704_060001.jpg").write_bytes(b"img1")
@@ -1805,8 +1812,10 @@ def test_generate_enhanced_video_returns_existing_output_path_when_under_45mb(tm
     # Write synthetic 10-frame video
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     writer = cv2.VideoWriter(str(raw_path), fourcc, 10.0, (320, 180))
-    for _ in range(10):
-        writer.write(np.full((180, 320, 3), 30, dtype=np.uint8))
+    for i in range(10):
+        frame = np.full((180, 320, 3), 30 + i, dtype=np.uint8)
+        cv2.circle(frame, (160, 90), 20, (150, 150, 150), -1)
+        writer.write(frame)
     writer.release()
 
     res = generate_enhanced_video(raw_path, out_path)
@@ -1824,13 +1833,17 @@ def test_generate_enhanced_video_multi_clip_session_stitches_duration(tmp_path):
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     w1 = cv2.VideoWriter(str(clip1_path), fourcc, 10.0, (320, 180))
-    for _ in range(10):
-        w1.write(np.full((180, 320, 3), 20, dtype=np.uint8))
+    for i in range(10):
+        frame = np.full((180, 320, 3), 20 + i, dtype=np.uint8)
+        cv2.circle(frame, (160, 90), 20, (100, 100, 100), -1)
+        w1.write(frame)
     w1.release()
 
     w2 = cv2.VideoWriter(str(clip2_path), fourcc, 10.0, (320, 180))
-    for _ in range(15):
-        w2.write(np.full((180, 320, 3), 40, dtype=np.uint8))
+    for i in range(15):
+        frame = np.full((180, 320, 3), 40 + i, dtype=np.uint8)
+        cv2.circle(frame, (160, 90), 20, (150, 150, 150), -1)
+        w2.write(frame)
     w2.release()
 
     res = generate_enhanced_video([clip1_path, clip2_path], out_path)
@@ -1843,6 +1856,17 @@ def test_generate_enhanced_video_multi_clip_session_stitches_duration(tmp_path):
     assert total_f == 25  # 10 + 15 frames stitched
 
 
+def test_generate_enhanced_video_zero_frames_raises(tmp_path):
+    from logitech_vlm_shadow import generate_enhanced_video
+    empty_clip = tmp_path / "empty.mp4"
+    empty_clip.write_bytes(b"")
+    out_path = tmp_path / "out.mp4"
+
+    with pytest.raises(RuntimeError) as exc:
+        generate_enhanced_video(empty_clip, out_path)
+    assert "Zero frames" in str(exc.value) or "validation failed" in str(exc.value)
+
+
 def test_compress_video_for_telegram_creates_output_path(tmp_path):
     from telegram_video_guard import compress_video_for_telegram
     raw_path = tmp_path / "raw.mp4"
@@ -1850,8 +1874,10 @@ def test_compress_video_for_telegram_creates_output_path(tmp_path):
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     writer = cv2.VideoWriter(str(raw_path), fourcc, 10.0, (320, 180))
-    for _ in range(10):
-        writer.write(np.full((180, 320, 3), 30, dtype=np.uint8))
+    for i in range(10):
+        frame = np.full((180, 320, 3), 30 + i, dtype=np.uint8)
+        cv2.circle(frame, (160, 90), 20, (120, 120, 120), -1)
+        writer.write(frame)
     writer.release()
 
     success, final_p, size_b = compress_video_for_telegram(raw_path, output_path=out_path)

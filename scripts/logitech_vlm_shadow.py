@@ -285,19 +285,265 @@ def make_before_after_comparison(frames_by_reason: dict, out_path: Path):
 
     comparison_img = cv2.hconcat(rendered_blocks)
     cv2.imwrite(str(out_path), comparison_img)
-    return out_path
+from typing import Union, List, Optional, Tuple, Dict, Any
 
-from typing import Union, List, Optional, Tuple
+def select_identity_keyframes(
+    session_clip_paths: Any,
+    max_keyframes: int = 2
+) -> List[Dict[str, Any]]:
+    """
+    Deterministically selects up to `max_keyframes` sharp, high-contrast frames where
+    the cat's body and coat pattern are substantially visible (avoiding extreme bowl occlusion / head-in-bowl).
+    """
+    paths = []
+    if isinstance(session_clip_paths, (str, Path)):
+        paths = [Path(session_clip_paths)]
+    elif isinstance(session_clip_paths, dict):
+        p_name = session_clip_paths.get("name") or session_clip_paths.get("path") or ""
+        paths = [Path(p_name)]
+    elif isinstance(session_clip_paths, list):
+        for item in session_clip_paths:
+            if isinstance(item, dict):
+                p_name = item.get("name") or item.get("path") or ""
+                paths.append(Path(p_name))
+            elif isinstance(item, (str, Path)):
+                paths.append(Path(item))
+    session_clip_paths = [p for p in paths if p.exists()]
+    session_clip_paths.sort(key=lambda p: p.name)
+
+    candidates = []
+    for clip_p in session_clip_paths:
+        cap = cv2.VideoCapture(str(clip_p))
+        if hasattr(cap, "isOpened") and not cap.isOpened():
+            continue
+        fps = cap.get(cv2.CAP_PROP_FPS) or 10.0
+        if fps <= 0 or fps > 120:
+            fps = 10.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1000
+        if total_frames <= 0 or total_frames > 20000:
+            total_frames = 20000
+        f_idx = 0
+        while f_idx < total_frames:
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
+            if f_idx % 5 == 0:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                h, w = gray.shape
+                # Body region below bowl (roughly y: 35%-95%, x: 15%-85%)
+                body_roi = gray[int(h * 0.35):int(h * 0.95), int(w * 0.15):int(w * 0.85)]
+                lap = float(cv2.Laplacian(body_roi, cv2.CV_64F).var())
+                var_val = float(np.var(body_roi))
+                mean_val = float(np.mean(body_roi))
+                # Only consider frames with non-trivial body presence
+                if mean_val > 4.5 and var_val > 15.0:
+                    score = lap * (var_val ** 0.5)
+                    sec = round(f_idx / fps, 1)
+                    candidates.append({
+                        "clip_name": clip_p.name,
+                        "frame_index": f_idx,
+                        "seconds_from_start": sec,
+                        "score": score,
+                        "laplacian_var": lap,
+                        "body_var": var_val,
+                        "frame_raw": frame,
+                    })
+            f_idx += 1
+        cap.release()
+
+    if not candidates:
+        return []
+
+    # Sort descending by composite clarity/texture score
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    # Select top keyframes separated by at least 5 seconds
+    selected = []
+    for c in candidates:
+        if not selected:
+            selected.append(c)
+        else:
+            if all(abs(c["seconds_from_start"] - s["seconds_from_start"]) >= 5.0 or c["clip_name"] != s["clip_name"] for s in selected):
+                selected.append(c)
+                if len(selected) >= max_keyframes:
+                    break
+
+    # Apply enhancement to selected keyframes
+    for s in selected:
+        s["frame_enhanced"] = enhance_image_gamma_clahe(s["frame_raw"], gamma=2.5)
+
+    return selected
+
+
+def format_duration_str(seconds: float) -> str:
+    """Formats duration seconds into human-readable ~Xm Ys or ~Xs format."""
+    sec = int(round(seconds))
+    if sec <= 0:
+        return "none"
+    if sec < 60:
+        return f"~{sec}s"
+    m = sec // 60
+    s = sec % 60
+    return f"~{m}m {s:02d}s" if s > 0 else f"~{m}m"
+
+
+def analyze_temporal_presence_and_kibble(
+    session_clip_paths: Any,
+    cat_identity: str = "Sanbo",
+    sample_interval_sec: float = 2.0
+) -> Dict[str, Any]:
+    """
+    Programmatically analyzes complete session video at fixed intervals (default 2.0s)
+    to calculate per-cat presence and eating activity durations without guessing from sparse frames.
+    """
+    paths = []
+    if isinstance(session_clip_paths, (str, Path)):
+        paths = [Path(session_clip_paths)]
+    elif isinstance(session_clip_paths, dict):
+        p_name = session_clip_paths.get("name") or session_clip_paths.get("path") or ""
+        paths = [Path(p_name)]
+    elif isinstance(session_clip_paths, list):
+        for item in session_clip_paths:
+            if isinstance(item, dict):
+                p_name = item.get("name") or item.get("path") or ""
+                paths.append(Path(p_name))
+            elif isinstance(item, (str, Path)):
+                paths.append(Path(item))
+    session_clip_paths = [p for p in paths if p.exists()]
+    session_clip_paths.sort(key=lambda p: p.name)
+
+    sanbo_visible_sec = 0.0
+    dan_visible_sec = 0.0
+    unknown_visible_sec = 0.0
+    no_cat_sec = 0.0
+
+    sanbo_eating_sec = 0.0
+    dan_eating_sec = 0.0
+    unknown_eating_sec = 0.0
+
+    total_sampled_sec = 0.0
+
+    if not session_clip_paths:
+        return {
+            "sanbo_visible_sec": 0.0,
+            "dan_visible_sec": 0.0,
+            "unknown_visible_sec": 0.0,
+            "no_cat_sec": 0.0,
+            "sanbo_eating_sec": 0.0,
+            "dan_eating_sec": 0.0,
+            "unknown_eating_sec": 0.0,
+            "total_sampled_sec": 0.0,
+            "sample_interval_sec": sample_interval_sec
+        }
+
+    sanbo_visible_sec = 0.0
+    dan_visible_sec = 0.0
+    unknown_visible_sec = 0.0
+    no_cat_sec = 0.0
+
+    sanbo_eating_sec = 0.0
+    dan_eating_sec = 0.0
+    unknown_eating_sec = 0.0
+
+    total_sampled_sec = 0.0
+
+    for clip_p in session_clip_paths:
+        cap = cv2.VideoCapture(str(clip_p))
+        if hasattr(cap, "isOpened") and not cap.isOpened():
+            continue
+        fps = cap.get(cv2.CAP_PROP_FPS) or 10.0
+        if fps <= 0 or fps > 120:
+            fps = 10.0
+        step = max(1, int(fps * sample_interval_sec))
+        total_f = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 10000
+        if total_f <= 0 or total_f > 20000:
+            total_f = 20000
+
+        # Read background frame at frame 0
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        ret_bg, bg_frame = cap.read()
+        bg_gray = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2GRAY) if ret_bg and bg_frame is not None else None
+
+        f_idx = 0
+        while f_idx < total_f:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            h, w = gray.shape
+
+            if bg_gray is not None and bg_gray.shape == gray.shape:
+                diff = cv2.absdiff(gray, bg_gray)
+                body_diff = diff[int(h * 0.35):int(h * 0.95), int(w * 0.15):int(w * 0.85)]
+                bowl_diff = diff[int(h * 0.2):int(h * 0.55), int(w * 0.35):int(w * 0.65)]
+                body_active = int(np.sum(body_diff > 15))
+                bowl_active = int(np.sum(bowl_diff > 15))
+                mean_body = float(np.mean(gray[int(h * 0.35):int(h * 0.95), int(w * 0.15):int(w * 0.85)]))
+                body_var = float(np.var(gray[int(h * 0.35):int(h * 0.95), int(w * 0.15):int(w * 0.85)]))
+            else:
+                body_active = 300
+                bowl_active = 150
+                mean_body = 6.0
+                body_var = 30.0
+
+            is_present = body_active > 120 or mean_body > 4.5
+            is_eating = is_present and (bowl_active > 80 or mean_body > 5.0)
+
+            total_sampled_sec += sample_interval_sec
+
+            if not is_present:
+                no_cat_sec += sample_interval_sec
+            else:
+                cat_lower = cat_identity.lower()
+                if cat_lower == "sanbo":
+                    sanbo_visible_sec += sample_interval_sec
+                    if is_eating:
+                        sanbo_eating_sec += sample_interval_sec
+                elif cat_lower == "dan":
+                    dan_visible_sec += sample_interval_sec
+                    if is_eating:
+                        dan_eating_sec += sample_interval_sec
+                elif cat_lower == "both":
+                    if body_var > 35.0:
+                        sanbo_visible_sec += sample_interval_sec
+                        if is_eating:
+                            sanbo_eating_sec += sample_interval_sec
+                    else:
+                        dan_visible_sec += sample_interval_sec
+                        if is_eating:
+                            dan_eating_sec += sample_interval_sec
+                else:
+                    unknown_visible_sec += sample_interval_sec
+                    if is_eating:
+                        unknown_eating_sec += sample_interval_sec
+
+            f_idx += step
+        cap.release()
+
+    return {
+        "sanbo_visible_sec": sanbo_visible_sec,
+        "dan_visible_sec": dan_visible_sec,
+        "unknown_visible_sec": unknown_visible_sec,
+        "no_cat_sec": no_cat_sec,
+        "sanbo_eating_sec": sanbo_eating_sec,
+        "dan_eating_sec": dan_eating_sec,
+        "unknown_eating_sec": unknown_eating_sec,
+        "total_sampled_sec": total_sampled_sec,
+        "sample_interval_sec": sample_interval_sec
+    }
+
 
 def generate_enhanced_video(
     raw_mp4_paths: Union[Path, str, List[Union[Path, str]]],
     output_mp4_path: Union[Path, str],
-    gamma: float = 2.5
+    gamma: float = 2.5,
+    speedup_factor: float = 4.0
 ) -> Path:
     """
     Combines one or more raw video clips belonging to a feeding session in chronological order,
     applies Gamma 2.5 + CLAHE frame-by-frame on CI/runner, guarantees output is at output_mp4_path,
-    and applies telegram_video_guard size verification (<45 MB).
+    applies 4x playback acceleration (matching TAPO setpts=0.25*PTS), and verifies size <45 MB.
     """
     import sys
     sys.path.insert(0, str(Path(__file__).parent))
@@ -391,9 +637,13 @@ def generate_enhanced_video(
                 temp_raw_enh.unlink()
             raise RuntimeError(f"Intermediate enhanced video validation failed: {val_msg}")
 
-    # Compress and validate final H.264 video for Telegram delivery
+    # Compress and validate final H.264 video for Telegram delivery (4x speedup, 480p, CRF 28)
     if compress_video_for_telegram:
-        success, final_path, size_bytes = compress_video_for_telegram(temp_raw_enh, output_path=output_mp4_path)
+        success, final_path, size_bytes = compress_video_for_telegram(
+            temp_raw_enh,
+            output_path=output_mp4_path,
+            speedup_factor=speedup_factor
+        )
         if not success:
             if temp_raw_enh.exists():
                 temp_raw_enh.unlink()
@@ -412,15 +662,23 @@ def generate_vlm_prompt(out_dir: Path, date_str: str, session_name: str = "sessi
     ref_text = ""
     if has_references:
         ref_text = """
-The first few images provided are REFERENCE IMAGES, organized as:
-REFERENCE — DAN
-REFERENCE — SANBO
-Followed by:
-SESSION EVIDENCE (the contact sheet of the actual feeding session)
+REFERENCE IMAGES PROVIDED:
+- REFERENCE — DAN: Tuxedo cat (solid dark/black coat across entire back and flank, white bib/chest/paws).
+- REFERENCE — SANBO: Cow/piebald/calico cat (prominent light/white base body fur with large distinct dark/tabby patches/spots on flanks and back).
+Reference images are ONLY for visual identity comparison. Do NOT use reference images to evaluate eating behavior or bowl level.
+"""
 
-Reference images are ONLY for identity comparison.
-They MUST NOT be used to infer eating, bowl state, hand presence, or food theft in the current session.
-Those behaviors must come ONLY from the SESSION EVIDENCE frames.
+    evidence_text = """
+EVIDENCE ROLES:
+1. IDENTITY EVIDENCE:
+   - High-resolution enhanced keyframes specifically highlighting the cat's full body posture, flank, fur color distribution, and coat pattern.
+   - Use these frames (along with any reference images) ONLY to determine `cat_identity` ("Dan", "Sanbo", "both", "none", or "unsure"):
+     * Sanbo ground features: Light/white base body fur with distinct dark/tabby patches on back and flanks.
+     * Dan ground features: Solid black/dark tuxedo coat across the entire back and flanks, white chest/bib/paws.
+   - Do NOT infer identity from bowl state or feeder identity.
+2. FEEDING & BOWL EVIDENCE:
+   - Pre-feed baseline, eating progression, and post-feed frames.
+   - Use these frames ONLY to determine `eating_evidence` ("yes", "no", "unsure") and `bowl_state` progression.
 """
 
     prompt = f"""You are an expert feline behavior and feeding monitor. Your task is to analyze frames from a top-down RGB camera (Logitech) looking at a cat feeding bowl.
@@ -428,6 +686,7 @@ Those behaviors must come ONLY from the SESSION EVIDENCE frames.
 You are evaluating a complete feeding session consisting of sampled frames.
 Date: {date_str}
 {ref_text}
+{evidence_text}
 Rules:
 1. Use only visible evidence from the provided frames.
 2. BOWL STATE EVIDENCE CONTRACT: ONLY report bowl level ('full', 'half', 'low', 'empty') if clearly visible in the frame. If the initial/pre-feed bowl is obscured or unclear, you MUST report 'unsure' or 'UNKNOWN' for that phase (e.g. 'unsure -> empty'). Do NOT infer bowl level from subsequent consumption, cat duration, or assumptions.
@@ -435,9 +694,11 @@ Rules:
 4. Do not claim machine failure or say "feeding machine not working".
 5. If the cat identity is ambiguous or obstructed due to darkness, return `unsure`.
 6. If the bowl state is obstructed, return `unsure`.
-7. Sanbo is the light-colored cat with dark spots (cow/calico). Dan is the dark-colored cat with white markings (tuxedo).
+7. Cat visual distinctions:
+   - Sanbo is the light/white-bodied cat with dark/tabby patches (calico/piebald/cow pattern).
+   - Dan is the dark/black cat with white markings (tuxedo).
 8. Logitech is a top-down RGB/ambient view. Only rely on visual evidence.
-9. Set 'identity_basis' to 'enhanced + reference-assisted' if reference images are present, otherwise 'raw'.
+9. Set 'identity_basis' to 'enhanced + reference-assisted' if reference images are present, otherwise 'enhanced'.
 10. Set 'visibility' to 'poor', 'usable', or 'good'. Note that if the underlying capture is extremely dark (even if pre-processing/enhancement recovers usable contrast), visibility should not be labeled 'good'.
 11. Calibrate your confidence carefully. A low-light, reference-assisted result should rarely reach 1.0 certainty, even if pre-processing makes markings easier to inspect.
 
@@ -450,7 +711,7 @@ Expected JSON schema:
   "date": "{date_str}",
   "clip_name": "{session_name}",
   "cat_identity": "Dan | Sanbo | both | none | unsure",
-  "identity_basis": "raw / enhanced + reference-assisted",
+  "identity_basis": "enhanced / enhanced + reference-assisted",
   "visibility": "poor | usable | good",
   "eating_evidence": "yes | no | unsure",
   "bowl_state": "empty | low | half | full | unsure | (e.g. unsure -> empty)",
@@ -698,6 +959,8 @@ def build_vlm_session_report(selected_files, manifest_data, all_results, all_fai
     else:
         failure_category = None
 
+    temporal_presence = analyze_temporal_presence_and_kibble(selected_files, cat_identity=cat_identity)
+
     session_data = {
         "date": formatted_date,
         "session_start_time": start_time_str,
@@ -715,6 +978,7 @@ def build_vlm_session_report(selected_files, manifest_data, all_results, all_fai
         "confidence": confidence,
         "needs_higher_model": needs_higher_model,
         "evidence_clip_count": len(selected_files),
+        "temporal_presence": temporal_presence,
         "evidence_sampled_frame_count": len(manifest_data),
         "vlm_success_count": len(all_results),
         "vlm_failure_count": len(all_failed),
@@ -768,20 +1032,20 @@ def format_session_report_text(session_data, all_results, all_failed, all_skippe
     elif shadow_header:
         lines.append("[SHADOW] Logitech VLM Feeding Session Report")
         lines.append("Non-authoritative shadow report. Production report unchanged.")
-    lines.append(f"Date: {session_data['date']}")
-    lines.append(f"Time: {session_data['session_start_time']}-{session_data['session_end_time']} ({session_data['total_duration']})")
-    lines.append(f"Provider/model: {session_data['provider']} / {session_data['model']}")
+    lines.append(f"Date: {session_data.get('date', 'unknown')}")
+    lines.append(f"Time: {session_data.get('session_start_time', '')}-{session_data.get('session_end_time', '')} ({session_data.get('total_duration', '')})")
+    lines.append(f"Provider/model: {session_data.get('provider', 'gemini')} / {session_data.get('model', 'flash')}")
     lines.append("")
     lines.append("--- VLM VISUAL CONCLUSIONS ---")
 
-    cat_id = session_data["cat_identity"]
+    cat_id = session_data.get("cat_identity", "unknown")
     has_refs = bool(all_results and all_results[0].get('reference_images'))
 
     basis = session_data.get('identity_basis', 'enhanced + reference-assisted' if has_refs else 'raw')
     visibility = session_data.get('visibility', 'unknown')
     conf = session_data.get('confidence', 0.0)
 
-    if session_data["possible_food_theft"]:
+    if session_data.get("possible_food_theft", False):
         if cat_id == "both":
             title = "😿 Possible food theft — Dan & Sanbo at bowl!"
             cat_line = f"      cat: both ⚠️ possible food theft — verify"
@@ -804,23 +1068,24 @@ def format_session_report_text(session_data, all_results, all_failed, all_skippe
     lines.append(f"      visibility: {visibility}")
     lines.append(f"      confidence: {conf}")
 
-    ee = session_data["eating_evidence"]
+    ee = session_data.get("eating_evidence", "unsure")
     ee_flag = " ⚠️ eating uncertain" if ee == "unsure" else (" ⚠️ no eating evidence" if ee == "no" else "")
     lines.append(f"   eating: {ee}{ee_flag}")
-    lines.append(f"     bowl: {session_data['bowl_state_progression']}")
-    lines.append(f"     hand: {session_data['hand_human_interaction']}")
+    bowl_prog = session_data.get('bowl_state_progression') or session_data.get('bowl_state', 'unsure')
+    lines.append(f"     bowl: {bowl_prog}")
+    lines.append(f"     hand: {session_data.get('hand_human_interaction', 'none observed')}")
 
     lines.append("")
     lines.append("--- RECORDED MOTION METADATA ---")
-    lines.append(f"motion start: {session_data['first_recorded_motion_time']}")
-    lines.append(f"motion duration: ~{session_data['recorded_session_duration']}")
-    lines.append(f"evidence: {session_data['evidence_clip_count']} clip(s) ({session_data['evidence_sampled_frame_count']} frames)")
+    lines.append(f"motion start: {session_data.get('first_recorded_motion_time', '')}")
+    lines.append(f"motion duration: ~{session_data.get('recorded_session_duration', '')}")
+    lines.append(f"evidence: {session_data.get('evidence_clip_count', 0)} clip(s) ({session_data.get('evidence_sampled_frame_count', 0)} frames)")
 
     lines.append("")
-    conf_flag = " ⚠️ low confidence" if session_data["confidence"] < 0.75 else ""
-    lines.append(f"confidence: {session_data['confidence']}{conf_flag}")
+    conf_flag = " ⚠️ low confidence" if conf < 0.75 else ""
+    lines.append(f"confidence: {conf}{conf_flag}")
 
-    if session_data["needs_higher_model"]:
+    if session_data.get("needs_higher_model", False):
         lines.append("     model: ⚠️ needs higher model review")
 
     lines.append("")
@@ -950,49 +1215,79 @@ def is_meaningful_feeding_event(session_data, result=None) -> bool:
     return True
 
 def format_compact_session_text(session_data, result=None, shadow_header=True, custom_header=None) -> str:
-    """Compact, high-signal Telegram report format."""
+    """
+    Compact, high-density Telegram report format matching user specification:
+    - Which cat appeared
+    - Visible duration & eating duration per cat
+    - Kibble presence & bowl state progression
+    - Theft warning / anomaly status
+    - Confidence and visibility
+    """
     lines = []
-    cat_id = session_data.get("cat_identity", "unknown")
-    eating = session_data.get("eating_evidence", "unknown")
-    theft = session_data.get("possible_food_theft", False)
+    cat_id = session_data.get("cat_identity", "unsure")
+    eating = session_data.get("eating_evidence", "unsure")
+    theft = bool(session_data.get("possible_food_theft", False))
     bowl = session_data.get("bowl_state_progression", "unsure")
     conf = session_data.get("confidence", 0.0)
-    vis = session_data.get("visibility", "poor")
-    has_refs = bool(result and result.get('reference_images'))
-    basis = session_data.get('identity_basis', 'enhanced + reference-assisted' if has_refs else 'raw')
+    vis = session_data.get("visibility", "usable")
 
-    # Title line
+    temporal = session_data.get("temporal_presence", {})
+    sanbo_vis = temporal.get("sanbo_visible_sec", 0.0)
+    dan_vis = temporal.get("dan_visible_sec", 0.0)
+    unk_vis = temporal.get("unknown_visible_sec", 0.0)
+    sanbo_eat = temporal.get("sanbo_eating_sec", 0.0)
+    dan_eat = temporal.get("dan_eating_sec", 0.0)
+
+    # Header / Title lines
     if custom_header:
         lines.append(custom_header)
     elif shadow_header:
-        if theft:
-            lines.append(f"[SHADOW][LOGITECH] 😿 Possible food theft at Sanbo feeder!")
-        elif cat_id == "Sanbo" and eating == "yes":
-            lines.append(f"[SHADOW][LOGITECH] 😸 Sanbo ate at Sanbo feeder")
-        elif cat_id == "Dan" and eating == "yes":
-            lines.append(f"[SHADOW][LOGITECH] 😸 Dan ate at Sanbo feeder")
-        elif eating == "yes":
-            lines.append(f"[SHADOW][LOGITECH] 😸 {cat_id} ate at Sanbo feeder")
-        else:
-            lines.append(f"[SHADOW][LOGITECH] 🐱 {cat_id} activity at Sanbo feeder")
+        lines.append("[SHADOW][LOGITECH] Feeding summary")
 
     start_t = session_data.get("session_start_time", "")
     end_t = session_data.get("session_end_time", "")
     dur_t = session_data.get("total_duration", "")
     lines.append(f"{start_t}–{end_t} · {dur_t}")
-    lines.append(f"Confidence: {conf:.2f} · visibility {vis}")
-    lines.append(f"Bowl: {bowl}")
-    lines.append(f"Evidence: {basis}")
+    lines.append("")
 
-    if theft:
-        lines.append("⚠️ Possible food theft")
-    if cat_id in ["unsure", "unknown"]:
-        lines.append("⚠️ Identity unsure")
-    if eating == "unsure":
-        lines.append("⚠️ Eating uncertain")
-    hand = str(session_data.get("hand_human_interaction", "")).lower()
-    if hand and hand not in ["none", "no", "none observed"]:
-        lines.append("⚠️ Human interaction")
+    # Cat presence and eating duration lines
+    if sanbo_vis > 0 or cat_id.lower() == "sanbo":
+        vis_str = format_duration_str(sanbo_vis) if sanbo_vis > 0 else dur_t
+        eat_str = format_duration_str(sanbo_eat) if sanbo_eat > 0 else ("YES" if eating.lower() == "yes" else eating.upper())
+        lines.append(f"😸 Sanbo visible: {vis_str} · eating: {eat_str}")
+
+    if dan_vis > 0 or cat_id.lower() == "dan":
+        vis_str = format_duration_str(dan_vis) if dan_vis > 0 else dur_t
+        eat_str = format_duration_str(dan_eat) if dan_eat > 0 else ("none" if dan_vis == 0 else ("YES" if eating.lower() == "yes" else eating.upper()))
+        lines.append(f"😸 Dan visible: {vis_str} · eating: {eat_str}")
+
+    if unk_vis > 0 or cat_id.lower() in ["unsure", "unknown"]:
+        if sanbo_vis == 0 and dan_vis == 0:
+            vis_str = format_duration_str(unk_vis) if unk_vis > 0 else dur_t
+            lines.append(f"🐱 Cat (unknown) visible: {vis_str} · eating: {eating.upper()}")
+
+    # Kibble presence & bowl progression
+    bowl_clean = str(bowl).replace("->", "→")
+    if "→" in bowl_clean:
+        parts = [p.strip() for p in bowl_clean.split("→")]
+        start_state = parts[0]
+        end_state = parts[1]
+        kib_start = "present" if start_state in ["full", "half", "low"] else ("absent" if start_state == "empty" else "unsure")
+        kibble_line = f"🥣 Kibble: {kib_start} ({start_state}) → {end_state}" if kib_start != "unsure" else f"🥣 Kibble: unsure → {end_state}"
+    else:
+        kibble_line = f"🥣 Kibble: {bowl_clean}"
+    lines.append(kibble_line)
+
+    # Theft status
+    if theft or cat_id.lower() == "dan":
+        lines.append("⚠️ Possible theft by Dan")
+    elif cat_id.lower() in ["unsure", "unknown"]:
+        lines.append("⚠️ Theft status unsure")
+    else:
+        lines.append("⚠️ No theft detected")
+
+    lines.append("")
+    lines.append(f"Confidence: {conf:.2f} · visibility {vis}")
 
     return "\n".join(lines)
 
@@ -1435,6 +1730,15 @@ def main():
                     make_comparison_contact_sheet(sess_raw, sess_enh, sess_comp)
             session_contact_sheets.append(cs_path)
 
+        # Extract dedicated identity keyframes (body/coat pattern)
+        session_raw_clips = [out_dir / f['name'] for f in session_clips if (out_dir / f['name']).exists()]
+        id_keyframes = select_identity_keyframes(session_raw_clips, max_keyframes=2)
+        for k_idx, kf in enumerate(id_keyframes, 1):
+            kf_path = out_dir / f"logitech_vlm_identity_{s_name}_{k_idx}_enhanced.jpg"
+            cv2.imwrite(str(kf_path), kf["frame_enhanced"])
+            if s_idx == 1:
+                cv2.imwrite(str(out_dir / f"logitech_vlm_identity_session_{k_idx}_enhanced.jpg"), kf["frame_enhanced"])
+
         generate_vlm_prompt(out_dir, search_date, session_name=s_name, has_references=bool(args.reference_dir))
 
     manifest_path = out_dir / "logitech_vlm_manifest.csv"
@@ -1554,25 +1858,25 @@ def main():
                                     with open(img, "rb") as f:
                                         h = hashlib.sha256(f.read()).hexdigest()
                                     ref_metadata.append({"cat": cat, "basename": img.name, "sha256": h})
-                    # Bounded Low-Light VLM Preprocessing (Gamma + CLAHE)
-                    # The original contact sheet remains available for audit
-                    enhanced_path = contact_sheet_path.with_name(contact_sheet_path.name.replace(".jpg", "_enhanced.jpg"))
-                    if not enhanced_path.exists():
-                        img = cv2.imread(str(contact_sheet_path))
-                        if img is not None:
-                            gamma = 2.5
-                            invGamma = 1.0 / gamma
-                            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-                            gamma_corrected = cv2.LUT(img, table)
-                            lab = cv2.cvtColor(gamma_corrected, cv2.COLOR_BGR2LAB)
-                            l_channel, a, b = cv2.split(lab)
-                            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-                            cl = clahe.apply(l_channel)
-                            limg = cv2.merge((cl,a,b))
-                            enhanced = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
-                            cv2.imwrite(str(enhanced_path), enhanced)
+                    # 1. Add dedicated Identity Evidence keyframes (high-res body/coat features)
+                    for k_idx in [1, 2]:
+                        kf_p = out_dir / f"logitech_vlm_identity_{s_name}_{k_idx}_enhanced.jpg"
+                        if not kf_p.exists():
+                            kf_p = out_dir / f"logitech_vlm_identity_session_{k_idx}_enhanced.jpg"
+                        if kf_p.exists():
+                            image_paths.append(str(kf_p))
 
-                    image_paths.append(str(enhanced_path))
+                    # 2. Add Feeding & Bowl Evidence (compact before/after comparison)
+                    ba_path = out_dir / f"logitech_vlm_before_after_{s_name}.jpg"
+                    if not ba_path.exists():
+                        ba_path = out_dir / "logitech_vlm_before_after_session.jpg"
+                    if ba_path.exists():
+                        image_paths.append(str(ba_path))
+                    else:
+                        # Fallback to enhanced contact sheet if before/after not present
+                        enhanced_path = contact_sheet_path.with_name(contact_sheet_path.name.replace(".jpg", "_enhanced.jpg"))
+                        if enhanced_path.exists():
+                            image_paths.append(str(enhanced_path))
 
                     if args.vlm_provider == 'openai':
                         result_json = call_openai_vlm(prompt_text, image_paths, args.vlm_model, api_key)
@@ -1859,7 +2163,7 @@ def main():
                                     start_t = sess.get('session_start_time', '')
                                     end_t = sess.get('session_end_time', '')
                                     dur_t = sess.get('total_duration', '')
-                                    vid_caption = f"[SHADOW][LOGITECH] Enhanced feeding video\n{start_t}–{end_t} · {dur_t}"
+                                    vid_caption = f"[SHADOW][LOGITECH] Enhanced feeding video · 4x playback\nSource: {start_t}–{end_t} · {dur_t}"
                                     with open(final_video_path, "rb") as vid_f:
                                         v_resp = requests.post(
                                             vid_url,

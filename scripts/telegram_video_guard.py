@@ -197,12 +197,14 @@ def compress_video_for_telegram(
     max_bytes: int = TELEGRAM_MAX_VIDEO_BYTES,
     crf: int = TAPO_TARGET_CRF,
     target_height: int = TAPO_TARGET_HEIGHT,
+    speedup_factor: float = 4.0,
     timeout_sec: int = 300
 ) -> Tuple[bool, Path, int]:
     """
     Compresses video to compact Telegram delivery format matching TAPO production profile:
     - H.264 (libx264)
     - 480p (scale=-2:480)
+    - 4x accelerated playback (setpts=0.25*PTS, -r 16) matching TAPO user-facing UX
     - CRF 28 (clean quality at ~2-5 MB)
     - yuv420p
     - +faststart (moov atom at front for mobile streaming)
@@ -234,7 +236,8 @@ def compress_video_for_telegram(
         return False, input_path, current_size
 
     duration = get_video_duration_sec(input_path) or 150.0
-    target_kbps = calculate_target_bitrate_kbps(duration, max_bytes=max_bytes)
+    effective_duration = duration / speedup_factor if speedup_factor > 0 else duration
+    target_kbps = calculate_target_bitrate_kbps(effective_duration, max_bytes=max_bytes)
 
     # Temporary output path if input == output
     target_out = output_path
@@ -244,13 +247,20 @@ def compress_video_for_telegram(
     if target_out.exists():
         target_out.unlink()
 
-    # TAPO production delivery profile with safety bitrate cap
+    # Build video filter for scaling and playback acceleration (matching TAPO setpts=0.25*PTS)
+    vf_parts = [f"scale=-2:{target_height}"]
+    if speedup_factor > 1.0:
+        pts_scale = 1.0 / speedup_factor
+        vf_parts.append(f"setpts={pts_scale:.4f}*PTS")
+    vf_str = ",".join(vf_parts)
+
     cmd = [
         ffmpeg_bin, "-y", "-i", str(input_path),
         "-c:v", "libx264",
         "-crf", str(crf),
         "-preset", "fast",
-        "-vf", f"scale=-2:{target_height}",
+        "-vf", vf_str,
+        "-r", "16",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
         "-maxrate", f"{int(target_kbps * 1.5)}k",
@@ -277,12 +287,16 @@ def compress_video_for_telegram(
         if out_size > max_bytes:
             # Emergency lower resolution / higher CRF pass
             emergency_path = output_path.with_name(f"{output_path.stem}_lowres.mp4")
+            vf_em_parts = ["scale=-2:360"]
+            if speedup_factor > 1.0:
+                vf_em_parts.append(f"setpts={1.0/speedup_factor:.4f}*PTS")
             cmd_em = [
                 ffmpeg_bin, "-y", "-i", str(input_path),
                 "-c:v", "libx264",
                 "-crf", "34",
                 "-preset", "fast",
-                "-vf", "scale=-2:360",
+                "-vf", ",".join(vf_em_parts),
+                "-r", "16",
                 "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart",
                 "-an",

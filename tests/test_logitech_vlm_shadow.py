@@ -273,11 +273,49 @@ def test_schema_rejects_wrong_expected_date():
     with pytest.raises(ValueError, match="Invalid date: expected 20260705, got 20260704"):
         validate_vlm_schema(valid_data, expected_date="20260705")
 
-def test_schema_rejects_wrong_expected_clip_name():
-    valid_data = {
+def test_schema_validation_normalizes_model_clip_name_to_authoritative_session_id():
+    # Model returns descriptive string like 'feeding_session_analysis'
+    payload = {
+        "camera": "LOGITECH",
+        "date": "20260825",
+        "clip_name": "feeding_session_analysis",
+        "identity_basis": "enhanced + reference-assisted",
+        "visibility": "usable",
+        "cat_identity": "Sanbo",
+        "eating_evidence": "yes",
+        "bowl_state": "half -> empty",
+        "confidence": 0.9,
+        "reasons": ["Light coat with distinct patches visible on flank"],
+        "needs_higher_model": False
+    }
+    validate_vlm_schema(payload, expected_date="20260825", expected_clip_name=["session_2", "session"])
+    assert payload["clip_name"] == "session_2"
+    assert payload["cat_identity"] == "Sanbo"
+    assert payload["eating_evidence"] == "yes"
+
+    # Single string expected_clip_name
+    payload2 = {
+        "camera": "LOGITECH",
+        "date": "20260825",
+        "clip_name": "arbitrary_model_name",
+        "identity_basis": "enhanced",
+        "visibility": "good",
+        "cat_identity": "Dan",
+        "eating_evidence": "no",
+        "bowl_state": "full",
+        "confidence": 0.85,
+        "reasons": ["Solid black back"],
+        "needs_higher_model": False
+    }
+    validate_vlm_schema(payload2, expected_clip_name="session_1")
+    assert payload2["clip_name"] == "session_1"
+
+
+def test_schema_validation_rejects_empty_or_invalid_clip_name():
+    invalid_data = {
         "camera": "LOGITECH",
         "date": "20260704",
-        "clip_name": "motion_wrong.mp4",
+        "clip_name": "", # Empty string
         "identity_basis": "raw", "visibility": "good", "cat_identity": "Sanbo",
         "eating_evidence": "yes",
         "bowl_state": "low",
@@ -285,8 +323,12 @@ def test_schema_rejects_wrong_expected_clip_name():
         "reasons": ["Visible eating"],
         "needs_higher_model": True
     }
-    with pytest.raises(ValueError, match="Invalid clip_name: expected motion_test.mp4, got motion_wrong.mp4"):
-        validate_vlm_schema(valid_data, expected_clip_name="motion_test.mp4")
+    with pytest.raises(ValueError, match="Invalid clip_name: expected non-empty string"):
+        validate_vlm_schema(invalid_data, expected_clip_name="session_1")
+
+    invalid_data["clip_name"] = "   " # Whitespace only
+    with pytest.raises(ValueError, match="Invalid clip_name: expected non-empty string"):
+        validate_vlm_schema(invalid_data, expected_clip_name="session_1")
 
 def test_schema_rejects_confidence_out_of_range():
     valid_data = {

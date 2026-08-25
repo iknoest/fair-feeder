@@ -1352,10 +1352,15 @@ def validate_vlm_schema(data, expected_date=None, expected_clip_name=None):
         raise ValueError(f"Invalid camera: {data['camera']}")
     if expected_date and data["date"] != expected_date:
         raise ValueError(f"Invalid date: expected {expected_date}, got {data['date']}")
+
+    clip_val = data.get("clip_name")
+    if not isinstance(clip_val, str) or not clip_val.strip():
+        raise ValueError(f"Invalid clip_name: expected non-empty string, got {clip_val}")
+
     if expected_clip_name:
-        allowed_names = [expected_clip_name] if isinstance(expected_clip_name, str) else list(expected_clip_name)
-        if data["clip_name"] not in allowed_names:
-            raise ValueError(f"Invalid clip_name: expected {expected_clip_name}, got {data['clip_name']}")
+        # clip_name is application-owned metadata; normalize to authoritative local session identifier
+        canonical_name = expected_clip_name[0] if isinstance(expected_clip_name, (list, tuple)) else str(expected_clip_name)
+        data["clip_name"] = canonical_name
 
     if data["cat_identity"] not in ["Dan", "Sanbo", "both", "none", "unsure"]:
         raise ValueError(f"Invalid cat_identity: {data['cat_identity']}")

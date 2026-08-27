@@ -1,0 +1,11 @@
+[Unit]
+Description=Fair Feeder Daily Breakfast Report Delivery Watchdog
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pi5
+WorkingDirectory=/home/pi5/Feeder/fair-feeder
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/pi5/Feeder/fair-feeder/.env
+ExecStart=/home/pi5/Feeder/fair-feeder/.venv/bin/python scripts/daily_watchdog.py

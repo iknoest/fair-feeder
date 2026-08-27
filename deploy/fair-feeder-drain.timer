@@ -1,0 +1,9 @@
+[Unit]
+Description=Timer for Fair Feeder Local Morning Drain (07:15 Europe/Amsterdam)
+
+[Timer]
+OnCalendar=*-*-* 07:15:00 Europe/Amsterdam
+Persistent=true
+
+[Install]
+WantedBy=timers.target

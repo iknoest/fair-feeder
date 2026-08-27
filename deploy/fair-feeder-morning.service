@@ -1,0 +1,12 @@
+[Unit]
+Description=Fair Feeder Morning Activation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi5
+WorkingDirectory=/home/pi5/Feeder/fair-feeder
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/pi5/Feeder/fair-feeder/.env
+ExecStart=/home/pi5/Feeder/fair-feeder/.venv/bin/python scripts/lifecycle_manager.py activate-morning

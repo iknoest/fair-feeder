@@ -1,0 +1,9 @@
+[Unit]
+Description=Timer for Fair Feeder Evening Readiness (21:00 Europe/Amsterdam)
+
+[Timer]
+OnCalendar=*-*-* 21:00:00 Europe/Amsterdam
+Persistent=true
+
+[Install]
+WantedBy=timers.target

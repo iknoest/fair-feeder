@@ -32,7 +32,7 @@ def check_host_idle() -> dict:
     mem_ok = mem_available >= MIN_MEM_AVAILABLE_MB
 
     is_idle = (
-        current_state == LifecycleState.DAYTIME_IDLE
+        current_state in [LifecycleState.DAYTIME_IDLE, LifecycleState.EVENING_READINESS]
         and drain_complete is True
         and services_active is False
         and active_workers == 0

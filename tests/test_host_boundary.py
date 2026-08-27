@@ -38,6 +38,23 @@ def test_check_host_idle_returns_true_when_daytime_idle_and_healthy():
         assert res["mem_threshold_met"] is True
 
 
+def test_check_host_idle_returns_true_in_evening_readiness_state():
+    write_state({
+        "state": LifecycleState.EVENING_READINESS,
+        "local_drain_complete": True,
+        "services_active": False,
+        "active_workers": 0
+    })
+
+    with patch("scripts.check_host_idle.is_service_active", return_value=False), \
+         patch("scripts.check_host_idle.get_active_workers_count", return_value=0), \
+         patch("scripts.check_host_idle.get_mem_available_mb", return_value=1600):
+
+        res = check_host_idle()
+        assert res["fair_feeder_idle"] is True
+        assert res["ready_for_heavy_workload"] is True
+
+
 def test_check_host_idle_blocks_when_morning_active_or_services_running():
     # Case A: Morning active
     write_state({

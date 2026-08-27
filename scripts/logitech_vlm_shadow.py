@@ -13,6 +13,154 @@ from pathlib import Path
 from datetime import datetime, timezone
 import pytz
 
+from dataclasses import dataclass, asdict
+import copy
+from typing import List, Dict, Any, Optional, Tuple
+
+@dataclass
+class CameraTimelineInterval:
+    camera: str  # "TAPO" or "LOGITECH"
+    start_timestamp: str  # "YYYY-MM-DD HH:MM:SS" or "HH:MM:SS"
+    end_timestamp: str    # "YYYY-MM-DD HH:MM:SS" or "HH:MM:SS"
+    cat_presence: bool
+    identity: str  # "Dan", "Sanbo", "both", "none", "unsure"
+    identity_confidence: float  # 0.0 to 1.0
+    identity_evidence_quality: str  # "poor", "usable", "good", "high"
+    eating_evidence: str  # "yes", "no", "unsure"
+    source_artifact: str = ""
+    reconciled: bool = False
+    reconciliation_notes: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def parse_timeline_time(t_str: str) -> float:
+    t_str = str(t_str).strip()
+    if not t_str:
+        return 0.0
+    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y%m%d_%H%M%S", "%H:%M:%S", "%Y-%m-%dT%H:%M:%S"]:
+        try:
+            dt = datetime.strptime(t_str.split(".")[0].replace("Z", ""), fmt)
+            return dt.hour * 3600 + dt.minute * 60 + dt.second
+        except ValueError:
+            pass
+    try:
+        dt = datetime.strptime(t_str, "%H:%M")
+        return dt.hour * 3600 + dt.minute * 60
+    except ValueError:
+        pass
+    return 0.0
+
+
+def intervals_overlap(start1: str, end1: str, start2: str, end2: str) -> bool:
+    s1 = parse_timeline_time(start1)
+    e1 = parse_timeline_time(end1)
+    s2 = parse_timeline_time(start2)
+    e2 = parse_timeline_time(end2)
+    if e1 < s1:
+        e1 += 86400
+    if e2 < s2:
+        e2 += 86400
+    return max(s1, s2) < min(e1, e2)
+
+
+def reconcile_cross_camera_intervals(
+    tapo_intervals: List[CameraTimelineInterval],
+    logitech_intervals: List[CameraTimelineInterval]
+) -> Tuple[List[CameraTimelineInterval], List[CameraTimelineInterval]]:
+    """
+    Reconciles identity across TAPO (Room 1) and LOGITECH (Room 2) based on
+    physical exclusivity: two cats (Dan, Sanbo) cannot be in two rooms at the exact same moment.
+    """
+    reconciled_tapo = [copy.deepcopy(i) for i in tapo_intervals]
+    reconciled_logitech = [copy.deepcopy(i) for i in logitech_intervals]
+
+    for t_int in reconciled_tapo:
+        for l_int in reconciled_logitech:
+            if not intervals_overlap(t_int.start_timestamp, t_int.end_timestamp, l_int.start_timestamp, l_int.end_timestamp):
+                continue
+
+            # Check if TAPO has reliable identity establishing Dan in Room 1
+            tapo_is_reliable_dan = (
+                t_int.cat_presence and
+                t_int.identity.lower() == "dan" and
+                t_int.identity_evidence_quality.lower() != "poor" and
+                t_int.identity_confidence >= 0.75
+            )
+
+            # Check if TAPO has reliable identity establishing Sanbo in Room 1
+            tapo_is_reliable_sanbo = (
+                t_int.cat_presence and
+                t_int.identity.lower() == "sanbo" and
+                t_int.identity_evidence_quality.lower() != "poor" and
+                t_int.identity_confidence >= 0.75
+            )
+
+            if tapo_is_reliable_dan and l_int.cat_presence:
+                # Dan is in Room 1; cat in Room 2 (Logitech) cannot be Dan -> must be Sanbo
+                if l_int.identity.lower() != "sanbo":
+                    l_int.identity = "Sanbo"
+                    l_int.identity_confidence = max(l_int.identity_confidence, t_int.identity_confidence)
+                    l_int.reconciled = True
+                    l_int.reconciliation_notes = "Physical exclusion: Dan confirmed present at Tapo feeder during overlapping interval"
+
+            elif tapo_is_reliable_sanbo and l_int.cat_presence:
+                # Sanbo is in Room 1; cat in Room 2 (Logitech) cannot be Sanbo -> must be Dan
+                if l_int.identity.lower() != "dan":
+                    l_int.identity = "Dan"
+                    l_int.identity_confidence = max(l_int.identity_confidence, t_int.identity_confidence)
+                    l_int.reconciled = True
+                    l_int.reconciliation_notes = "Physical exclusion: Sanbo confirmed present at Tapo feeder during overlapping interval"
+
+    return reconciled_tapo, reconciled_logitech
+
+
+def apply_cross_camera_reconciliation_to_session(
+    session_data: Dict[str, Any],
+    tapo_intervals: List[CameraTimelineInterval]
+) -> Dict[str, Any]:
+    """
+    Applies cross-camera reconciliation to a single Logitech session_data dictionary.
+    """
+    if not tapo_intervals:
+        return session_data
+
+    l_int = CameraTimelineInterval(
+        camera="LOGITECH",
+        start_timestamp=session_data.get("session_start_time", ""),
+        end_timestamp=session_data.get("session_end_time", ""),
+        cat_presence=session_data.get("cat_identity", "none") != "none",
+        identity=session_data.get("cat_identity", "unsure"),
+        identity_confidence=float(session_data.get("confidence", 0.0)),
+        identity_evidence_quality=session_data.get("visibility", "unknown"),
+        eating_evidence=session_data.get("eating_evidence", "unsure"),
+        source_artifact=str(session_data.get("evidence_clip_count", ""))
+    )
+
+    _, reconciled_l = reconcile_cross_camera_intervals(tapo_intervals, [l_int])
+    rec = reconciled_l[0]
+
+    if rec.reconciled:
+        session_data["cat_identity"] = rec.identity
+        session_data["confidence"] = rec.identity_confidence
+        session_data["reconciled_by_cross_camera"] = True
+        session_data["reconciliation_notes"] = rec.reconciliation_notes
+        # Re-evaluate theft with reconciled identity
+        is_dan_at_sanbo = rec.identity in ["both", "Dan"]
+        is_eating = str(session_data.get("eating_evidence", "")).lower() == "yes"
+        primary_vis = session_data.get("visibility", "unknown")
+        needs_higher = session_data.get("needs_higher_model", False)
+        is_reliable_identity = (primary_vis.lower() != "poor") and (not needs_higher) and (rec.identity_confidence >= 0.75)
+        session_data["possible_food_theft"] = is_dan_at_sanbo and is_eating and is_reliable_identity
+        if "selected_files" in session_data:
+            session_data["temporal_presence"] = analyze_temporal_presence_and_kibble(
+                session_data["selected_files"], cat_identity=rec.identity
+            )
+
+    return session_data
+
+
 def load_env_safe():
     env_path = Path('.env')
     if env_path.exists():
@@ -938,13 +1086,22 @@ def build_vlm_session_report(selected_files, manifest_data, all_results, all_fai
     else:
         hand_interaction = "none observed"
 
-    # 7. Food Theft Flag
-    possible_food_theft = cat_identity in ["both", "Dan"]
-
-    # 8. Confidence & Higher Model Flag
+    # 7. Confidence & Higher Model Flag
     confidences = [r.get("confidence", 0.0) for r in all_results if isinstance(r.get("confidence"), (int, float))]
     confidence = round(float(np.mean(confidences)), 2) if confidences else 0.0
     needs_higher_model = any(r.get("needs_higher_model", False) for r in all_results) or (confidence < 0.75)
+
+    # 8. Food Theft Flag
+    # A theft warning requires:
+    # 1. Cat identity is Dan or both (at Sanbo's Logitech feeder)
+    # 2. Positive eating evidence ('yes')
+    # 3. Reliable visual evidence: visibility is not poor, not flagged as needing higher model, confidence >= 0.75
+    # 4. No cross-camera contradiction
+    primary_vis = all_results[0].get("visibility", "unknown") if all_results else "unknown"
+    is_dan_at_sanbo = cat_identity in ["both", "Dan"]
+    is_eating = str(eating_evidence).lower() == "yes"
+    is_reliable_identity = (primary_vis.lower() != "poor") and (not needs_higher_model) and (confidence >= 0.75)
+    possible_food_theft = is_dan_at_sanbo and is_eating and is_reliable_identity
 
     # 9. Failure Category (when failures occur)
     all_error_text = " ".join([str(f.get("error_message", "")) + " " + str(f.get("error_type", "")) for f in all_failed + all_skipped]).lower()
@@ -1279,8 +1436,11 @@ def format_compact_session_text(session_data, result=None, shadow_header=True, c
     lines.append(kibble_line)
 
     # Theft status
-    if theft or cat_id.lower() == "dan":
+    if theft:
         lines.append("⚠️ Possible theft by Dan")
+    elif cat_id.lower() in ["dan", "both"]:
+        # Identity or eating was not reliable enough to declare theft
+        lines.append("⚠️ Theft status unsure")
     elif cat_id.lower() in ["unsure", "unknown"]:
         lines.append("⚠️ Theft status unsure")
     else:

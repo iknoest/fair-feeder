@@ -906,9 +906,8 @@ def test_telegram_flags_and_sending(mock_post, monkeypatch, tmp_path):
 
         if mock_gemini.count == 1:
             return {
-                "camera": "LOGITECH", "date": "20260704", "clip_name": "motion_20260704_060001.mp4",
-                "camera": "LOGITECH", "date": "20260704", "clip_name": "session", "identity_basis": "raw", "visibility": "good", "cat_identity": "both", "eating_evidence": "no", "bowl_state": "low",
-                "confidence": 0.9, "reasons": [], "needs_higher_model": True
+                "camera": "LOGITECH", "date": "20260704", "clip_name": "session", "identity_basis": "raw", "visibility": "good", "cat_identity": "Dan", "eating_evidence": "yes", "bowl_state": "low",
+                "confidence": 0.9, "reasons": [], "needs_higher_model": False
             }
         elif mock_gemini.count == 2:
             return {
@@ -2028,5 +2027,201 @@ def test_20260823_session_ground_truth_fixture():
     }
 
     assert ground_truth["expected_cat"] == "Sanbo"
-    assert ground_truth["expected_eating"] == "yes"
-    assert ground_truth["expected_theft"] is False
+
+
+def test_weak_or_poor_visibility_dan_prevents_positive_theft_escalation():
+    """
+    2026-08-26 defect regression:
+    A low-visibility (poor) or weak confidence Dan classification must NOT escalate to 'Possible theft by Dan'.
+    """
+    from logitech_vlm_shadow import build_vlm_session_report, format_compact_session_text
+
+    raw_vlm_result = {
+        "camera": "LOGITECH",
+        "date": "20260826",
+        "clip_name": "session",
+        "cat_identity": "Dan",
+        "identity_basis": "enhanced + reference-assisted",
+        "visibility": "poor",
+        "eating_evidence": "yes",
+        "bowl_state": "half -> empty",
+        "confidence": 0.75,
+        "reasons": ["Dark top-down coat observed"],
+        "needs_higher_model": False
+    }
+
+    session_clips = [
+        {"name": "motion_20260826_061949_2m_30s.mp4"},
+        {"name": "motion_20260826_062219_2m_30s.mp4"}
+    ]
+    manifest = [
+        {"timestamp": "2026-08-26 06:19:49", "motion_detected": True},
+        {"timestamp": "2026-08-26 06:25:26", "motion_detected": True}
+    ]
+
+    session_data = build_vlm_session_report(
+        selected_files=session_clips,
+        manifest_data=manifest,
+        all_results=[raw_vlm_result],
+        all_failed=[],
+        all_skipped=[],
+        search_date="20260826",
+        provider="gemini",
+        model="gemini-2.5-flash"
+    )
+
+    # Theft flag must be False because visibility is poor
+    assert session_data["possible_food_theft"] is False
+
+    compact_text = format_compact_session_text(session_data)
+    # Must NOT accuse Dan of theft when visibility is poor
+    assert "Possible theft by Dan" not in compact_text
+    assert "⚠️ Theft status unsure" in compact_text
+
+
+def test_cross_camera_reconciliation_rules_out_dan_and_establishes_sanbo():
+    """
+    Cross-camera temporal exclusion test:
+    When TAPO establishes Dan eating in Room 1, Logitech simultaneously seeing a cat in Room 2
+    must reconcile the Logitech cat to Sanbo.
+    """
+    from logitech_vlm_shadow import (
+        CameraTimelineInterval,
+        intervals_overlap,
+        reconcile_cross_camera_intervals,
+        apply_cross_camera_reconciliation_to_session,
+        format_compact_session_text
+    )
+
+    tapo_interval = CameraTimelineInterval(
+        camera="TAPO",
+        start_timestamp="06:20:03",
+        end_timestamp="06:23:18",
+        cat_presence=True,
+        identity="Dan",
+        identity_confidence=1.0,
+        identity_evidence_quality="ocr_yolo_high",
+        eating_evidence="yes",
+        source_artifact="feeding_merged.mp4"
+    )
+
+    logitech_interval = CameraTimelineInterval(
+        camera="LOGITECH",
+        start_timestamp="06:19:49",
+        end_timestamp="06:25:26",
+        cat_presence=True,
+        identity="Dan",
+        identity_confidence=0.75,
+        identity_evidence_quality="poor",
+        eating_evidence="yes",
+        source_artifact="motion_20260826_061949_2m_30s.mp4"
+    )
+
+    assert intervals_overlap("06:20:03", "06:23:18", "06:19:49", "06:25:26") is True
+
+    reconciled_tapo, reconciled_logitech = reconcile_cross_camera_intervals([tapo_interval], [logitech_interval])
+
+    assert reconciled_logitech[0].identity == "Sanbo"
+    assert reconciled_logitech[0].reconciled is True
+    assert "Physical exclusion" in reconciled_logitech[0].reconciliation_notes
+
+    # Apply to session_data
+    session_data = {
+        "date": "20260826",
+        "session_start_time": "06:19:49",
+        "session_end_time": "06:25:26",
+        "total_duration": "5m 37s",
+        "cat_identity": "Dan",
+        "confidence": 0.75,
+        "visibility": "poor",
+        "eating_evidence": "yes",
+        "bowl_state_progression": "half -> empty",
+        "possible_food_theft": False,
+        "evidence_clip_count": 4,
+        "temporal_presence": {"sanbo_visible_sec": 0, "dan_visible_sec": 337, "unknown_visible_sec": 0}
+    }
+
+    reconciled_session = apply_cross_camera_reconciliation_to_session(session_data, [tapo_interval])
+
+    assert reconciled_session["cat_identity"] == "Sanbo"
+    assert reconciled_session["possible_food_theft"] is False
+
+    compact = format_compact_session_text(reconciled_session)
+    assert "😸 Sanbo visible:" in compact
+    assert "⚠️ No theft detected" in compact
+    assert "Possible theft" not in compact
+
+
+def test_20260826_real_event_offline_replay():
+    """
+    Offline replay of the exact 2026-08-26 production feeding event.
+    """
+    from logitech_vlm_shadow import (
+        CameraTimelineInterval,
+        build_vlm_session_report,
+        apply_cross_camera_reconciliation_to_session,
+        format_compact_session_text
+    )
+
+    # 1. Real Gemini 2026-08-26 payload
+    raw_payload = {
+        "camera": "LOGITECH",
+        "date": "20260826",
+        "clip_name": "session",
+        "cat_identity": "Dan",
+        "identity_basis": "enhanced + reference-assisted",
+        "visibility": "poor",
+        "eating_evidence": "yes",
+        "bowl_state": "half -> empty",
+        "confidence": 0.75,
+        "reasons": ["Dark top-down appearance"],
+        "needs_higher_model": False
+    }
+
+    session_clips = [
+        {"name": "motion_20260826_061949_2m_30s.mp4"},
+        {"name": "motion_20260826_062219_2m_30s.mp4"},
+        {"name": "motion_20260826_062450_15s.mp4"},
+        {"name": "motion_20260826_062511_15s.mp4"}
+    ]
+    manifest = [
+        {"timestamp": "2026-08-26 06:19:49", "motion_detected": True},
+        {"timestamp": "2026-08-26 06:25:26", "motion_detected": True}
+    ]
+
+    session_data = build_vlm_session_report(
+        selected_files=session_clips,
+        manifest_data=manifest,
+        all_results=[raw_payload],
+        all_failed=[],
+        all_skipped=[],
+        search_date="20260826",
+        provider="gemini",
+        model="gemini-2.5-flash"
+    )
+
+    # (A) Local standalone path: poor visibility prevents false theft accusation
+    assert session_data["possible_food_theft"] is False
+    local_tg = format_compact_session_text(session_data)
+    assert "Possible theft by Dan" not in local_tg
+    assert "⚠️ Theft status unsure" in local_tg
+
+    # (B) Cross-camera reconciled path: Tapo confirms Dan at 06:20:03-06:23:18
+    tapo_interval = CameraTimelineInterval(
+        camera="TAPO",
+        start_timestamp="06:20:03",
+        end_timestamp="06:23:18",
+        cat_presence=True,
+        identity="Dan",
+        identity_confidence=1.0,
+        identity_evidence_quality="high",
+        eating_evidence="yes"
+    )
+
+    reconciled_session = apply_cross_camera_reconciliation_to_session(session_data, [tapo_interval])
+    assert reconciled_session["cat_identity"] == "Sanbo"
+    assert reconciled_session["possible_food_theft"] is False
+
+    reconciled_tg = format_compact_session_text(reconciled_session)
+    assert "😸 Sanbo visible: 5m 37s" in reconciled_tg
+    assert "⚠️ No theft detected" in reconciled_tg

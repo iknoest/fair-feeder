@@ -101,7 +101,6 @@ def reconcile_cross_camera_intervals(
                 # Dan is in Room 1; cat in Room 2 (Logitech) cannot be Dan -> must be Sanbo
                 if l_int.identity.lower() != "sanbo":
                     l_int.identity = "Sanbo"
-                    l_int.identity_confidence = max(l_int.identity_confidence, t_int.identity_confidence)
                     l_int.reconciled = True
                     l_int.reconciliation_notes = "Physical exclusion: Dan confirmed present at Tapo feeder during overlapping interval"
 
@@ -109,7 +108,6 @@ def reconcile_cross_camera_intervals(
                 # Sanbo is in Room 1; cat in Room 2 (Logitech) cannot be Sanbo -> must be Dan
                 if l_int.identity.lower() != "dan":
                     l_int.identity = "Dan"
-                    l_int.identity_confidence = max(l_int.identity_confidence, t_int.identity_confidence)
                     l_int.reconciled = True
                     l_int.reconciliation_notes = "Physical exclusion: Sanbo confirmed present at Tapo feeder during overlapping interval"
 
@@ -122,6 +120,7 @@ def apply_cross_camera_reconciliation_to_session(
 ) -> Dict[str, Any]:
     """
     Applies cross-camera reconciliation to a single Logitech session_data dictionary.
+    Preserves camera-local visual identity, confidence, and visibility separately from reconciled final identity.
     """
     if not tapo_intervals:
         return session_data
@@ -142,11 +141,18 @@ def apply_cross_camera_reconciliation_to_session(
     rec = reconciled_l[0]
 
     if rec.reconciled:
+        # Preserve visual model's own local estimate
+        session_data["visual_cat_identity"] = session_data.get("cat_identity")
+        session_data["visual_confidence"] = session_data.get("confidence")
+        session_data["visual_visibility"] = session_data.get("visibility")
+
+        # Set reconciled final identity and explicit basis
         session_data["cat_identity"] = rec.identity
-        session_data["confidence"] = rec.identity_confidence
+        session_data["identity_basis"] = "cross-camera exclusion"
         session_data["reconciled_by_cross_camera"] = True
         session_data["reconciliation_notes"] = rec.reconciliation_notes
-        # Re-evaluate theft with reconciled identity
+
+        # Re-evaluate theft with reconciled identity (Sanbo at Sanbo feeder -> no theft)
         is_dan_at_sanbo = rec.identity in ["both", "Dan"]
         is_eating = str(session_data.get("eating_evidence", "")).lower() == "yes"
         primary_vis = session_data.get("visibility", "unknown")

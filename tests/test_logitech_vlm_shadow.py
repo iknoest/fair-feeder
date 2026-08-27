@@ -2144,6 +2144,9 @@ def test_cross_camera_reconciliation_rules_out_dan_and_establishes_sanbo():
     reconciled_session = apply_cross_camera_reconciliation_to_session(session_data, [tapo_interval])
 
     assert reconciled_session["cat_identity"] == "Sanbo"
+    assert reconciled_session["visual_cat_identity"] == "Dan"
+    assert reconciled_session["visual_confidence"] == 0.75
+    assert reconciled_session["identity_basis"] == "cross-camera exclusion"
     assert reconciled_session["possible_food_theft"] is False
 
     compact = format_compact_session_text(reconciled_session)
@@ -2220,6 +2223,9 @@ def test_20260826_real_event_offline_replay():
 
     reconciled_session = apply_cross_camera_reconciliation_to_session(session_data, [tapo_interval])
     assert reconciled_session["cat_identity"] == "Sanbo"
+    assert reconciled_session["visual_cat_identity"] == "Dan"
+    assert reconciled_session["visual_confidence"] == 0.75
+    assert reconciled_session["identity_basis"] == "cross-camera exclusion"
     assert reconciled_session["possible_food_theft"] is False
 
     reconciled_tg = format_compact_session_text(reconciled_session)

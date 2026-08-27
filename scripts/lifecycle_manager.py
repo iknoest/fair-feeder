@@ -197,6 +197,13 @@ def send_telegram_alert(text: str) -> bool:
         return False
 
 
+def _run_systemctl(action: str, unit: str) -> subprocess.CompletedProcess:
+    cmd = ["systemctl", action, unit]
+    if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() != 0 and shutil.which("sudo"):
+        cmd = ["sudo", "-n", "systemctl", action, unit]
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+
 def activate_morning() -> bool:
     """
     Transitions to MORNING_ACTIVE and starts heavy recorder services (cat-monitor, usb-monitor).
@@ -216,7 +223,7 @@ def activate_morning() -> bool:
     errors = []
     for svc in ["cat-monitor", "usb-monitor"]:
         try:
-            res = subprocess.run(["systemctl", "start", svc], capture_output=True, text=True, check=False)
+            res = _run_systemctl("start", svc)
             if res.returncode != 0:
                 errors.append(f"Failed to start {svc}: {res.stderr.strip()}")
         except Exception as e:
@@ -301,7 +308,7 @@ def drain_and_idle(max_wait_sec: int = 900) -> bool:
     # Stop heavy recorder services
     for svc in ["cat-monitor", "usb-monitor"]:
         try:
-            subprocess.run(["systemctl", "stop", svc], capture_output=True, text=True, check=False)
+            _run_systemctl("stop", svc)
         except Exception:
             pass
 

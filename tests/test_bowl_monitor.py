@@ -105,6 +105,54 @@ def test_sustained_bowl_absence_idle_alerts():
         assert monitor._alert_active is True
 
 
+def test_pattern_a_isolated_bad_check_cleared_by_subsequent_good_check():
+    empty_model = _Model([])
+    ok_model = _Model([[129, 43, 188, 83]])
+    monitor = motion_recorder.BowlPositionMonitor(_Reader(), ok_model)
+
+    alerts = []
+    with patch("motion_recorder.send_telegram_alert", side_effect=alerts.append), \
+         patch("motion_recorder.CAMERA_TYPE", "rtsp"):
+
+        t0 = 1000.0
+        # t0: single bad frame glitch
+        monitor.yolo_model = empty_model
+        with patch("time.time", return_value=t0):
+            monitor.tick()
+        assert monitor._bad_since == t0
+        assert len(alerts) == 0
+
+        # t0 + 30s: healthy detection occurs
+        monitor.yolo_model = ok_model
+        with patch("time.time", return_value=t0 + 30.0):
+            monitor.tick()
+        # Bad accumulator is immediately cleared
+        assert monitor._bad_since is None
+        assert len(alerts) == 0
+
+
+def test_pattern_b_intermittent_noise_never_fires_false_alert():
+    empty_model = _Model([])
+    ok_model = _Model([[129, 43, 188, 83]])
+    monitor = motion_recorder.BowlPositionMonitor(_Reader(), ok_model)
+
+    alerts = []
+    with patch("motion_recorder.send_telegram_alert", side_effect=alerts.append), \
+         patch("motion_recorder.CAMERA_TYPE", "rtsp"):
+
+        t0 = 1000.0
+        # Simulate 20 minutes (40 checks) of intermittent noise (2 good, 1 bad, 2 good, 1 bad...)
+        for check_idx in range(40):
+            current_time = t0 + check_idx * 30.0
+            monitor.yolo_model = empty_model if (check_idx % 3 == 0) else ok_model
+            with patch("time.time", return_value=current_time):
+                monitor.tick()
+
+        # Across 20 minutes of intermittent noise, ZERO false alerts fired
+        assert len(alerts) == 0
+        assert monitor._alert_active is False
+
+
 def test_active_feeding_suppresses_bowl_alert():
     model = _Model([])  # Bowl occluded by eating cat
     controller = _MockController(is_recording=True, cat_seen=True)

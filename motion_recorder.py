@@ -981,8 +981,9 @@ class BowlPositionMonitor:
                     self._alert_active = False
                     self._bad_since = None
             else:
-                if self._consecutive_good >= BOWL_RECOVERY_CONSECUTIVE_CHECKS:
-                    self._bad_since = None
+                # Normal healthy observation while no alert is active:
+                # Reset any stale unconfirmed bad accumulator so isolated/intermittent noise does not accumulate
+                self._bad_since = None
             return
 
         # Bowl not detected / bad while idle

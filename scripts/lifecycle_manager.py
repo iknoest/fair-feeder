@@ -331,6 +331,19 @@ def drain_and_idle(max_wait_sec: int = 900) -> bool:
     return True
 
 
+def get_rtsp_url() -> Optional[str]:
+    """Resolves the Tapo RTSP URL from RTSP_URL or TAPO_IP/USER/PASS credentials."""
+    rtsp = os.environ.get("RTSP_URL") or os.environ.get("TAPO_RTSP_URL")
+    if rtsp:
+        return rtsp
+    ip = os.environ.get("TAPO_IP")
+    user = os.environ.get("TAPO_USER")
+    passwd = os.environ.get("TAPO_PASS")
+    if ip and user and passwd:
+        return f"rtsp://{user}:{passwd}@{ip}:554/stream1"
+    return None
+
+
 def on_demand_capture(camera: str = "tapo", duration_sec: int = 10, out_path: Optional[str] = None, send_telegram: bool = False) -> Optional[str]:
     """
     Executes a bounded daytime capture without permanently waking heavy services.
@@ -362,9 +375,9 @@ def on_demand_capture(camera: str = "tapo", duration_sec: int = 10, out_path: Op
 
         cap = None
         if camera_upper == "TAPO":
-            rtsp_url = os.environ.get("RTSP_URL") or os.environ.get("TAPO_RTSP_URL")
+            rtsp_url = get_rtsp_url()
             if not rtsp_url:
-                raise ValueError("RTSP_URL environment variable is missing.")
+                raise ValueError("Tapo RTSP credentials (TAPO_IP, TAPO_USER, TAPO_PASS or RTSP_URL) are missing.")
             cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
         else:
             # Logitech USB camera
@@ -478,9 +491,9 @@ def evening_readiness(send_telegram_on_failure: bool = True) -> Tuple[bool, Dict
         results["issues"].append(f"Disk check failed: {e}")
 
     # 2. Check Tapo camera reachability
-    rtsp_url = os.environ.get("RTSP_URL") or os.environ.get("TAPO_RTSP_URL")
+    rtsp_url = get_rtsp_url()
     if not rtsp_url:
-        results["issues"].append("Tapo RTSP_URL is not configured in .env")
+        results["issues"].append("Tapo RTSP credentials (TAPO_IP, TAPO_USER, TAPO_PASS or RTSP_URL) missing from .env")
     else:
         try:
             import cv2
@@ -493,7 +506,7 @@ def evening_readiness(send_telegram_on_failure: bool = True) -> Tuple[bool, Dict
         except Exception as e:
             results["issues"].append(f"Tapo RTSP connection failed: {e}")
 
-    if not results["tapo_reachable"] and "Tapo RTSP_URL is not configured" not in "".join(results["issues"]):
+    if not results["tapo_reachable"] and "Tapo RTSP credentials" not in "".join(results["issues"]):
         results["issues"].append("Tapo camera unreachable or returned empty frame")
 
     # 3. Check Logitech USB camera

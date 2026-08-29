@@ -328,6 +328,16 @@ def drain_and_idle(max_wait_sec: int = 900) -> bool:
     write_state(state_data)
 
     print(f"✅ DAYTIME_IDLE active. Remaining Fair Feeder PSS: {total_pss_kb // 1024} MB. MemAvailable: {mem_available} MB.")
+
+    # Event-driven post-drain trigger: dispatch morning report immediately upon evidence durability
+    try:
+        from scripts.daily_watchdog import check_and_recover_report
+        today_date = now.strftime("%Y%m%d")
+        print(f"🚀 Triggering event-driven breakfast report dispatch for {today_date}...")
+        check_and_recover_report(date_str=today_date)
+    except Exception as e:
+        print(f"⚠️ Post-drain report dispatch encountered: {e}")
+
     return True
 
 

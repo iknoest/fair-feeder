@@ -115,11 +115,13 @@ def test_drain_and_idle_stops_services_and_enters_daytime_idle():
          patch("subprocess.run") as mock_run, \
          patch("scripts.lifecycle_manager.get_fair_feeder_processes", return_value=[]), \
          patch("scripts.lifecycle_manager.get_mem_available_mb", return_value=1750), \
+         patch("scripts.daily_watchdog.check_and_recover_report") as mock_watchdog, \
          patch("time.sleep"):
 
         mock_run.return_value = MagicMock(returncode=0)
         success = drain_and_idle(max_wait_sec=10)
         assert success is True
+        mock_watchdog.assert_called_once()
 
         state = read_state()
         assert state["state"] == LifecycleState.DAYTIME_IDLE

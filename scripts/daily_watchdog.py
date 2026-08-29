@@ -31,8 +31,65 @@ def get_amsterdam_date_str() -> str:
     return datetime.now(tz).strftime("%Y%m%d")
 
 
+def parse_github_datetime_amsterdam(dt_str: str) -> Optional[datetime]:
+    """Parses GitHub ISO-8601 UTC timestamp and converts to Europe/Amsterdam timezone."""
+    if not dt_str:
+        return None
+    try:
+        # e.g. "2026-08-29T07:15:23Z"
+        clean_str = dt_str.replace("Z", "+00:00")
+        dt_utc = datetime.fromisoformat(clean_str)
+        tz = pytz.timezone("Europe/Amsterdam")
+        return dt_utc.astimezone(tz)
+    except Exception:
+        return None
+
+
+def get_github_token() -> Optional[str]:
+    """Resolves GitHub Token from env, .env file, or Infisical Universal Auth."""
+    # 1. Check environment variables
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        return token
+
+    # 2. Check local .env file
+    env_path = repo_root / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                if k.strip() in ["GITHUB_TOKEN", "GH_TOKEN"]:
+                    val = v.strip().strip('"').strip("'")
+                    if val:
+                        return val
+
+    # 3. Check Infisical Universal Auth
+    client_id = os.environ.get("INFISICAL_ID")
+    client_secret = os.environ.get("INFISICAL_SECRET")
+    proj_id = os.environ.get("INFISICAL_PROJECT_ID")
+    if client_id and client_secret and proj_id:
+        try:
+            import requests
+            r = requests.post("https://app.infisical.com/api/v1/auth/universal-auth/login",
+                              json={"clientId": client_id, "clientSecret": client_secret}, timeout=10)
+            if r.status_code == 200:
+                auth_token = r.json().get("accessToken")
+                r2 = requests.get(f"https://app.infisical.com/api/v3/secrets/raw?workspaceId={proj_id}&environment=dev",
+                                  headers={"Authorization": f"Bearer {auth_token}"}, timeout=10)
+                if r2.status_code == 200:
+                    secrets = r2.json().get("secrets", [])
+                    for s in secrets:
+                        if s.get("secretKey") in ["GITHUB_TOKEN", "GH_TOKEN"]:
+                            return s.get("secretValue")
+        except Exception:
+            pass
+
+    return None
+
+
 def is_report_delivered(date_str: str) -> bool:
-    """Checks if report for date_str is recorded as delivered locally or in tracker."""
+    """Checks if report for date_str is recorded as delivered locally."""
     if REPORT_TRACKER_FILE.exists():
         try:
             tracker = json.loads(REPORT_TRACKER_FILE.read_text(encoding="utf-8"))
@@ -67,15 +124,16 @@ def check_and_recover_report(date_str: Optional[str] = None, force_dispatch: boo
     print(f"[{datetime.now().isoformat()}] Checking breakfast report status for {date_str}...")
 
     if is_report_delivered(date_str) and not force_dispatch:
-        print(f"✅ Report for {date_str} already delivered. No action needed.")
+        print(f"✅ Report for {date_str} already recorded as delivered. No action needed.")
         return True
 
-    # Check GitHub Actions API for existing runs on target date
-    gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    # Resolve GitHub API credentials
+    gh_token = get_github_token()
     repo = os.environ.get("GITHUB_REPOSITORY", "iknoest/fair-feeder")
 
     if not gh_token:
-        print("⚠️ GITHUB_TOKEN not configured. Checking local delivery only.")
+        err = "⚠️ GITHUB_TOKEN not configured. Cannot query GitHub API or dispatch workflow."
+        print(err)
         return False
 
     import requests
@@ -86,7 +144,7 @@ def check_and_recover_report(date_str: Optional[str] = None, force_dispatch: boo
     }
 
     # 1. Query recent workflow runs
-    runs_url = f"https://api.github.com/repos/{repo}/actions/workflows/morning-report.yml/runs?per_page=5"
+    runs_url = f"https://api.github.com/repos/{repo}/actions/workflows/morning-report.yml/runs?per_page=10"
     try:
         r = requests.get(runs_url, headers=headers, timeout=10)
         if r.status_code == 200:
@@ -95,15 +153,18 @@ def check_and_recover_report(date_str: Optional[str] = None, force_dispatch: boo
                 status = run.get("status")
                 conclusion = run.get("conclusion")
                 created_at = run.get("created_at", "")
-                if status in ["in_progress", "queued"]:
-                    print(f"ℹ️ Workflow run {run.get('id')} is currently {status}. Watchdog will not duplicate.")
-                    return True
-                if conclusion == "success" and created_at.startswith(f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"):
-                    print(f"✅ Successful workflow run {run.get('id')} found for today.")
-                    record_report_delivered(date_str, {"github_run_id": run.get("id")})
-                    return True
+                amsterdam_dt = parse_github_datetime_amsterdam(created_at)
+
+                if amsterdam_dt and amsterdam_dt.strftime("%Y%m%d") == date_str:
+                    if status in ["in_progress", "queued"]:
+                        print(f"ℹ️ Workflow run {run.get('id')} for {date_str} is currently {status}. Watchdog will not duplicate.")
+                        return True
+                    if conclusion == "success" and not force_dispatch:
+                        print(f"✅ Successful workflow run {run.get('id')} found for {date_str}.")
+                        record_report_delivered(date_str, {"github_run_id": run.get("id")})
+                        return True
     except Exception as e:
-        print(f"⚠️ Error querying GitHub Actions: {e}")
+        print(f"⚠️ Error querying GitHub Actions API: {e}")
 
     # 2. If not delivered and not running, trigger workflow dispatch
     print(f"🚨 Report for {date_str} not delivered or running. Dispatching GitHub Actions workflow...")

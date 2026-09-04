@@ -25,8 +25,9 @@ class CameraTimelineInterval:
     cat_presence: bool
     identity: str  # "Dan", "Sanbo", "both", "none", "unsure"
     identity_confidence: float  # 0.0 to 1.0
-    identity_evidence_quality: str  # "poor", "usable", "good", "high"
-    eating_evidence: str  # "yes", "no", "unsure"
+    identity_evidence_quality: str = "usable"  # "poor", "usable", "good", "high"
+    eating_evidence: str = "unsure"  # "yes", "no", "unsure"
+    identity_basis: str = ""  # "FeedingTracker accepted phase", "visual", etc.
     source_artifact: str = ""
     reconciled: bool = False
     reconciliation_notes: str = ""
@@ -85,16 +86,20 @@ def reconcile_cross_camera_intervals(
             tapo_is_reliable_dan = (
                 t_int.cat_presence and
                 t_int.identity.lower() == "dan" and
-                t_int.identity_evidence_quality.lower() != "poor" and
-                t_int.identity_confidence >= 0.75
+                (
+                    t_int.identity_basis == "FeedingTracker accepted phase" or
+                    (t_int.identity_evidence_quality.lower() != "poor" and t_int.identity_confidence >= 0.75)
+                )
             )
 
             # Check if TAPO has reliable identity establishing Sanbo in Room 1
             tapo_is_reliable_sanbo = (
                 t_int.cat_presence and
                 t_int.identity.lower() == "sanbo" and
-                t_int.identity_evidence_quality.lower() != "poor" and
-                t_int.identity_confidence >= 0.75
+                (
+                    t_int.identity_basis == "FeedingTracker accepted phase" or
+                    (t_int.identity_evidence_quality.lower() != "poor" and t_int.identity_confidence >= 0.75)
+                )
             )
 
             if tapo_is_reliable_dan and l_int.cat_presence:
@@ -1647,6 +1652,7 @@ def main():
     parser.add_argument("--send-still-images", action="store_true", help="Optionally send static before/after images in Telegram")
     parser.add_argument("--reference-dir", type=str, default=None, help="Path to private reference image directory")
     parser.add_argument("--custom-header", type=str, default=None, help="Custom header text for shadow report")
+    parser.add_argument("--tapo-timeline", type=str, default=None, help="Path to tapo_timeline_{date}.json")
     args = parser.parse_args()
 
     if args.date is None:
@@ -1657,6 +1663,9 @@ def main():
 
     if args.out_dir is None:
         args.out_dir = f".agent/artifacts/logitech_vlm_shadow_{args.date}"
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     telegram_token = None
     telegram_chat_id = None
@@ -1716,18 +1725,47 @@ def main():
         print("[STOP] GDRIVE_LOGITECH_FOLDER_ID is missing from environment.")
         sys.exit(1)
 
+    out_folder_id = os.environ.get('GDRIVE_OUTPUT_FOLDER_ID') or folder_id
+
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
 
+    drive = None
     try:
         key_dict = json.loads(os.environ.get('GDRIVE_SERVICE_ACCOUNT_KEY', '{}'))
         creds = service_account.Credentials.from_service_account_info(
-            key_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
+            key_dict, scopes=['https://www.googleapis.com/auth/drive']
         )
         drive = build('drive', 'v3', credentials=creds)
     except Exception as e:
         print(f"[STOP] Failed to connect to Drive: {sanitize_error_message(str(e))}")
         sys.exit(1)
+
+    try:
+        from scripts.delivery_ledger import (
+            load_delivery_ledger,
+            save_delivery_ledger,
+            is_item_delivered,
+            record_item_delivered,
+            is_camera_fully_delivered,
+            commit_camera_completion,
+            load_tapo_timeline
+        )
+    except ImportError:
+        from delivery_ledger import (
+            load_delivery_ledger,
+            save_delivery_ledger,
+            is_item_delivered,
+            record_item_delivered,
+            is_camera_fully_delivered,
+            commit_camera_completion,
+            load_tapo_timeline
+        )
+
+    delivery_ledger = load_delivery_ledger(drive, out_folder_id, args.date, "LOGITECH", local_fallback_dir=out_dir)
+    if is_camera_fully_delivered(delivery_ledger) and args.date != "REPLAY_TEST":
+        print(f"✅ Preflight: Date {args.date} LOGITECH already fully delivered according to durable ledger. Exiting early.")
+        sys.exit(0)
 
     out_dir = Path(args.out_dir)
 
@@ -1785,10 +1823,42 @@ def main():
         }
         with open(out_dir / "logitech_vlm_summary.json", "w") as jf:
             json.dump(no_clips_summary, jf, indent=2)
+        commit_camera_completion(drive, out_folder_id, delivery_ledger, required_items=[], local_fallback_dir=out_dir)
         sys.exit(0)
 
     sessions = group_clips_into_sessions(selected_files, gap_threshold_sec=10)
     print(f"ℹ️ {len(selected_files)} clip(s) grouped into {len(sessions)} feeding session(s) (gap threshold: 10s)")
+
+    # Load TAPO timeline for cross-camera reconciliation
+    tapo_timeline_data = None
+    if args.tapo_timeline and Path(args.tapo_timeline).exists():
+        try:
+            with open(args.tapo_timeline, "r") as f:
+                tapo_timeline_data = json.load(f)
+        except Exception as e:
+            print(f"[CrossCamera] Warning reading --tapo-timeline file {args.tapo_timeline}: {e}")
+
+    if not tapo_timeline_data:
+        tapo_timeline_data = load_tapo_timeline(drive, out_folder_id, args.date, local_dir=out_dir)
+        if not tapo_timeline_data:
+            tapo_timeline_data = load_tapo_timeline(drive, out_folder_id, args.date, local_dir=Path("."))
+
+    tapo_intervals: List[CameraTimelineInterval] = []
+    if tapo_timeline_data and "feeding_phases" in tapo_timeline_data:
+        print(f"ℹ️ Ingested TAPO timeline for {args.date} with {len(tapo_timeline_data['feeding_phases'])} feeding phase(s).")
+        for ph in tapo_timeline_data["feeding_phases"]:
+            tapo_intervals.append(CameraTimelineInterval(
+                camera="TAPO",
+                start_timestamp=ph.get("start", ""),
+                end_timestamp=ph.get("end", ""),
+                cat_presence=True,
+                identity=ph.get("cat", "Dan"),
+                identity_confidence=float(ph.get("confidence", 0.95)),
+                identity_evidence_quality=ph.get("evidence_quality", "usable"),
+                identity_basis=ph.get("identity_basis", "FeedingTracker accepted phase"),
+                eating_evidence="yes" if ph.get("dan_bowl_seconds", 0) > 0 else "unsure",
+                source_artifact="tapo_timeline"
+            ))
 
     manifest_data = []
     clip_domains = {}
@@ -2148,6 +2218,16 @@ def main():
                 search_date, args.vlm_provider, args.vlm_model
             )
             sess_data["session_index"] = s_idx
+
+            # Rule D: Cross-camera reconciliation ONLY if VLM establishes cat presence
+            vlm_cat_present = (
+                bool(session_results) and
+                sess_data.get("cat_identity") not in ["none", "unknown", "unsure", None] and
+                sess_data.get("cat_identity", "") != ""
+            )
+            if vlm_cat_present and tapo_intervals:
+                sess_data = apply_cross_camera_reconciliation_to_session(sess_data, tapo_intervals)
+
             all_session_data.append(sess_data)
             with open(out_dir / f"logitech_vlm_session_{s_idx}_summary.json", "w") as f_s:
                 json.dump(sess_data, f_s, indent=2)
@@ -2185,6 +2265,22 @@ def main():
 
         with open(out_dir / "logitech_vlm_shadow_summary.json", "w") as f_sum:
             json.dump(summary, f_sum, indent=2)
+
+        delivery_ledger["analysis_completed"] = True
+        save_delivery_ledger(drive, out_folder_id, delivery_ledger, local_fallback_dir=out_dir)
+        try:
+            save_durable_artifact(
+                drive, out_folder_id, f"logitech_vlm_results_{search_date}.json",
+                json.dumps(all_results, indent=2).encode("utf-8"),
+                local_fallback_dir=out_dir
+            )
+            save_durable_artifact(
+                drive, out_folder_id, f"logitech_vlm_shadow_summary_{search_date}.json",
+                json.dumps(summary, indent=2).encode("utf-8"),
+                local_fallback_dir=out_dir
+            )
+        except Exception as e:
+            print(f"[VLM] Warning caching durable VLM results to Drive: {e}")
 
         if all_session_data:
             with open(out_dir / "logitech_vlm_session_summary.json", "w") as f_sess:
@@ -2231,8 +2327,7 @@ def main():
                 "message_starts_with_shadow": tg_text.startswith("[SHADOW]"),
                 "telegram_send_fully_successful": False
             }
-
-            # Check if there are meaningful sessions
+                    # Check if there are meaningful sessions
             meaningful_sessions = []
             for i, sess in enumerate(all_session_data, 1):
                 matching_results = [r for r in all_results if r.get("clip_name") in [f"session_{i}", "session", str(i)]]
@@ -2244,28 +2339,42 @@ def main():
                 print("[VLM] No meaningful feeding activity detected (e.g. cat=none & eating=no). Suppressing Telegram transmission.")
                 send_summary["suppressed_no_feeding"] = True
                 send_summary["telegram_send_fully_successful"] = True
+                commit_camera_completion(drive, out_folder_id, delivery_ledger, required_items=[], local_fallback_dir=out_dir)
                 with open(out_dir / "telegram_shadow_send_summary.json", "w") as jf:
                     json.dump(send_summary, jf, indent=2)
             else:
+                required_items = ["summary"]
+                for (i, sess, res) in meaningful_sessions:
+                    s_name = f"session_{i}" if len(all_session_data) > 1 else "session"
+                    if getattr(args, "send_still_images", False):
+                        required_items.append(f"photo_{s_name}")
+                    required_items.append(f"video_{s_name}")
+
                 import requests
                 try:
                     # 1. Send text
-                    url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
-                    resp = requests.post(url, data={"chat_id": telegram_chat_id, "text": tg_text}, timeout=20)
+                    if is_item_delivered(delivery_ledger, "summary"):
+                        print("[VLM] Text summary already delivered according to ledger. Skipping.")
+                        send_summary["telegram_text_sent"] = True
+                    else:
+                        url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+                        resp = requests.post(url, data={"chat_id": telegram_chat_id, "text": tg_text}, timeout=20)
+                        msg_id = None
+                        try:
+                            r_json = resp.json()
+                            msg_id = r_json.get("result", {}).get("message_id")
+                            send_summary["delivery_evidence"].append({
+                                "type": "text",
+                                "status": resp.status_code,
+                                "ok": r_json.get("ok"),
+                                "message_id": msg_id
+                            })
+                        except Exception:
+                            pass
 
-                    try:
-                        r_json = resp.json()
-                        send_summary["delivery_evidence"].append({
-                            "type": "text",
-                            "status": resp.status_code,
-                            "ok": r_json.get("ok"),
-                            "message_id": r_json.get("result", {}).get("message_id")
-                        })
-                    except Exception:
-                        pass
-
-                    resp.raise_for_status()
-                    send_summary["telegram_text_sent"] = True
+                        resp.raise_for_status()
+                        send_summary["telegram_text_sent"] = True
+                        record_item_delivered(drive, out_folder_id, delivery_ledger, "summary", message_id=msg_id, local_fallback_dir=out_dir)
 
                     # 2. For meaningful sessions, send ONE compact playable enhanced video (and optionally photo if explicitly configured)
                     for (i, sess, res) in meaningful_sessions:
@@ -2273,101 +2382,120 @@ def main():
 
                         # Optionally send before/after still image if --send-still-images is explicitly enabled
                         if getattr(args, "send_still_images", False):
-                            ba_path = out_dir / f"logitech_vlm_before_after_{s_name}.jpg"
-                            if not ba_path.exists():
-                                ba_path = out_dir / "logitech_vlm_before_after_session.jpg"
-                            if not ba_path.exists():
-                                ba_path = out_dir / f"logitech_vlm_contact_sheet_{s_name}_comparison.jpg"
-                            if not ba_path.exists():
-                                ba_path = out_dir / f"logitech_vlm_contact_sheet_{s_name}.jpg"
+                            photo_key = f"photo_{s_name}"
+                            if is_item_delivered(delivery_ledger, photo_key):
+                                print(f"[VLM] Photo {photo_key} already delivered according to ledger. Skipping.")
+                                send_summary["telegram_images_sent"] += 1
+                            else:
+                                ba_path = out_dir / f"logitech_vlm_before_after_{s_name}.jpg"
+                                if not ba_path.exists():
+                                    ba_path = out_dir / "logitech_vlm_before_after_session.jpg"
+                                if not ba_path.exists():
+                                    ba_path = out_dir / f"logitech_vlm_contact_sheet_{s_name}_comparison.jpg"
+                                if not ba_path.exists():
+                                    ba_path = out_dir / f"logitech_vlm_contact_sheet_{s_name}.jpg"
 
-                            if ba_path.exists():
-                                send_summary["telegram_images_attempted"] += 1
-                                photo_url = f"https://api.telegram.org/bot{telegram_token}/sendPhoto"
-                                iso_date = f"{args.date[:4]}-{args.date[4:6]}-{args.date[6:8]}"
-                                caption = f"[SHADOW] {iso_date} {s_name} Pre-feed vs Post-feed (Enhanced)"
-                                with open(ba_path, "rb") as photo_f:
-                                    p_resp = requests.post(photo_url, data={"chat_id": telegram_chat_id, "caption": caption}, files={"photo": photo_f}, timeout=30)
-                                    try:
-                                        pr_json = p_resp.json()
-                                        send_summary["delivery_evidence"].append({
-                                            "type": "photo",
-                                            "status": p_resp.status_code,
-                                            "ok": pr_json.get("ok"),
-                                            "message_id": pr_json.get("result", {}).get("message_id")
-                                        })
-                                    except Exception:
-                                        pass
-                                    p_resp.raise_for_status()
-                                    send_summary["telegram_images_sent"] += 1
-                                    send_summary["attached_media"].append(ba_path.name)
-
-                        # Generate runner-side enhanced session video and send
-                        session_clips = sessions[i-1] if i-1 < len(sessions) else []
-                        if session_clips:
-                            raw_clip_paths = [out_dir / c['name'] for c in session_clips if (out_dir / c['name']).exists()]
-                            if raw_clip_paths:
-                                enh_video_target = out_dir / f"logitech_vlm_{s_name}_enhanced.mp4"
-                                if not enh_video_target.exists():
-                                    print(f"[VLM] Generating runner-side enhanced session video for {len(raw_clip_paths)} clip(s)...")
-                                    final_video_path = generate_enhanced_video(raw_clip_paths, enh_video_target)
-                                else:
-                                    final_video_path = enh_video_target
-
-                                # Rigorously validate video content before sending
-                                is_val, val_msg, val_details = False, "unknown", {}
-                                try:
-                                    from telegram_video_guard import validate_video_content
-                                    is_val, val_msg, val_details = validate_video_content(final_video_path)
-                                except Exception as e:
-                                    val_msg = str(e)
-
-                                if not is_val:
-                                    print(f"[VLM] ⚠️ Enhanced video validation failed: {val_msg}, skipping Telegram video send")
-                                    continue
-
-                                video_size = final_video_path.stat().st_size
-                                vid_dur = val_details.get("duration_sec")
-                                if video_size < 45 * 1024 * 1024:
-                                    send_summary["telegram_videos_attempted"] += 1
-                                    vid_url = f"https://api.telegram.org/bot{telegram_token}/sendVideo"
-                                    start_t = sess.get('session_start_time', '')
-                                    end_t = sess.get('session_end_time', '')
-                                    dur_t = sess.get('total_duration', '')
-                                    vid_caption = f"[SHADOW][LOGITECH] Enhanced feeding video · 4x playback\nSource: {start_t}–{end_t} · {dur_t}"
-                                    with open(final_video_path, "rb") as vid_f:
-                                        v_resp = requests.post(
-                                            vid_url,
-                                            data={"chat_id": telegram_chat_id, "caption": vid_caption, "supports_streaming": True},
-                                            files={"video": vid_f},
-                                            timeout=120
-                                        )
-                                        vr_json = {}
+                                if ba_path.exists():
+                                    send_summary["telegram_images_attempted"] += 1
+                                    photo_url = f"https://api.telegram.org/bot{telegram_token}/sendPhoto"
+                                    iso_date = f"{args.date[:4]}-{args.date[4:6]}-{args.date[6:8]}"
+                                    caption = f"[SHADOW] {iso_date} {s_name} Pre-feed vs Post-feed (Enhanced)"
+                                    with open(ba_path, "rb") as photo_f:
+                                        p_resp = requests.post(photo_url, data={"chat_id": telegram_chat_id, "caption": caption}, files={"photo": photo_f}, timeout=30)
+                                        p_msg_id = None
                                         try:
-                                            vr_json = v_resp.json()
+                                            pr_json = p_resp.json()
+                                            p_msg_id = pr_json.get("result", {}).get("message_id")
+                                            send_summary["delivery_evidence"].append({
+                                                "type": "photo",
+                                                "status": p_resp.status_code,
+                                                "ok": pr_json.get("ok"),
+                                                "message_id": p_msg_id
+                                            })
                                         except Exception:
                                             pass
-                                        video_ev = {
-                                            "type": "video",
-                                            "status": v_resp.status_code,
-                                            "ok": vr_json.get("ok", False),
-                                            "message_id": vr_json.get("result", {}).get("message_id"),
-                                            "generated_path": final_video_path.name,
-                                            "sha256": val_details.get("sha256"),
-                                            "codec": val_details.get("codec"),
-                                            "pix_fmt": val_details.get("pix_fmt"),
-                                            "width": val_details.get("width"),
-                                            "height": val_details.get("height"),
-                                            "final_size_bytes": video_size,
-                                            "duration_sec": vid_dur
-                                        }
-                                        send_summary["delivery_evidence"].append(video_ev)
-                                        v_resp.raise_for_status()
-                                        send_summary["telegram_videos_sent"] += 1
-                                        send_summary["attached_media"].append(final_video_path.name)
+                                        p_resp.raise_for_status()
+                                        send_summary["telegram_images_sent"] += 1
+                                        send_summary["attached_media"].append(ba_path.name)
+                                        record_item_delivered(drive, out_folder_id, delivery_ledger, photo_key, message_id=p_msg_id, local_fallback_dir=out_dir)
+
+                        # Generate runner-side enhanced session video and send
+                        vid_key = f"video_{s_name}"
+                        if is_item_delivered(delivery_ledger, vid_key):
+                            print(f"[VLM] Video {vid_key} already delivered according to ledger. Skipping.")
+                            send_summary["telegram_videos_sent"] += 1
+                        else:
+                            session_clips = sessions[i-1] if i-1 < len(sessions) else []
+                            if session_clips:
+                                raw_clip_paths = [out_dir / c['name'] for c in session_clips if (out_dir / c['name']).exists()]
+                                if raw_clip_paths:
+                                    enh_video_target = out_dir / f"logitech_vlm_{s_name}_enhanced.mp4"
+                                    if not enh_video_target.exists():
+                                        print(f"[VLM] Generating runner-side enhanced session video for {len(raw_clip_paths)} clip(s)...")
+                                        final_video_path = generate_enhanced_video(raw_clip_paths, enh_video_target)
+                                    else:
+                                        final_video_path = enh_video_target
+
+                                    # Rigorously validate video content before sending
+                                    is_val, val_msg, val_details = False, "unknown", {}
+                                    try:
+                                        from telegram_video_guard import validate_video_content
+                                        is_val, val_msg, val_details = validate_video_content(final_video_path)
+                                    except Exception as e:
+                                        val_msg = str(e)
+
+                                    if not is_val:
+                                        print(f"[VLM] ⚠️ Enhanced video validation failed: {val_msg}, skipping Telegram video send")
+                                        continue
+
+                                    video_size = final_video_path.stat().st_size
+                                    vid_dur = val_details.get("duration_sec")
+                                    if video_size < 45 * 1024 * 1024:
+                                        send_summary["telegram_videos_attempted"] += 1
+                                        vid_url = f"https://api.telegram.org/bot{telegram_token}/sendVideo"
+                                        start_t = sess.get('session_start_time', '')
+                                        end_t = sess.get('session_end_time', '')
+                                        dur_t = sess.get('total_duration', '')
+                                        vid_caption = f"[SHADOW][LOGITECH] Enhanced feeding video · 4x playback\nSource: {start_t}–{end_t} · {dur_t}"
+                                        with open(final_video_path, "rb") as vid_f:
+                                            v_resp = requests.post(
+                                                vid_url,
+                                                data={"chat_id": telegram_chat_id, "caption": vid_caption, "supports_streaming": True},
+                                                files={"video": vid_f},
+                                                timeout=120
+                                            )
+                                            vr_json = {}
+                                            v_msg_id = None
+                                            try:
+                                                vr_json = v_resp.json()
+                                                v_msg_id = vr_json.get("result", {}).get("message_id")
+                                            except Exception:
+                                                pass
+                                            video_ev = {
+                                                "type": "video",
+                                                "status": v_resp.status_code,
+                                                "ok": vr_json.get("ok", False),
+                                                "message_id": v_msg_id,
+                                                "generated_path": final_video_path.name,
+                                                "sha256": val_details.get("sha256"),
+                                                "codec": val_details.get("codec"),
+                                                "pix_fmt": val_details.get("pix_fmt"),
+                                                "width": val_details.get("width"),
+                                                "height": val_details.get("height"),
+                                                "final_size_bytes": video_size,
+                                                "duration_sec": vid_dur
+                                            }
+                                            send_summary["delivery_evidence"].append(video_ev)
+                                            v_resp.raise_for_status()
+                                            send_summary["telegram_videos_sent"] += 1
+                                            send_summary["attached_media"].append(final_video_path.name)
+                                            record_item_delivered(drive, out_folder_id, delivery_ledger, vid_key, message_id=v_msg_id, local_fallback_dir=out_dir)
+
+                    # Commit camera completion if all required items succeeded
+                    commit_camera_completion(drive, out_folder_id, delivery_ledger, required_items=required_items, local_fallback_dir=out_dir)
 
                     send_summary["total_messages_delivered"] = (1 if send_summary["telegram_text_sent"] else 0) + send_summary["telegram_images_sent"] + send_summary["telegram_videos_sent"]
-                    send_summary["telegram_send_fully_successful"] = True
+                    send_summary["telegram_send_fully_successful"] = is_camera_fully_delivered(delivery_ledger)
 
                     # Print delivery evidence for GitHub Actions logs
                     print("[VLM] Telegram delivery evidence:")

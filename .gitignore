@@ -41,3 +41,5 @@ Thumbs.db
 *token*.json
 job-tracker-*.json
 .private_refs/
+state.json
+scratch/

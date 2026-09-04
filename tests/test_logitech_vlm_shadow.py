@@ -1500,7 +1500,7 @@ def test_morning_report_workflow_vlm_isolation():
     content = workflow_path.read_text(encoding="utf-8")
 
     assert "Run Logitech Gemini VLM Shadow Report" in content
-    assert "if: matrix.camera == 'LOGITECH'" in content
+    assert "logitech-report:" in content or "if: matrix.camera == 'LOGITECH'" in content
     assert "--run-vlm" in content
     assert "--confirm-cost" in content
     assert "--vlm-provider gemini" in content

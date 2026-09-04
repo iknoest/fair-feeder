@@ -29,6 +29,7 @@ except ImportError:
     fcntl = None
 
 repo_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(repo_root))
 DEFAULT_LEDGER_PATH = repo_root / "upload_ledger.json"
 DEFAULT_UPLOAD_TIMEOUT_SEC = 600
 DEFAULT_VERIFY_TIMEOUT_SEC = 30

@@ -253,12 +253,17 @@ def activate_morning() -> bool:
     return True
 
 
-def check_drain_prerequisites(temp_dirs: Optional[List[Path]] = None) -> Tuple[bool, str]:
+def check_drain_prerequisites(
+    temp_dirs: Optional[List[Path]] = None,
+    check_uploads: bool = True,
+    upload_queue: Optional[Any] = None,
+) -> Tuple[bool, str]:
     """
     Verifies whether local morning drain is complete:
     - No active recording in progress
     - No child ffmpeg/rclone workers running
     - Temporary recording folders empty
+    - Durable upload queue has no pending/unresolved uploads
     """
     if temp_dirs is None:
         temp_dirs = [
@@ -278,34 +283,50 @@ def check_drain_prerequisites(temp_dirs: Optional[List[Path]] = None) -> Tuple[b
             if temp_files:
                 return False, f"{len(temp_files)} unfinished file(s) in {td.name}"
 
+    # 3. Check durable upload queue for unresolved items
+    if check_uploads:
+        try:
+            if upload_queue is None:
+                from scripts.upload_queue import UploadQueue
+                upload_queue = UploadQueue()
+            has_unresolved, count, details = upload_queue.has_unresolved_uploads()
+            if has_unresolved:
+                return False, f"{count} unresolved upload(s) in queue: {details}"
+        except Exception as e:
+            print(f"⚠️ Warning checking upload queue during drain: {e}")
+
     return True, "All recordings, finalizers, and uploads complete"
 
 
-def drain_and_idle(max_wait_sec: int = 900) -> bool:
+def drain_and_idle(max_wait_sec: int = 900, temp_dirs: Optional[List[Path]] = None) -> bool:
     """
     Waits for active recordings and workers to finish, then safely stops
     heavy services and enters DAYTIME_IDLE, releasing ~1.3 GB PSS.
+    Fails closed if max_wait_sec is reached while required evidence remains unresolved.
     """
     now = get_amsterdam_now()
     print(f"[{now.isoformat()}] Initiating LOCAL_MORNING_DRAIN (timeout: {max_wait_sec}s)...")
 
     state_data = read_state()
     state_data["state"] = LifecycleState.LOCAL_MORNING_DRAIN
-    state_data["last_event"] = "Local morning drain in progress. Waiting for active recordings to conclude."
+    state_data["last_event"] = "Local morning drain in progress. Waiting for active recordings and uploads to conclude."
     write_state(state_data)
 
     start_t = time.time()
+    drained = False
+    drain_reason = ""
     while time.time() - start_t < max_wait_sec:
-        drained, reason = check_drain_prerequisites()
+        drained, reason = check_drain_prerequisites(temp_dirs=temp_dirs)
+        drain_reason = reason
         if drained:
             print(f"✅ Drain gate satisfied: {reason}")
             break
         print(f"⏳ Waiting for drain: {reason}...")
         time.sleep(10)
     else:
-        print(f"⚠️ Drain wait reached {max_wait_sec}s ceiling. Proceeding with service shutdown.")
+        print(f"⚠️ Drain wait reached {max_wait_sec}s ceiling. Failing closed for unresolved evidence.")
 
-    # Stop heavy recorder services
+    # Stop heavy recorder services regardless to release RAM
     for svc in ["cat-monitor", "usb-monitor"]:
         try:
             _run_systemctl("stop", svc)
@@ -318,27 +339,38 @@ def drain_and_idle(max_wait_sec: int = 900) -> bool:
     total_pss_kb = sum(p.get("pss_kb", 0) for p in remaining_procs)
     mem_available = get_mem_available_mb()
 
-    state_data["state"] = LifecycleState.DAYTIME_IDLE
-    state_data["local_drain_complete"] = True
-    state_data["source_evidence_ready"] = True
-    state_data["services_active"] = False
-    state_data["active_workers"] = 0
-    state_data["remaining_fair_feeder_pss_mb"] = total_pss_kb // 1024
-    state_data["last_event"] = f"Entered DAYTIME_IDLE. Heavy services stopped. MemAvailable: {mem_available} MB."
-    write_state(state_data)
+    if drained:
+        state_data["state"] = LifecycleState.DAYTIME_IDLE
+        state_data["local_drain_complete"] = True
+        state_data["source_evidence_ready"] = True
+        state_data["services_active"] = False
+        state_data["active_workers"] = 0
+        state_data["remaining_fair_feeder_pss_mb"] = total_pss_kb // 1024
+        state_data["last_event"] = f"Entered DAYTIME_IDLE. Heavy services stopped. MemAvailable: {mem_available} MB."
+        write_state(state_data)
+        print(f"✅ DAYTIME_IDLE active. Remaining Fair Feeder PSS: {total_pss_kb // 1024} MB. MemAvailable: {mem_available} MB.")
 
-    print(f"✅ DAYTIME_IDLE active. Remaining Fair Feeder PSS: {total_pss_kb // 1024} MB. MemAvailable: {mem_available} MB.")
+        # Event-driven post-drain trigger: dispatch morning report immediately upon evidence durability
+        try:
+            from scripts.daily_watchdog import check_and_recover_report
+            today_date = now.strftime("%Y%m%d")
+            print(f"🚀 Triggering event-driven breakfast report dispatch for {today_date}...")
+            check_and_recover_report(date_str=today_date)
+        except Exception as e:
+            print(f"⚠️ Post-drain report dispatch encountered: {e}")
 
-    # Event-driven post-drain trigger: dispatch morning report immediately upon evidence durability
-    try:
-        from scripts.daily_watchdog import check_and_recover_report
-        today_date = now.strftime("%Y%m%d")
-        print(f"🚀 Triggering event-driven breakfast report dispatch for {today_date}...")
-        check_and_recover_report(date_str=today_date)
-    except Exception as e:
-        print(f"⚠️ Post-drain report dispatch encountered: {e}")
-
-    return True
+        return True
+    else:
+        print(f"🚨 Drain FAILED CLOSED after {max_wait_sec}s: {drain_reason}")
+        state_data["state"] = LifecycleState.LOCAL_MORNING_DRAIN
+        state_data["local_drain_complete"] = False
+        state_data["source_evidence_ready"] = False
+        state_data["services_active"] = False
+        state_data["active_workers"] = 0
+        state_data["remaining_fair_feeder_pss_mb"] = total_pss_kb // 1024
+        state_data["last_event"] = f"Drain timed out ({max_wait_sec}s). Evidence not durable: {drain_reason}"
+        write_state(state_data)
+        return False
 
 
 def get_rtsp_url() -> Optional[str]:

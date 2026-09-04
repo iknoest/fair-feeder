@@ -971,6 +971,10 @@ class UploadQueue:
                         self.cancel_wake(wake_timer_unit)
                         print(f"✅ Drain finalized: {msg}")
                         return True, f"Uploads finished and drain completed: {msg}"
+                    elif "Invalid lifecycle state transition" in msg:
+                        self.cancel_wake(wake_timer_unit)
+                        print(f"✅ Uploads finished ({msg}).")
+                        return True, f"Uploads finished: {msg}"
                     else:
                         print(f"⏳ Drain prerequisites not yet satisfied: {msg}")
                         time.sleep(poll_interval_sec)

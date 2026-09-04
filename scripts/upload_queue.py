@@ -1135,7 +1135,7 @@ class UploadQueueWorker:
 def main():
     import argparse
     parent_parser = argparse.ArgumentParser(add_help=False)
-    parent_parser.add_argument("--ledger-path", default=None, help="Explicit path to ledger JSON file")
+    parent_parser.add_argument("--ledger-path", default=argparse.SUPPRESS, help="Explicit path to ledger JSON file")
 
     parser = argparse.ArgumentParser(description="Fair Feeder Durable Upload Queue CLI", parents=[parent_parser])
     subparsers = parser.add_subparsers(dest="command")

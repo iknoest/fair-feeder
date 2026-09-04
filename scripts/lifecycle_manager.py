@@ -253,8 +253,27 @@ def activate_morning() -> bool:
     return True
 
 
+def get_staging_dirs() -> List[Path]:
+    """Returns local staging directories where recorded video clips are saved."""
+    env_dirs = os.environ.get("FAIR_FEEDER_STAGING_DIRS")
+    if env_dirs:
+        return [Path(d.strip()) for d in env_dirs.split(":") if d.strip()]
+
+    candidates = [
+        Path("/home/pi5/Pictures/gdrive-randomdice-sync"),
+        Path("/home/pi5/Pictures/usb-camera-sync"),
+    ]
+    if os.environ.get("ENVIRONMENT") == "development":
+        candidates.extend([
+            Path("/tmp/gdrive-randomdice-sync"),
+            Path("/tmp/usb-camera-sync"),
+        ])
+    return [c for c in candidates if c.exists()]
+
+
 def check_drain_prerequisites(
     temp_dirs: Optional[List[Path]] = None,
+    staging_dirs: Optional[List[Path]] = None,
     check_uploads: bool = True,
     upload_queue: Optional[Any] = None,
 ) -> Tuple[bool, str]:
@@ -264,6 +283,7 @@ def check_drain_prerequisites(
     - No child ffmpeg/rclone workers running
     - Temporary recording folders empty
     - Durable upload queue has no pending/unresolved uploads
+    - All clips in staging directories are registered in ledger, uploaded, and remote verified
     """
     if temp_dirs is None:
         temp_dirs = [
@@ -283,7 +303,7 @@ def check_drain_prerequisites(
             if temp_files:
                 return False, f"{len(temp_files)} unfinished file(s) in {td.name}"
 
-    # 3. Check durable upload queue for unresolved items
+    # 3. Check durable upload queue for unresolved items (FAIL CLOSED on any error)
     if check_uploads:
         try:
             if upload_queue is None:
@@ -293,12 +313,83 @@ def check_drain_prerequisites(
             if has_unresolved:
                 return False, f"{count} unresolved upload(s) in queue: {details}"
         except Exception as e:
-            print(f"⚠️ Warning checking upload queue during drain: {e}")
+            err_msg = f"Durable upload authority check failed: {e}"
+            print(f"🚨 {err_msg}")
+            return False, err_msg
+
+    # 4. Check staging directories: every local clip must be registered and verified
+    if check_uploads and upload_queue is not None:
+        if staging_dirs is None:
+            staging_dirs = get_staging_dirs()
+
+        for sd in staging_dirs:
+            if sd.exists():
+                for mp4_file in sd.glob("*.mp4"):
+                    item = upload_queue.get_item(mp4_file.name)
+                    if not item:
+                        try:
+                            upload_queue.register_file(mp4_file)
+                        except Exception as e:
+                            print(f"⚠️ Failed auto-registering staging file {mp4_file.name}: {e}")
+                        return False, f"Untracked clip found in staging {sd.name}/{mp4_file.name}; registered into upload queue"
+                    from scripts.upload_queue import UploadState
+                    if item.get("state") != UploadState.UPLOADED or not item.get("remote_verified"):
+                        return False, f"Local clip in staging {sd.name}/{mp4_file.name} is unresolved (state={item.get('state')})"
 
     return True, "All recordings, finalizers, and uploads complete"
 
 
-def drain_and_idle(max_wait_sec: int = 900, temp_dirs: Optional[List[Path]] = None) -> bool:
+def complete_drain_if_ready(
+    temp_dirs: Optional[List[Path]] = None,
+    staging_dirs: Optional[List[Path]] = None,
+) -> Tuple[bool, str]:
+    """
+    Deterministically transitions lifecycle to DAYTIME_IDLE once all drain prerequisites
+    (recordings, workers, staging directories, durable uploads) are satisfied.
+    Triggers event-driven morning report dispatch exactly once.
+    """
+    drained, reason = check_drain_prerequisites(temp_dirs=temp_dirs, staging_dirs=staging_dirs, check_uploads=True)
+    if not drained:
+        return False, f"Prerequisites not met: {reason}"
+
+    now = get_amsterdam_now()
+    state_data = read_state()
+    already_done = (
+        state_data.get("state") == LifecycleState.DAYTIME_IDLE
+        and state_data.get("source_evidence_ready")
+    )
+
+    remaining_procs = get_fair_feeder_processes()
+    total_pss_kb = sum(p.get("pss_kb", 0) for p in remaining_procs)
+    mem_available = get_mem_available_mb()
+
+    state_data["state"] = LifecycleState.DAYTIME_IDLE
+    state_data["local_drain_complete"] = True
+    state_data["source_evidence_ready"] = True
+    state_data["services_active"] = False
+    state_data["active_workers"] = 0
+    state_data["remaining_fair_feeder_pss_mb"] = total_pss_kb // 1024
+    state_data["last_event"] = f"Entered DAYTIME_IDLE. Evidence durable. MemAvailable: {mem_available} MB."
+    write_state(state_data)
+    print(f"✅ DAYTIME_IDLE finalized. Remaining Fair Feeder PSS: {total_pss_kb // 1024} MB. MemAvailable: {mem_available} MB.")
+
+    if not already_done:
+        try:
+            from scripts.daily_watchdog import check_and_recover_report
+            today_date = now.strftime("%Y%m%d")
+            print(f"🚀 Triggering event-driven breakfast report dispatch for {today_date}...")
+            check_and_recover_report(date_str=today_date)
+        except Exception as e:
+            print(f"⚠️ Post-drain report dispatch encountered: {e}")
+
+    return True, "Drain completed and DAYTIME_IDLE active"
+
+
+def drain_and_idle(
+    max_wait_sec: int = 900,
+    temp_dirs: Optional[List[Path]] = None,
+    staging_dirs: Optional[List[Path]] = None,
+) -> bool:
     """
     Waits for active recordings and workers to finish, then safely stops
     heavy services and enters DAYTIME_IDLE, releasing ~1.3 GB PSS.
@@ -316,7 +407,7 @@ def drain_and_idle(max_wait_sec: int = 900, temp_dirs: Optional[List[Path]] = No
     drained = False
     drain_reason = ""
     while time.time() - start_t < max_wait_sec:
-        drained, reason = check_drain_prerequisites(temp_dirs=temp_dirs)
+        drained, reason = check_drain_prerequisites(temp_dirs=temp_dirs, staging_dirs=staging_dirs)
         drain_reason = reason
         if drained:
             print(f"✅ Drain gate satisfied: {reason}")
@@ -333,33 +424,14 @@ def drain_and_idle(max_wait_sec: int = 900, temp_dirs: Optional[List[Path]] = No
         except Exception:
             pass
 
-    # Record measured resource release
     time.sleep(2)
     remaining_procs = get_fair_feeder_processes()
     total_pss_kb = sum(p.get("pss_kb", 0) for p in remaining_procs)
     mem_available = get_mem_available_mb()
 
     if drained:
-        state_data["state"] = LifecycleState.DAYTIME_IDLE
-        state_data["local_drain_complete"] = True
-        state_data["source_evidence_ready"] = True
-        state_data["services_active"] = False
-        state_data["active_workers"] = 0
-        state_data["remaining_fair_feeder_pss_mb"] = total_pss_kb // 1024
-        state_data["last_event"] = f"Entered DAYTIME_IDLE. Heavy services stopped. MemAvailable: {mem_available} MB."
-        write_state(state_data)
-        print(f"✅ DAYTIME_IDLE active. Remaining Fair Feeder PSS: {total_pss_kb // 1024} MB. MemAvailable: {mem_available} MB.")
-
-        # Event-driven post-drain trigger: dispatch morning report immediately upon evidence durability
-        try:
-            from scripts.daily_watchdog import check_and_recover_report
-            today_date = now.strftime("%Y%m%d")
-            print(f"🚀 Triggering event-driven breakfast report dispatch for {today_date}...")
-            check_and_recover_report(date_str=today_date)
-        except Exception as e:
-            print(f"⚠️ Post-drain report dispatch encountered: {e}")
-
-        return True
+        ok, _ = complete_drain_if_ready(temp_dirs=temp_dirs, staging_dirs=staging_dirs)
+        return ok
     else:
         print(f"🚨 Drain FAILED CLOSED after {max_wait_sec}s: {drain_reason}")
         state_data["state"] = LifecycleState.LOCAL_MORNING_DRAIN
@@ -368,8 +440,26 @@ def drain_and_idle(max_wait_sec: int = 900, temp_dirs: Optional[List[Path]] = No
         state_data["services_active"] = False
         state_data["active_workers"] = 0
         state_data["remaining_fair_feeder_pss_mb"] = total_pss_kb // 1024
-        state_data["last_event"] = f"Drain timed out ({max_wait_sec}s). Evidence not durable: {drain_reason}"
+        state_data["last_event"] = f"Drain timed out ({max_wait_sec}s). Evidence not durable: {drain_reason}. Lightweight uploader dispatched."
         write_state(state_data)
+
+        # Dispatch lightweight uploader service if systemd is present, or background uploader thread
+        try:
+            if shutil.which("systemctl"):
+                print("🚀 Dispatching lightweight uploader service (fair-feeder-uploader.service)...")
+                _run_systemctl("start", "fair-feeder-uploader")
+            else:
+                import threading
+                from scripts.upload_queue import UploadQueue
+                uploader_t = threading.Thread(
+                    target=lambda: UploadQueue().run_until_empty(max_wait_sec=900),
+                    name="BackgroundUploader",
+                    daemon=True,
+                )
+                uploader_t.start()
+        except Exception as e:
+            print(f"⚠️ Failed to dispatch lightweight uploader: {e}")
+
         return False
 
 
@@ -622,6 +712,9 @@ def main():
     readiness_p = subparsers.add_parser("evening-readiness", help="Runs evening readiness check for next breakfast")
     readiness_p.add_argument("--no-telegram", action="store_true", help="Do not send Telegram on failure")
 
+    # complete-drain
+    subparsers.add_parser("complete-drain", help="Finalizes transition to DAYTIME_IDLE if drain prerequisites are satisfied")
+
     args = parser.parse_args()
 
     if args.command == "status":
@@ -632,6 +725,10 @@ def main():
         sys.exit(0 if success else 1)
     elif args.command == "drain-and-idle":
         success = drain_and_idle(max_wait_sec=args.max_wait_sec)
+        sys.exit(0 if success else 1)
+    elif args.command == "complete-drain":
+        success, reason = complete_drain_if_ready()
+        print(reason)
         sys.exit(0 if success else 1)
     elif args.command == "on-demand-capture":
         res = on_demand_capture(camera=args.camera, duration_sec=args.duration, out_path=args.out_file, send_telegram=args.send_telegram)

@@ -35,10 +35,16 @@ DEFAULT_VERIFY_TIMEOUT_SEC = 30
 DEFAULT_MAX_ATTEMPTS = 5
 
 
+class CorruptLedgerError(RuntimeError):
+    """Raised when the upload ledger file is unreadable, corrupt, or has invalid schema."""
+    pass
+
+
 class UploadState:
     PENDING = "PENDING"
     UPLOADING = "UPLOADING"
     FAILED_RETRYABLE = "FAILED_RETRYABLE"
+    FAILED_EXHAUSTED = "FAILED_EXHAUSTED"
     UPLOADED = "UPLOADED"
 
 
@@ -51,6 +57,8 @@ class UploadQueue:
         upload_timeout_sec: int = DEFAULT_UPLOAD_TIMEOUT_SEC,
         verify_timeout_sec: int = DEFAULT_VERIFY_TIMEOUT_SEC,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        backoff_base_sec: float = 5.0,
+        backoff_max_sec: float = 300.0,
     ):
         if ledger_path is None:
             env_path = os.environ.get("UPLOAD_LEDGER_PATH")
@@ -61,6 +69,8 @@ class UploadQueue:
         self.upload_timeout_sec = upload_timeout_sec
         self.verify_timeout_sec = verify_timeout_sec
         self.max_attempts = max_attempts
+        self.backoff_base_sec = backoff_base_sec
+        self.backoff_max_sec = backoff_max_sec
         self._thread_lock = threading.Lock()
         self._init_ledger()
 
@@ -77,15 +87,26 @@ class UploadQueue:
                     "items": {},
                 }
                 self._write_ledger_unlocked(init_data)
+            else:
+                self._read_ledger_unlocked()
 
     def _read_ledger_unlocked(self) -> Dict[str, Any]:
         if not self.ledger_path.exists():
             return {"version": 1, "updated_at": None, "items": {}}
         try:
             with open(self.ledger_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {"version": 1, "updated_at": None, "items": {}}
+                data = json.load(f)
+            if not isinstance(data, dict) or "items" not in data or not isinstance(data.get("items"), dict):
+                raise CorruptLedgerError(
+                    f"Upload ledger at {self.ledger_path} has invalid schema (expected dict with 'items' dict)"
+                )
+            return data
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise CorruptLedgerError(f"Upload ledger at {self.ledger_path} is corrupt: {e}") from e
+        except CorruptLedgerError:
+            raise
+        except Exception as e:
+            raise CorruptLedgerError(f"Failed to read upload ledger at {self.ledger_path}: {e}") from e
 
     def _write_ledger_unlocked(self, data: Dict[str, Any]):
         data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -162,6 +183,7 @@ class UploadQueue:
                 "last_error": None,
                 "remote_verified": False,
                 "uploaded_at": None,
+                "next_attempt_at": None,
             }
             items[filename] = item
             return item, data
@@ -181,11 +203,16 @@ class UploadQueue:
         return self._locked_transaction(_tx)
 
     def get_unresolved_items(self) -> List[Dict[str, Any]]:
-        """Returns all items in PENDING, UPLOADING, or FAILED_RETRYABLE states."""
+        """Returns all items in PENDING, UPLOADING, FAILED_RETRYABLE, or FAILED_EXHAUSTED states."""
         def _tx(data: Dict[str, Any]):
             unresolved = [
                 item for item in data.get("items", {}).values()
-                if item.get("state") in (UploadState.PENDING, UploadState.UPLOADING, UploadState.FAILED_RETRYABLE)
+                if item.get("state") in (
+                    UploadState.PENDING,
+                    UploadState.UPLOADING,
+                    UploadState.FAILED_RETRYABLE,
+                    UploadState.FAILED_EXHAUSTED,
+                )
             ]
             return unresolved, None
         return self._locked_transaction(_tx)
@@ -284,7 +311,7 @@ class UploadQueue:
         2. Set state = UPLOADING.
         3. Run exact rclone copyto.
         4. Verify remote file existence and size.
-        5. Set state = UPLOADED on success, or FAILED_RETRYABLE on failure.
+        5. Set state = UPLOADED on success, or FAILED_RETRYABLE / FAILED_EXHAUSTED on failure.
         """
         item = self.get_item(filename)
         if not item:
@@ -293,10 +320,27 @@ class UploadQueue:
         if item.get("state") == UploadState.UPLOADED and item.get("remote_verified"):
             return True, f"Already uploaded and verified: {filename}"
 
+        current_attempts = item.get("attempt_count", 0)
+        if current_attempts >= self.max_attempts or item.get("state") == UploadState.FAILED_EXHAUSTED:
+            msg = f"Max upload attempts ({self.max_attempts}) reached for {filename}"
+            self._update_item_state(filename, UploadState.FAILED_EXHAUSTED, error=msg, next_attempt_at=None)
+            return False, msg
+
         local_path = Path(item["filepath"])
         if not local_path.exists():
+            new_attempts = current_attempts + 1
+            is_exhausted = new_attempts >= self.max_attempts
+            next_state = UploadState.FAILED_EXHAUSTED if is_exhausted else UploadState.FAILED_RETRYABLE
             err_msg = f"Local file missing: {local_path}"
-            self._update_item_state(filename, UploadState.FAILED_RETRYABLE, error=err_msg)
+            backoff = min(self.backoff_max_sec, self.backoff_base_sec * (2 ** (new_attempts - 1)))
+            next_at = (time.time() + backoff) if not is_exhausted else None
+            self._update_item_state(
+                filename,
+                next_state,
+                inc_attempt=True,
+                error=err_msg,
+                next_attempt_at=next_at,
+            )
             return False, err_msg
 
         expected_size = item["file_size_bytes"]
@@ -307,19 +351,43 @@ class UploadQueue:
         verified, rem_sz, vmsg = self.verify_remote_file(filename, expected_size, remote, dest_path)
         if verified:
             now_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-            self._update_item_state(filename, UploadState.UPLOADED, verified=True, uploaded_at=now_iso)
+            self._update_item_state(
+                filename,
+                UploadState.UPLOADED,
+                verified=True,
+                uploaded_at=now_iso,
+                next_attempt_at=None,
+            )
             print(f"✅ Remote idempotent match: {filename} already exists with {rem_sz} bytes.")
             return True, f"Idempotent match: {vmsg}"
 
-        # Step 2: Mark UPLOADING
+        # Step 2: Mark UPLOADING and increment attempt count
         self._update_item_state(filename, UploadState.UPLOADING, inc_attempt=True)
+        new_attempts = current_attempts + 1
+
+        def _record_failure(reason: str) -> Tuple[bool, str]:
+            is_exhausted = (new_attempts >= self.max_attempts)
+            next_state = UploadState.FAILED_EXHAUSTED if is_exhausted else UploadState.FAILED_RETRYABLE
+            full_msg = (
+                f"{reason} (attempt {new_attempts}/{self.max_attempts})"
+                if not is_exhausted
+                else f"{reason} (exhausted {new_attempts}/{self.max_attempts} attempts)"
+            )
+            backoff = min(self.backoff_max_sec, self.backoff_base_sec * (2 ** (new_attempts - 1)))
+            next_at = (time.time() + backoff) if not is_exhausted else None
+            self._update_item_state(
+                filename,
+                next_state,
+                error=full_msg,
+                next_attempt_at=next_at,
+            )
+            print(f"⚠️ Upload {'exhausted' if is_exhausted else 'failed'}: {filename} -> {full_msg}")
+            return False, full_msg
 
         # Step 3: Execute single-file copyto command
         rclone_bin = shutil.which("rclone")
         if not rclone_bin:
-            err_msg = "rclone not found in PATH"
-            self._update_item_state(filename, UploadState.FAILED_RETRYABLE, error=err_msg)
-            return False, err_msg
+            return _record_failure("rclone not found in PATH")
 
         if not dest_path:
             dst = f"{remote}{filename}"
@@ -331,7 +399,7 @@ class UploadQueue:
             dst = f"{remote.rstrip('/')}/{dest_path.lstrip('/')}/{filename}"
             cmd = [rclone_bin, "copyto", str(local_path), dst]
 
-        print(f"🚀 Starting exact-file upload: {filename} ({expected_size / (1024*1024):.1f} MB) -> {dst}...")
+        print(f"🚀 Starting exact-file upload: {filename} ({expected_size / (1024*1024):.1f} MB, attempt {new_attempts}/{self.max_attempts}) -> {dst}...")
         start_t = time.time()
         try:
             res = subprocess.run(
@@ -344,34 +412,32 @@ class UploadQueue:
 
             if res.returncode != 0:
                 err_msg = f"rclone copyto failed (rc={res.returncode}): {res.stderr.strip()}"
-                self._update_item_state(filename, UploadState.FAILED_RETRYABLE, error=err_msg)
-                print(f"⚠️ Upload failed for {filename} after {elapsed:.1f}s: {err_msg}")
-                return False, err_msg
+                return _record_failure(err_msg)
 
             # Step 4: Verify remote file after upload
             ver_ok, final_sz, ver_msg = self.verify_remote_file(filename, expected_size, remote, dest_path)
             if ver_ok:
                 now_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-                self._update_item_state(filename, UploadState.UPLOADED, verified=True, uploaded_at=now_iso)
+                self._update_item_state(
+                    filename,
+                    UploadState.UPLOADED,
+                    verified=True,
+                    uploaded_at=now_iso,
+                    next_attempt_at=None,
+                )
                 print(f"✅ Upload & verified durable: {filename} in {elapsed:.1f}s ({final_sz} bytes)")
                 return True, f"Upload successful and remote verified in {elapsed:.1f}s"
             else:
                 err_msg = f"Upload command succeeded but remote verification failed: {ver_msg}"
-                self._update_item_state(filename, UploadState.FAILED_RETRYABLE, error=err_msg)
-                print(f"⚠️ Verification failed for {filename}: {err_msg}")
-                return False, err_msg
+                return _record_failure(err_msg)
 
         except subprocess.TimeoutExpired:
             elapsed = time.time() - start_t
             err_msg = f"rclone copyto timed out after {self.upload_timeout_sec}s (elapsed {elapsed:.1f}s)"
-            self._update_item_state(filename, UploadState.FAILED_RETRYABLE, error=err_msg)
-            print(f"⚠️ Upload timed out for {filename}: {err_msg}")
-            return False, err_msg
+            return _record_failure(err_msg)
         except Exception as e:
             err_msg = f"Unexpected upload exception: {e}"
-            self._update_item_state(filename, UploadState.FAILED_RETRYABLE, error=err_msg)
-            print(f"⚠️ Upload exception for {filename}: {err_msg}")
-            return False, err_msg
+            return _record_failure(err_msg)
 
     def _update_item_state(
         self,
@@ -381,6 +447,7 @@ class UploadQueue:
         error: Optional[str] = None,
         verified: Optional[bool] = None,
         uploaded_at: Optional[str] = None,
+        next_attempt_at: Optional[float] = None,
     ):
         def _tx(data: Dict[str, Any]):
             items = data.setdefault("items", {})
@@ -396,6 +463,10 @@ class UploadQueue:
                     item["remote_verified"] = verified
                 if uploaded_at is not None:
                     item["uploaded_at"] = uploaded_at
+                if next_attempt_at is not None:
+                    item["next_attempt_at"] = next_attempt_at
+                elif state in (UploadState.UPLOADED, UploadState.FAILED_EXHAUSTED):
+                    item["next_attempt_at"] = None
                 return item, data
             return None, None
 
@@ -414,6 +485,95 @@ class UploadQueue:
             if ok:
                 success_count += 1
         return success_count
+
+    def scan_and_register_untracked_clips(
+        self,
+        staging_dir: Path,
+        camera_type: str = "rtsp",
+        rclone_remote: str = "gdrive-randomdice:",
+        rclone_dest_path: str = "",
+    ) -> List[Dict[str, Any]]:
+        """
+        Scans staging directory for .mp4 clips. If any clip is not registered in the ledger,
+        registers it as PENDING to ensure no clip is left untracked.
+        """
+        staging_dir = Path(staging_dir)
+        if not staging_dir.exists():
+            return []
+
+        registered = []
+        for p in sorted(staging_dir.glob("*.mp4")):
+            item = self.get_item(p.name)
+            if not item:
+                try:
+                    reg_item = self.register_file(
+                        p,
+                        camera_type=camera_type,
+                        rclone_remote=rclone_remote,
+                        rclone_dest_path=rclone_dest_path,
+                    )
+                    registered.append(reg_item)
+                except Exception as e:
+                    print(f"⚠️ Failed to auto-register {p.name}: {e}")
+        return registered
+
+    def run_until_empty(
+        self,
+        max_wait_sec: int = 900,
+        poll_interval_sec: float = 2.0,
+        staging_dirs: Optional[List[Path]] = None,
+    ) -> Tuple[bool, str]:
+        """
+        Processes queue items until empty, timeout, or all remaining items are FAILED_EXHAUSTED.
+        When successfully empty, invokes lifecycle_manager.complete_drain_if_ready().
+        """
+        print(f"🚀 Standalone uploader started (max_wait: {max_wait_sec}s)...")
+        self.recover_pending()
+
+        if staging_dirs:
+            for sd in staging_dirs:
+                self.scan_and_register_untracked_clips(sd)
+
+        start_t = time.time()
+        while time.time() - start_t < max_wait_sec:
+            unresolved = self.get_unresolved_items()
+            if not unresolved:
+                print("✅ All items in upload queue have been uploaded and remote verified.")
+                try:
+                    from scripts.lifecycle_manager import complete_drain_if_ready
+                    ok, msg = complete_drain_if_ready(staging_dirs=staging_dirs)
+                    return ok, f"Uploads finished and drain completed: {msg}"
+                except Exception as e:
+                    return True, f"Uploads finished but lifecycle completion notice: {e}"
+
+            # Check if all remaining items are FAILED_EXHAUSTED
+            all_exhausted = all(item.get("state") == UploadState.FAILED_EXHAUSTED for item in unresolved)
+            if all_exhausted:
+                exhausted_names = [item["filename"] for item in unresolved]
+                err_msg = f"All remaining items ({len(unresolved)}) are FAILED_EXHAUSTED: {exhausted_names}"
+                print(f"🚨 Standalone uploader stopped: {err_msg}")
+                return False, err_msg
+
+            # Process ready items
+            now = time.time()
+            for item in unresolved:
+                state = item.get("state")
+                if state == UploadState.FAILED_EXHAUSTED:
+                    continue
+                if state == UploadState.FAILED_RETRYABLE:
+                    next_at = item.get("next_attempt_at")
+                    if next_at and now < next_at:
+                        continue
+
+                fname = item["filename"]
+                self.upload_file(fname)
+
+            time.sleep(poll_interval_sec)
+
+        unres = self.get_unresolved_items()
+        err_msg = f"Standalone uploader timed out after {max_wait_sec}s with {len(unres)} unresolved item(s)."
+        print(f"🚨 {err_msg}")
+        return False, err_msg
 
 
 class UploadQueueWorker:
@@ -453,19 +613,22 @@ class UploadQueueWorker:
         while not self._stop_event.is_set():
             # Check for unresolved items
             unresolved = self.queue.get_unresolved_items()
+            now = time.time()
             if unresolved:
                 for item in unresolved:
                     if self._stop_event.is_set():
                         break
 
+                    state = item.get("state")
+                    if state == UploadState.FAILED_EXHAUSTED:
+                        continue
+
+                    if state == UploadState.FAILED_RETRYABLE:
+                        next_at = item.get("next_attempt_at")
+                        if next_at and now < next_at:
+                            continue
+
                     filename = item["filename"]
-                    attempts = item.get("attempt_count", 0)
-
-                    # Bounded exponential backoff if previously failed
-                    if item.get("state") == UploadState.FAILED_RETRYABLE and attempts > 0:
-                        backoff = min(60.0, 5.0 * (2 ** min(attempts - 1, 4)))
-                        time.sleep(min(backoff, 5.0))
-
                     try:
                         self.queue.upload_file(filename)
                     except Exception as e:
@@ -484,6 +647,10 @@ def main():
     subparsers.add_parser("status", help="Show upload ledger status")
     subparsers.add_parser("process", help="Process all pending uploads")
     subparsers.add_parser("recover", help="Recover in-flight uploads")
+
+    run_empty_p = subparsers.add_parser("run-until-empty", help="Run uploader until queue is empty and trigger drain completion")
+    run_empty_p.add_argument("--max-wait-sec", type=int, default=900, help="Max seconds to wait")
+    run_empty_p.add_argument("--poll-interval", type=float, default=2.0, help="Poll interval in seconds")
 
     reg_p = subparsers.add_parser("register", help="Register a local file for upload")
     reg_p.add_argument("filepath", help="Path to video file")
@@ -508,6 +675,10 @@ def main():
     elif args.command == "recover":
         rec = queue.recover_pending()
         print(f"Recovered {rec} item(s).")
+    elif args.command == "run-until-empty":
+        ok, msg = queue.run_until_empty(max_wait_sec=args.max_wait_sec, poll_interval_sec=args.poll_interval)
+        print(msg)
+        sys.exit(0 if ok else 1)
     elif args.command == "register":
         p = Path(args.filepath)
         item = queue.register_file(p, camera_type=args.camera, rclone_remote=args.remote, rclone_dest_path=args.dest_path)

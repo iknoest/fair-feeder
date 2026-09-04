@@ -2,14 +2,23 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
+import time
 from unittest.mock import MagicMock, patch
 import pytest
 
 repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root))
 
-from scripts.upload_queue import UploadQueue, UploadQueueWorker, UploadState
-from scripts.lifecycle_manager import check_drain_prerequisites, drain_and_idle, read_state, write_state, LifecycleState
+from scripts.upload_queue import UploadQueue, UploadQueueWorker, UploadState, CorruptLedgerError
+from scripts.lifecycle_manager import (
+    check_drain_prerequisites,
+    complete_drain_if_ready,
+    drain_and_idle,
+    read_state,
+    write_state,
+    LifecycleState,
+)
 
 
 @pytest.fixture
@@ -332,3 +341,239 @@ def test_drain_and_idle_succeeds_when_all_uploads_complete(tmp_path):
         assert state["state"] == LifecycleState.DAYTIME_IDLE
         assert state["local_drain_complete"] is True
         assert state["source_evidence_ready"] is True
+
+
+def test_corrupt_ledger_raises_corrupt_ledger_error_and_fails_closed_in_drain(tmp_path):
+    """
+    Defect 1: Corrupt or unreadable ledger must raise CorruptLedgerError and check_drain_prerequisites
+    must fail closed (returning False, not True).
+    """
+    ledger_file = tmp_path / "corrupt_ledger.json"
+    ledger_file.write_text("{corrupt: json syntax error", encoding="utf-8")
+
+    # Direct UploadQueue init must raise CorruptLedgerError
+    with pytest.raises(CorruptLedgerError):
+        UploadQueue(ledger_path=ledger_file)
+
+    # check_drain_prerequisites must fail closed
+    with patch.dict(os.environ, {"UPLOAD_LEDGER_PATH": str(ledger_file)}):
+        drained, reason = check_drain_prerequisites(temp_dirs=[], staging_dirs=[], check_uploads=True, upload_queue=None)
+        assert drained is False
+        assert "Durable upload authority check failed" in reason
+
+
+def test_max_attempts_exhaustion_transitions_to_failed_exhausted_and_blocks_drain(tmp_path):
+    """
+    Defect 2: UploadQueue retry attempts must be bounded. When max_attempts is reached,
+    item transitions to FAILED_EXHAUSTED and CONTINUES to block drain.
+    """
+    ledger_file = tmp_path / "test_ledger.json"
+    queue = UploadQueue(ledger_path=ledger_file, max_attempts=2, backoff_base_sec=0.01)
+    test_video = tmp_path / "motion_failing.mp4"
+    test_video.write_bytes(b"content")
+
+    queue.register_file(test_video)
+
+    def mock_fail(cmd, *args, **kwargs):
+        res = MagicMock()
+        if "lsf" in cmd:
+            res.returncode = 0
+            res.stdout = ""
+        else:
+            res.returncode = 1
+            res.stderr = "network connection dropped"
+        return res
+
+    with patch("shutil.which", return_value="/usr/bin/rclone"), \
+         patch("subprocess.run", side_effect=mock_fail):
+
+        # Attempt 1 -> FAILED_RETRYABLE
+        ok1, msg1 = queue.upload_file("motion_failing.mp4")
+        assert ok1 is False
+        item1 = queue.get_item("motion_failing.mp4")
+        assert item1["state"] == UploadState.FAILED_RETRYABLE
+        assert item1["attempt_count"] == 1
+        assert item1["next_attempt_at"] is not None
+
+        # Drain must block
+        drained1, _ = check_drain_prerequisites(temp_dirs=[], staging_dirs=[], upload_queue=queue)
+        assert drained1 is False
+
+        # Attempt 2 -> FAILED_EXHAUSTED (max_attempts = 2)
+        ok2, msg2 = queue.upload_file("motion_failing.mp4")
+        assert ok2 is False
+        item2 = queue.get_item("motion_failing.mp4")
+        assert item2["state"] == UploadState.FAILED_EXHAUSTED
+        assert item2["attempt_count"] == 2
+        assert item2["next_attempt_at"] is None
+
+        # Drain must STILL fail closed because exhausted item remains unresolved!
+        drained2, reason2 = check_drain_prerequisites(temp_dirs=[], staging_dirs=[], upload_queue=queue)
+        assert drained2 is False
+        assert "unresolved upload(s) in queue" in reason2
+
+        # Subsequent attempts are rejected immediately
+        ok3, msg3 = queue.upload_file("motion_failing.mp4")
+        assert ok3 is False
+        assert "Max upload attempts" in msg3
+
+
+def test_worker_skips_failed_exhausted_and_respects_backoff(tmp_path):
+    """
+    Defect 2: UploadQueueWorker must skip FAILED_EXHAUSTED items and not retry them in an infinite loop.
+    """
+    ledger_file = tmp_path / "test_ledger.json"
+    queue = UploadQueue(ledger_path=ledger_file, max_attempts=2)
+    test_video = tmp_path / "motion_exhausted.mp4"
+    test_video.write_bytes(b"content")
+
+    queue.register_file(test_video)
+    queue._update_item_state("motion_exhausted.mp4", UploadState.FAILED_EXHAUSTED)
+
+    worker = UploadQueueWorker(queue, poll_interval_sec=0.1)
+
+    with patch.object(queue, "upload_file") as mock_upload:
+        worker.start()
+        worker.notify()
+        time.sleep(0.2)
+        worker.stop()
+        mock_upload.assert_not_called()
+
+
+def test_untracked_clip_in_staging_blocks_drain_and_is_auto_registered(tmp_path):
+    """
+    Defect 4: Local clips present in staging directory that are not registered in upload ledger
+    must block drain and be auto-registered into the queue as PENDING.
+    """
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    untracked_video = staging_dir / "motion_20260904_untracked.mp4"
+    untracked_video.write_bytes(b"untracked_data")
+
+    ledger_file = tmp_path / "test_ledger.json"
+    queue = UploadQueue(ledger_path=ledger_file)
+
+    drained, reason = check_drain_prerequisites(
+        temp_dirs=[],
+        staging_dirs=[staging_dir],
+        check_uploads=True,
+        upload_queue=queue,
+    )
+    assert drained is False
+    assert "Untracked clip found in staging" in reason
+
+    item = queue.get_item("motion_20260904_untracked.mp4")
+    assert item is not None
+    assert item["state"] == UploadState.PENDING
+
+
+def test_complete_drain_if_ready_transitions_to_daytime_idle_and_dispatches_report(tmp_path):
+    """
+    Defect 3: complete_drain_if_ready deterministically transitions to DAYTIME_IDLE,
+    sets source_evidence_ready=True, and triggers morning report dispatch once.
+    """
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    clip = staging_dir / "motion_ready.mp4"
+    clip.write_bytes(b"data")
+
+    ledger_file = tmp_path / "test_ledger.json"
+    queue = UploadQueue(ledger_path=ledger_file)
+    queue.register_file(clip)
+    queue._update_item_state("motion_ready.mp4", UploadState.UPLOADED, verified=True)
+
+    state_file = tmp_path / "state.json"
+
+    with patch.dict(os.environ, {"FAIR_FEEDER_STATE_FILE": str(state_file), "UPLOAD_LEDGER_PATH": str(ledger_file)}), \
+         patch("scripts.lifecycle_manager.get_fair_feeder_processes", return_value=[]), \
+         patch("scripts.lifecycle_manager.get_mem_available_mb", return_value=1600), \
+         patch("scripts.daily_watchdog.check_and_recover_report") as mock_watchdog:
+
+        # First call: completes drain and dispatches report
+        ok, reason = complete_drain_if_ready(temp_dirs=[], staging_dirs=[staging_dir])
+        assert ok is True
+        assert "DAYTIME_IDLE active" in reason
+        mock_watchdog.assert_called_once()
+
+        state = read_state()
+        assert state["state"] == LifecycleState.DAYTIME_IDLE
+        assert state["source_evidence_ready"] is True
+        assert state["local_drain_complete"] is True
+
+        # Second call: idempotent, does not re-dispatch report
+        mock_watchdog.reset_mock()
+        ok2, reason2 = complete_drain_if_ready(temp_dirs=[], staging_dirs=[staging_dir])
+        assert ok2 is True
+        mock_watchdog.assert_not_called()
+
+
+def test_run_until_empty_completes_lifecycle(tmp_path):
+    """
+    Defect 3: Standalone uploader processes queue items until empty, then triggers complete_drain_if_ready.
+    """
+    ledger_file = tmp_path / "test_ledger.json"
+    queue = UploadQueue(ledger_path=ledger_file)
+    test_video = tmp_path / "motion_pending.mp4"
+    test_video.write_bytes(b"data")
+    file_sz = test_video.stat().st_size
+    queue.register_file(test_video)
+
+    def mock_run(cmd, *args, **kwargs):
+        res = MagicMock()
+        res.returncode = 0
+        if "lsf" in cmd:
+            res.stdout = f"{file_sz};motion_pending.mp4\n"
+        return res
+
+    with patch("shutil.which", return_value="/usr/bin/rclone"), \
+         patch("subprocess.run", side_effect=mock_run), \
+         patch("scripts.lifecycle_manager.complete_drain_if_ready", return_value=(True, "Drain completed")) as mock_complete:
+
+        ok, msg = queue.run_until_empty(max_wait_sec=5, poll_interval_sec=0.05)
+        assert ok is True
+        assert "Uploads finished and drain completed" in msg
+        mock_complete.assert_called_once()
+
+
+def test_motion_recorder_records_registration_faults_without_untracked_fallback(tmp_path, monkeypatch):
+    """
+    Defect 4: motion_recorder must record registration faults without untracked direct rclone fallback,
+    preserving local file.
+    """
+    import motion_recorder
+    recorder = motion_recorder.RecordingController.__new__(motion_recorder.RecordingController)
+    recorder.upload_queue = None
+    recorder.upload_worker = None
+    recorder.registration_faults = []
+    recorder._clips_lock = threading.Lock()
+    recorder.clips_saved = 0
+
+    temp_dir = tmp_path / "temp"
+    temp_dir.mkdir()
+    drive_dir = tmp_path / "drive"
+    drive_dir.mkdir()
+
+    monkeypatch.setattr(motion_recorder, "LOCAL_TEMP_DIR", temp_dir)
+    monkeypatch.setattr(motion_recorder, "DRIVE_OUTPUT_DIR", drive_dir)
+    monkeypatch.setattr(motion_recorder.platform, "system", lambda: "Linux")
+
+    raw_video = temp_dir / "temp_motion.mp4"
+    raw_video.write_bytes(b"test_video_data")
+
+    recorder.yolo_model = None
+    recorder._finalize_recording(
+        temp_path=raw_video,
+        final_name="motion_test_final.mp4",
+        dur_str="10s",
+        duration=10.0,
+        cat_seen=True,
+        declared_fps=15.0,
+        frame_count=150,
+    )
+
+    dest_file = drive_dir / "motion_test_final.mp4"
+    assert dest_file.exists()
+    assert len(recorder.registration_faults) == 1
+    assert "upload_queue is None" in recorder.registration_faults[0]["error"]
+    assert recorder.registration_faults[0]["file"] == str(dest_file)
+

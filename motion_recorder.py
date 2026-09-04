@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Fair Feeder Motion Recorder with Cat Detection
 ===============================================
@@ -517,6 +519,7 @@ class RecordingController:
         # Durable per-file upload queue and worker
         self.upload_queue = None
         self.upload_worker = None
+        self.registration_faults = []
         if platform.system() != 'Windows':
             try:
                 from scripts.upload_queue import UploadQueue, UploadQueueWorker
@@ -891,7 +894,7 @@ class RecordingController:
 
             # 4. Trigger durable per-file upload if on Linux / Raspberry Pi
             if platform.system() != 'Windows':
-                if self.upload_queue and self.upload_worker:
+                if self.upload_queue:
                     try:
                         self.upload_queue.register_file(
                             dest,
@@ -899,34 +902,24 @@ class RecordingController:
                             rclone_remote=RCLONE_REMOTE,
                             rclone_dest_path=RCLONE_DEST_PATH,
                         )
-                        self.upload_worker.notify()
+                        if self.upload_worker:
+                            self.upload_worker.notify()
                     except Exception as e:
-                        print(f'   ⚠️ Durable upload queue registration error: {e}')
+                        err_msg = f"Durable upload queue registration failed for {final_name}: {e}"
+                        log.error(f"🚨 {err_msg}")
+                        self.registration_faults.append({
+                            "file": str(dest),
+                            "error": str(e),
+                            "timestamp": time.time(),
+                        })
                 else:
-                    # Direct single-file upload fallback if queue worker not active
-                    try:
-                        import subprocess
-                        rclone_bin = shutil.which("rclone")
-                        if rclone_bin:
-                            if not RCLONE_DEST_PATH:
-                                dst = f"{RCLONE_REMOTE}{final_name}"
-                                rclone_cmd = [rclone_bin, "copyto", str(dest), dst]
-                            elif len(RCLONE_DEST_PATH) > 20 and "/" not in RCLONE_DEST_PATH:
-                                dst = f"{RCLONE_REMOTE}{final_name}"
-                                rclone_cmd = [rclone_bin, "copyto", str(dest), dst, "--drive-root-folder-id", RCLONE_DEST_PATH]
-                            else:
-                                dst = f"{RCLONE_REMOTE}{RCLONE_DEST_PATH.rstrip('/')}/{final_name}"
-                                rclone_cmd = [rclone_bin, "copyto", str(dest), dst]
-                            subprocess.run(
-                                rclone_cmd,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                                timeout=600,
-                            )
-                    except FileNotFoundError:
-                        print('   ⚠️ rclone not found in PATH, skipping auto-sync')
-                    except Exception as e:
-                        print(f'   ⚠️ Fallback rclone error: {e}')
+                    err_msg = f"Durable upload queue unavailable; {final_name} preserved locally in {dest} but unregistered."
+                    log.error(f"🚨 {err_msg}")
+                    self.registration_faults.append({
+                        "file": str(dest),
+                        "error": "upload_queue is None",
+                        "timestamp": time.time(),
+                    })
 
 class BowlPositionMonitor:
     """Periodically checks whether the COCO bowl class is framed."""

@@ -21,6 +21,14 @@ from scripts.lifecycle_manager import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolate_test_staging(tmp_path, monkeypatch):
+    """Isolates tests from host production staging directories."""
+    test_staging = tmp_path / "test_staging_empty"
+    test_staging.mkdir()
+    monkeypatch.setenv("FAIR_FEEDER_STAGING_DIRS", str(test_staging))
+
+
 @pytest.fixture
 def temp_queue(tmp_path):
     ledger_file = tmp_path / "test_upload_ledger.json"

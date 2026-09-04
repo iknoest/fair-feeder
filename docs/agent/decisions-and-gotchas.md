@@ -36,13 +36,19 @@ This file preserves project-specific lessons that are too large for root context
 | `last_motion_time` stop timer | Tapo ONVIF motion events arrive in bursts with gaps. |
 | Independent sync folders per camera | Prevents rclone collision and simplifies cleanup/analytics. |
 | Automatic rclone Folder ID detection | Uses `--drive-root-folder-id` if `RCLONE_DEST_PATH` looks like an ID. |
+| Durable Delivery Ledger on Drive | `delivery_ledger_${DATE}_${CAMERA}.json` prevents duplicate deliveries across parallel/retry runs with item-level idempotency. |
+| Deterministic CI DAG pipeline | `prepare` -> `tapo-report` -> `logitech-report` with target-date concurrency groups. |
+| Cross-Camera Exclusion | Two cats cannot be in two rooms simultaneously; TAPO accepted FeedingTracker phase excludes Dan/Sanbo at Logitech. |
+| Rule D (VLM Failure Preservation) | Motion/differencing alone never forces Dan or Sanbo; cross-camera reconciliation requires VLM-proven cat presence. |
 
 ## Recent Failure Patterns
 
 | Issue | Root cause | Fix |
 |-------|------------|-----|
+| Duplicate morning deliveries (2026-09-01) | Multiple workflows ran concurrently without durable delivery state; partial runs resent all messages. | Durable Drive delivery ledger with preflight check and item-level HTTP 200 tracking. |
+| Contradictory cat identity claims (2026-08-26) | Logitech visual VLM misclassified Sanbo as Dan while Dan was confirmed eating at Tapo. | Cross-camera physical exclusion reconciles identity using TAPO accepted feeding phases. |
 | `feeding_log.csv` duplicates or wrong counts | Only last event was read; no same-day dedup. | Aggregate all `video_results`; remove today's row before append. |
-| Scheduled action still starts after 8 AM | GitHub cron start time is not reliable; 2026-05-18 and 2026-05-19 were delayed about 4h10m. | Schedule early at `23 0 * * *` UTC, avoid minute 0, raise timeout to 360, and wait until 06:35 Amsterdam if needed. |
+| Scheduled action still starts after 8 AM | GitHub cron start time is not reliable. | Pi watchdog dispatches directly post-drain at 07:15 AMS; tertiary remote fallback at 08:00 AMS. |
 | Annotated video missing from Drive in CI | Service account `create()` hit zero quota. | Do not upload large binaries from CI; Colab archives. |
 | Telegram sent unmerged short clip | Phase 1/2 rescanned `SOURCE_DIR`. | Guard rescan behind `if not RUNNING_IN_CI:`. |
 | Report said 0 Kibble despite timeline Kibble | Clear-count logic only searched no-cat frames. | Add phase-entry/exit fallback methods. |

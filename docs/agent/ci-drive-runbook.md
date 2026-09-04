@@ -3,17 +3,18 @@
 Use this for GitHub Actions, Google Drive, `feeding_log.csv`, scheduler delay, and
 CI notebook failures.
 
-## Current Schedule Behavior
+## Current Schedule & Delivery Architecture
 
-- Workflow cron is `23 0 * * *` UTC (2:23 AM AMS).
-- Shifted to a random minute (`23`) and earlier hour to avoid GitHub top-of-hour congestion and compensate for 4h+ delays.
-- The workflow uses a sequential matrix strategy (`[TAPO, LOGITECH]`) with `max-parallel: 1` to process both cameras while sharing `feeding_log.csv`.
-- The workflow waits until 06:35 Europe/Amsterdam if it starts early.
-- `schedule_time` and `start_time` are recorded in Europe/Amsterdam local time.
-- Scheduler heartbeat belongs in GitHub summaries and `feeding_log.csv`, not in
-  Telegram.
-- Job timeout is 360 minutes so an on-time early run can wait until 06:35 and
-  still complete analysis.
+- Primary delivery trigger: Pi watchdog directly dispatches GitHub Actions at 07:15 Europe/Amsterdam once drain completes.
+- Tertiary remote recovery cron: `0 8 * * *` with `timezone: 'Europe/Amsterdam'`.
+- Workflow structure: Deterministic DAG (`prepare` -> `tapo-report` -> `logitech-report`).
+  - `prepare` resolves `target_date` once (YYYYMMDD).
+  - `tapo-report` runs with concurrency `fair-feeder-${TARGET_DATE}-TAPO`, runs `morning_report.ipynb`, exports `tapo_timeline_${TARGET_DATE}.json` as an artifact and to Drive.
+  - `logitech-report` runs with concurrency `fair-feeder-${TARGET_DATE}-LOGITECH`, downloads `tapo_timeline_${TARGET_DATE}.json`, and performs cross-camera reconciliation.
+- Exactly-once delivery: Durable ledger on Google Drive (`delivery_ledger_${TARGET_DATE}_${CAMERA}.json`) tracks item-level delivery (`summary`, `timeline`, `snap_*`, `video_*`).
+  - Preflight checks `camera_fully_delivered` and exits in < 2s on duplicate triggers.
+  - Partial delivery failure resumes cleanly without duplicate messages.
+- Scheduler delay and heartbeat belong in GitHub summaries and `feeding_log.csv`, not in Telegram.
 
 ## CI Preflight Checklist
 

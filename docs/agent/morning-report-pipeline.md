@@ -73,3 +73,10 @@ Kibble snapshots are high-risk. Preserve these rules:
 - Alert only when the bowl is missing or its box is clipped/not fully visible.
 - A center around 78%, 61% can be a good position.
 
+## Delivery Ledger & Cross-Camera Timeline
+
+- Phase 3 exports `tapo_timeline_${TARGET_DATE}.json` (using accepted `FeedingTracker` feeding phases) to Drive and local disk before marking camera completion.
+- Telegram message delivery is gated by `delivery_ledger_${TARGET_DATE}_TAPO.json`.
+- Each artifact (`summary`, `timeline`, snapshots, `annotated_video`) is checked and recorded upon HTTP 200 `ok=True`.
+- Terminal completion (`commit_camera_completion`) marks `camera_fully_delivered = True` only once all required items have succeeded.
+

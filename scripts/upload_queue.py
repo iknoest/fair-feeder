@@ -531,19 +531,34 @@ class UploadQueue:
         print(f"🚀 Standalone uploader started (max_wait: {max_wait_sec}s)...")
         self.recover_pending()
 
-        if staging_dirs:
-            for sd in staging_dirs:
-                self.scan_and_register_untracked_clips(sd)
+        if staging_dirs is None:
+            try:
+                from scripts.lifecycle_manager import get_staging_dirs
+                staging_dirs_to_check = get_staging_dirs()
+            except Exception:
+                staging_dirs_to_check = []
+        else:
+            staging_dirs_to_check = staging_dirs
 
         start_t = time.time()
         while time.time() - start_t < max_wait_sec:
+            # Rescan staging directories to catch any newly arrived or untracked clips
+            for sd in staging_dirs_to_check:
+                self.scan_and_register_untracked_clips(sd)
+
             unresolved = self.get_unresolved_items()
             if not unresolved:
                 print("✅ All items in upload queue have been uploaded and remote verified.")
                 try:
                     from scripts.lifecycle_manager import complete_drain_if_ready
-                    ok, msg = complete_drain_if_ready(staging_dirs=staging_dirs)
-                    return ok, f"Uploads finished and drain completed: {msg}"
+                    ok, msg = complete_drain_if_ready(staging_dirs=staging_dirs_to_check)
+                    if ok:
+                        print(f"✅ Drain finalized: {msg}")
+                        return True, f"Uploads finished and drain completed: {msg}"
+                    else:
+                        print(f"⏳ Drain prerequisites not yet satisfied: {msg}")
+                        time.sleep(poll_interval_sec)
+                        continue
                 except Exception as e:
                     return True, f"Uploads finished but lifecycle completion notice: {e}"
 

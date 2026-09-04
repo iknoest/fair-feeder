@@ -514,6 +514,19 @@ class RecordingController:
         self._finalization_thread = threading.Thread(target=self._finalization_worker, daemon=True)
         self._finalization_thread.start()
 
+        # Durable per-file upload queue and worker
+        self.upload_queue = None
+        self.upload_worker = None
+        if platform.system() != 'Windows':
+            try:
+                from scripts.upload_queue import UploadQueue, UploadQueueWorker
+                self.upload_queue = UploadQueue()
+                self.upload_queue.recover_pending()
+                self.upload_worker = UploadQueueWorker(self.upload_queue)
+                self.upload_worker.start()
+            except Exception as e:
+                log.warning(f"⚠️ Upload queue initialization failed: {e}")
+
     def _finalization_worker(self):
         """Processes completed recordings sequentially in the background."""
         while True:
@@ -876,31 +889,44 @@ class RecordingController:
             cat_status = '🐱' if cat_seen else '❓ no cat'
             print(f'✅ Saved: {final_name} ({size_mb:.1f} MB) [{cat_status}]')
 
-            # 4. Trigger bounded rclone sync if on Raspberry Pi
+            # 4. Trigger durable per-file upload if on Linux / Raspberry Pi
             if platform.system() != 'Windows':
-                try:
-                    import subprocess
-                    rclone_cmd = ["rclone", "copy", str(DRIVE_OUTPUT_DIR), RCLONE_REMOTE]
-                    if len(RCLONE_DEST_PATH) > 20 and "/" not in RCLONE_DEST_PATH:
-                        rclone_cmd.extend(["--drive-root-folder-id", RCLONE_DEST_PATH])
-                        print(f'🔄 Triggering rclone to {RCLONE_REMOTE} (Folder ID: {RCLONE_DEST_PATH})...')
-                    else:
-                        rclone_cmd[3] = f"{RCLONE_REMOTE}{RCLONE_DEST_PATH}"
-                        print(f'🔄 Triggering rclone to {RCLONE_REMOTE}{RCLONE_DEST_PATH}...')
-
-                    # Run sequentially in background worker so rclone processes never accumulate
-                    subprocess.run(
-                        rclone_cmd,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=120,
-                    )
-                except FileNotFoundError:
-                    print('   ⚠️ rclone not found in PATH, skipping auto-sync')
-                except subprocess.TimeoutExpired:
-                    print('   ⚠️ rclone sync timed out after 120s')
-                except Exception as e:
-                    print(f'   ⚠️ rclone launch error: {e}')
+                if self.upload_queue and self.upload_worker:
+                    try:
+                        self.upload_queue.register_file(
+                            dest,
+                            camera_type=CAMERA_TYPE,
+                            rclone_remote=RCLONE_REMOTE,
+                            rclone_dest_path=RCLONE_DEST_PATH,
+                        )
+                        self.upload_worker.notify()
+                    except Exception as e:
+                        print(f'   ⚠️ Durable upload queue registration error: {e}')
+                else:
+                    # Direct single-file upload fallback if queue worker not active
+                    try:
+                        import subprocess
+                        rclone_bin = shutil.which("rclone")
+                        if rclone_bin:
+                            if not RCLONE_DEST_PATH:
+                                dst = f"{RCLONE_REMOTE}{final_name}"
+                                rclone_cmd = [rclone_bin, "copyto", str(dest), dst]
+                            elif len(RCLONE_DEST_PATH) > 20 and "/" not in RCLONE_DEST_PATH:
+                                dst = f"{RCLONE_REMOTE}{final_name}"
+                                rclone_cmd = [rclone_bin, "copyto", str(dest), dst, "--drive-root-folder-id", RCLONE_DEST_PATH]
+                            else:
+                                dst = f"{RCLONE_REMOTE}{RCLONE_DEST_PATH.rstrip('/')}/{final_name}"
+                                rclone_cmd = [rclone_bin, "copyto", str(dest), dst]
+                            subprocess.run(
+                                rclone_cmd,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=600,
+                            )
+                    except FileNotFoundError:
+                        print('   ⚠️ rclone not found in PATH, skipping auto-sync')
+                    except Exception as e:
+                        print(f'   ⚠️ Fallback rclone error: {e}')
 
 class BowlPositionMonitor:
     """Periodically checks whether the COCO bowl class is framed."""
@@ -1670,4 +1696,6 @@ if __name__ == "__main__":
         log.info('\ud83d\udc4b Stopping...')
         if controller.is_recording:
             controller._stop_recording()
+        if hasattr(controller, 'upload_worker') and controller.upload_worker:
+            controller.upload_worker.stop(timeout=5)
         log.info(f'Total saved: {controller.clips_saved}, deleted: {controller.clips_deleted}')

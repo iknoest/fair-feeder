@@ -2016,5 +2016,188 @@ def test_wake_scenario_14_tapo_logitech_destination_routing_remains_unchanged(tm
     assert it_usb["rclone_dest_path"] == "14yBPCZvjrztIqxI5l-ckgZYkC7D0ZTdS"
 
 
+def test_defensive_gap_1_wake_failure_uses_in_process_fallback_when_budget_permits(tmp_path):
+    """Gap 1: When transient wake scheduling fails but budget permits, in-process fallback is used."""
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(
+        ledger_path=ledger_file,
+        recovery_cooldown_sec=50.0,
+        max_recovery_cycles=2,
+        max_attempts=1,
+    )
+    clip = tmp_path / "wake_fail_clip.mp4"
+    clip.write_bytes(b"data")
+    sz = clip.stat().st_size
+
+    queue.register_file(clip, camera_type="rtsp")
+    queue._update_item_state(
+        "rtsp:wake_fail_clip.mp4",
+        UploadState.FAILED_EXHAUSTED,
+        exhausted_at_ts=1000.0,
+        recovery_cycle=0,
+    )
+
+    fake_time = FakeTimeContext(1000.0)
+
+    def mock_run(cmd, *args, **kwargs):
+        res = MagicMock(returncode=0)
+        if "lsf" in cmd:
+            res.stdout = f"{sz};wake_fail_clip.mp4\n"
+        return res
+
+    with patch("time.time", side_effect=fake_time.time), \
+         patch("time.sleep", side_effect=fake_time.sleep), \
+         patch("shutil.which", return_value="/usr/bin/rclone"), \
+         patch("subprocess.run", side_effect=mock_run), \
+         patch("scripts.upload_queue.schedule_systemd_wake", return_value=(False, "unit already loaded")), \
+         patch("scripts.lifecycle_manager.complete_drain_if_ready", return_value=(True, "Drain completed")):
+
+        ok, msg = queue.run_until_empty(max_wait_sec=200, schedule_wake_on_cooldown=True, staging_dirs=[])
+        assert ok is True
+        assert "Uploads finished and drain completed" in msg
+        # Assert in-process sleep fallback was used
+        assert len(fake_time.sleep_calls) > 0
+
+    item = queue.get_item("rtsp:wake_fail_clip.mp4")
+    assert item["state"] == UploadState.UPLOADED
+    assert item["remote_verified"] is True
+
+
+def test_defensive_gap_2_wake_failure_with_insufficient_budget_fails_closed(tmp_path):
+    """Gap 2: When transient wake scheduling fails and budget is insufficient, fail closed immediately."""
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(
+        ledger_path=ledger_file,
+        recovery_cooldown_sec=300.0,
+        max_recovery_cycles=2,
+        max_attempts=1,
+    )
+    clip = tmp_path / "insufficient_clip.mp4"
+    clip.write_bytes(b"data")
+
+    queue.register_file(clip, camera_type="rtsp")
+    queue._update_item_state(
+        "rtsp:insufficient_clip.mp4",
+        UploadState.FAILED_EXHAUSTED,
+        exhausted_at_ts=1000.0,
+        recovery_cycle=0,
+    )
+
+    with patch("time.time", return_value=1000.0), \
+         patch("shutil.which", return_value="/usr/bin/systemd-run"), \
+         patch("scripts.upload_queue.schedule_systemd_wake", return_value=(False, "permission denied")):
+
+        ok, msg = queue.run_until_empty(max_wait_sec=60, schedule_wake_on_cooldown=True, staging_dirs=[])
+        assert ok is False
+        assert "Automatic wake scheduling failed" in msg
+        assert "permission denied" in msg
+        assert "Scheduled wake at" not in msg
+
+    item = queue.get_item("rtsp:insufficient_clip.mp4")
+    assert item["state"] == UploadState.FAILED_EXHAUSTED
+    assert item["earliest_recovery_ts"] == pytest.approx(1300.0)
+
+
+def test_defensive_gap_3_wake_scheduling_success_exits_bounded_invocation(tmp_path):
+    """Gap 3: When transient wake scheduling succeeds, cleanly exit bounded invocation."""
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(
+        ledger_path=ledger_file,
+        recovery_cooldown_sec=300.0,
+        max_recovery_cycles=2,
+        max_attempts=1,
+    )
+    clip = tmp_path / "success_wake_clip.mp4"
+    clip.write_bytes(b"data")
+
+    queue.register_file(clip, camera_type="rtsp")
+    queue._update_item_state(
+        "rtsp:success_wake_clip.mp4",
+        UploadState.FAILED_EXHAUSTED,
+        exhausted_at_ts=1000.0,
+        recovery_cycle=0,
+    )
+
+    with patch("time.time", return_value=1000.0), \
+         patch("shutil.which", return_value="/usr/bin/systemd-run"), \
+         patch("scripts.upload_queue.schedule_systemd_wake", return_value=(True, "Scheduled")):
+
+        ok, msg = queue.run_until_empty(schedule_wake_on_cooldown=True, staging_dirs=[])
+        assert ok is False
+        assert "Scheduled wake at" in msg
+        assert "Exiting bounded invocation" in msg
+
+
+def test_defensive_gap_4_evening_readiness_exits_cleanly_without_rewriting_state(tmp_path):
+    """Gap 4: Legitimate EVENING_READINESS with empty queue exits cleanly without altering lifecycle state."""
+    state_file = tmp_path / "state.json"
+    ledger_file = tmp_path / "ledger.json"
+
+    initial_state = {
+        "state": LifecycleState.EVENING_READINESS,
+        "ready": True,
+        "services_active": False,
+        "local_drain_complete": True,
+        "last_event": "Evening check passed",
+    }
+    state_file.write_text(json.dumps(initial_state))
+
+    queue = UploadQueue(ledger_path=ledger_file)
+
+    with patch.dict(os.environ, {"FAIR_FEEDER_STATE_FILE": str(state_file)}):
+        ok, msg = queue.run_until_empty(staging_dirs=[])
+        assert ok is True
+        assert "EVENING_READINESS" in msg
+        assert "Uploads finished and verified" in msg
+
+        # Ensure state.json was NOT modified/rewritten to DAYTIME_IDLE
+        saved_state = json.loads(state_file.read_text())
+        assert saved_state["state"] == LifecycleState.EVENING_READINESS
+        assert saved_state["last_event"] == "Evening check passed"
+
+
+def test_defensive_gap_5_unknown_or_unexpected_lifecycle_state_fails_closed(tmp_path):
+    """Gap 5: UNKNOWN or unexpected lifecycle states fail closed (not converted to success)."""
+    state_file = tmp_path / "state.json"
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(ledger_path=ledger_file)
+
+    # Sub-case A: UNKNOWN state
+    state_file.write_text(json.dumps({"state": LifecycleState.UNKNOWN}))
+    with patch.dict(os.environ, {"FAIR_FEEDER_STATE_FILE": str(state_file)}):
+        ok, msg = queue.run_until_empty(staging_dirs=[])
+        assert ok is False
+        assert "Cannot complete drain: invalid or unexpected lifecycle state 'UNKNOWN'" in msg
+
+    # Sub-case B: Arbitrary/corrupt state
+    state_file.write_text(json.dumps({"state": "ARBITRARY_CORRUPTED_STATE"}))
+    with patch.dict(os.environ, {"FAIR_FEEDER_STATE_FILE": str(state_file)}):
+        ok, msg = queue.run_until_empty(staging_dirs=[])
+        assert ok is False
+        assert "Cannot complete drain: invalid or unexpected lifecycle state 'ARBITRARY_CORRUPTED_STATE'" in msg
+
+
+def test_defensive_gap_6_morning_active_guard_refuses_daytime_idle_publication(tmp_path):
+    """Gap 6: MORNING_ACTIVE guard refuses to publish DAYTIME_IDLE and fails closed."""
+    state_file = tmp_path / "state.json"
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(ledger_path=ledger_file)
+
+    state_file.write_text(json.dumps({
+        "state": LifecycleState.MORNING_ACTIVE,
+        "services_active": True,
+        "active_workers": 2,
+    }))
+
+    with patch.dict(os.environ, {"FAIR_FEEDER_STATE_FILE": str(state_file)}):
+        ok, msg = queue.run_until_empty(staging_dirs=[])
+        assert ok is False
+        assert "Cannot complete drain: invalid or unexpected lifecycle state 'MORNING_ACTIVE'" in msg
+
+        saved_state = json.loads(state_file.read_text())
+        assert saved_state["state"] == LifecycleState.MORNING_ACTIVE
+        assert saved_state["services_active"] is True
+
+
 
 

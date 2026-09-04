@@ -965,17 +965,32 @@ class UploadQueue:
             if not unresolved:
                 print("✅ All items in upload queue have been uploaded and remote verified.")
                 try:
-                    from scripts.lifecycle_manager import complete_drain_if_ready
+                    from scripts.lifecycle_manager import complete_drain_if_ready, read_state, LifecycleState
+                    state_data = read_state()
+                    current_state = state_data.get("state")
+
                     ok, msg = complete_drain_if_ready(temp_dirs=temp_dirs, staging_dirs=staging_dirs_to_check)
                     if ok:
                         self.cancel_wake(wake_timer_unit)
                         print(f"✅ Drain finalized: {msg}")
                         return True, f"Uploads finished and drain completed: {msg}"
-                    elif "Invalid lifecycle state transition" in msg:
-                        self.cancel_wake(wake_timer_unit)
-                        print(f"✅ Uploads finished ({msg}).")
-                        return True, f"Uploads finished: {msg}"
+
+                    # complete_drain_if_ready returned False
+                    if "Invalid lifecycle state transition" in msg:
+                        # Only explicitly known benign non-drain states may exit cleanly without altering lifecycle state
+                        BENIGN_NON_DRAIN_STATES = {LifecycleState.EVENING_READINESS}
+                        if current_state in BENIGN_NON_DRAIN_STATES:
+                            self.cancel_wake(wake_timer_unit)
+                            success_msg = f"Uploads finished and verified (host in benign non-drain state: {current_state})"
+                            print(f"✅ {success_msg}")
+                            return True, success_msg
+                        else:
+                            # UNKNOWN, MORNING_ACTIVE, malformed, or unexpected state: fail closed
+                            err_msg = f"Cannot complete drain: invalid or unexpected lifecycle state '{current_state}': {msg}"
+                            print(f"🚨 {err_msg}")
+                            return False, err_msg
                     else:
+                        # Host is in drain state, but prerequisites not yet satisfied (e.g. pending procs)
                         print(f"⏳ Drain prerequisites not yet satisfied: {msg}")
                         time.sleep(poll_interval_sec)
                         continue
@@ -1021,18 +1036,42 @@ class UploadQueue:
 
                 wait_sec = max(0.0, (earliest_eligible_ts - time.time())) if earliest_eligible_ts is not None else 0.0
 
+                wake_attempted = False
+                wake_err = ""
                 if use_wake:
-                    self.schedule_wake(earliest_eligible_ts, service_name=wake_service_name, timer_unit=wake_timer_unit)
-                    iso_ts = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(earliest_eligible_ts)) if earliest_eligible_ts else ""
-                    msg = f"All {len(unresolved)} remaining item(s) are in recovery cooldown. Scheduled wake at {iso_ts} ({wait_sec:.1f}s). Exiting bounded invocation."
-                    print(f"⏳ {msg}")
-                    return False, msg
+                    wake_attempted = True
+                    wake_ok, wake_msg = self.schedule_wake(
+                        earliest_eligible_ts,
+                        service_name=wake_service_name,
+                        timer_unit=wake_timer_unit,
+                    )
+                    if wake_ok:
+                        iso_ts = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(earliest_eligible_ts)) if earliest_eligible_ts else ""
+                        msg = f"All {len(unresolved)} remaining item(s) are in recovery cooldown. Scheduled wake at {iso_ts} ({wait_sec:.1f}s). Exiting bounded invocation."
+                        print(f"⏳ {msg}")
+                        return False, msg
+                    else:
+                        wake_err = wake_msg
+                        print(f"⚠️ Automatic wake scheduling failed: {wake_msg}")
 
-                # Fallback: sleep in-process bounded by remaining budget (for mock/non-systemd environments)
+                # If wake was not used or wake scheduling failed:
+                # Check if remaining invocation budget can cover the cooldown.
                 remaining_budget = max_wait_sec - (time.time() - start_t)
-                if remaining_budget <= 0:
-                    break
+                if remaining_budget < wait_sec:
+                    if wake_attempted:
+                        err_msg = (
+                            f"Automatic wake scheduling failed ({wake_err}) and remaining invocation budget ({remaining_budget:.1f}s) "
+                            f"cannot cover cooldown ({wait_sec:.1f}s). Recovery remains unresolved for {len(unresolved)} item(s)."
+                        )
+                    else:
+                        err_msg = (
+                            f"Remaining invocation budget ({remaining_budget:.1f}s) cannot cover cooldown ({wait_sec:.1f}s) "
+                            f"and automatic wake is disabled. Recovery remains unresolved for {len(unresolved)} item(s)."
+                        )
+                    print(f"🚨 {err_msg}")
+                    return False, err_msg
 
+                # Fallback: sleep in-process bounded by remaining budget (for mock/non-systemd environments or wake failure)
                 sleep_duration = min(wait_sec, remaining_budget)
                 sleep_target = min(sleep_duration + 0.1, remaining_budget)
                 if sleep_target > 0:
@@ -1067,8 +1106,19 @@ class UploadQueue:
         if earliest_ts is not None and use_wake:
             now = time.time()
             wait_sec = max(0.0, earliest_ts - now)
-            self.schedule_wake(earliest_ts, now=now, service_name=wake_service_name, timer_unit=wake_timer_unit)
-            err_msg = f"Standalone uploader timed out after {max_wait_sec}s with {len(unres)} unresolved item(s). Scheduled future recovery wake in {wait_sec:.1f}s."
+            wake_ok, wake_err = self.schedule_wake(
+                earliest_ts,
+                now=now,
+                service_name=wake_service_name,
+                timer_unit=wake_timer_unit,
+            )
+            if wake_ok:
+                err_msg = f"Standalone uploader timed out after {max_wait_sec}s with {len(unres)} unresolved item(s). Scheduled future recovery wake in {wait_sec:.1f}s."
+            else:
+                err_msg = (
+                    f"Standalone uploader timed out after {max_wait_sec}s with {len(unres)} unresolved item(s). "
+                    f"Automatic future wake scheduling failed: {wake_err}."
+                )
         else:
             err_msg = f"Standalone uploader timed out after {max_wait_sec}s with {len(unres)} unresolved item(s)."
 

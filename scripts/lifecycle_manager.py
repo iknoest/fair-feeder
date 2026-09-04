@@ -286,10 +286,14 @@ def check_drain_prerequisites(
     - All clips in staging directories are registered in ledger, uploaded, and remote verified
     """
     if temp_dirs is None:
-        temp_dirs = [
-            repo_root / "recordings_temp",
-            repo_root / "recordings_usb_temp"
-        ]
+        env_temp = os.environ.get("FAIR_FEEDER_TEMP_DIRS")
+        if env_temp:
+            temp_dirs = [Path(p.strip()) for p in env_temp.split(",") if p.strip()]
+        else:
+            temp_dirs = [
+                repo_root / "recordings_temp",
+                repo_root / "recordings_usb_temp"
+            ]
 
     # 1. Check child worker processes
     active_workers = get_active_workers_count()
@@ -480,7 +484,7 @@ def drain_and_idle(
                 import threading
                 from scripts.upload_queue import UploadQueue
                 uploader_t = threading.Thread(
-                    target=lambda: UploadQueue().run_until_empty(max_wait_sec=900),
+                    target=lambda: UploadQueue().run_until_empty(max_wait_sec=2700),
                     name="BackgroundUploader",
                     daemon=True,
                 )

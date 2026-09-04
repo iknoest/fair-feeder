@@ -31,6 +31,7 @@ except ImportError:
 repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root))
 DEFAULT_LEDGER_PATH = repo_root / "upload_ledger.json"
+DEFAULT_MAX_WAIT_SEC = 2700
 DEFAULT_UPLOAD_TIMEOUT_SEC = 600
 DEFAULT_VERIFY_TIMEOUT_SEC = 30
 DEFAULT_MAX_ATTEMPTS = 5
@@ -218,6 +219,61 @@ class UploadQueue:
                     except Exception:
                         pass
 
+    def get_recovery_eligibility(
+        self,
+        item: Dict[str, Any],
+        now: Optional[float] = None,
+        cooldown_sec: Optional[float] = None,
+        max_recovery_cycles: Optional[int] = None,
+    ) -> Tuple[bool, Optional[float]]:
+        """
+        Determines if a FAILED_EXHAUSTED item is eligible for recovery.
+        Single authoritative rule for recovery eligibility.
+        Returns: (is_eligible: bool, earliest_eligible_ts: Optional[float])
+        - If not FAILED_EXHAUSTED: (False, None)
+        - If recovery_cycle >= max_recovery_cycles: (False, None) (permanently exhausted)
+        - If exhausted_at_ts is None: (True, current_time)
+        - If current_time >= exhausted_at_ts + cooldown_sec: (True, eligible_ts)
+        - If cooldown not yet elapsed: (False, eligible_ts)
+        """
+        if item.get("state") != UploadState.FAILED_EXHAUSTED:
+            return False, None
+
+        max_cycles = max_recovery_cycles if max_recovery_cycles is not None else self.max_recovery_cycles
+        if item.get("recovery_cycle", 0) >= max_cycles:
+            return False, None
+
+        current_time = now if now is not None else time.time()
+        cooldown = cooldown_sec if cooldown_sec is not None else self.recovery_cooldown_sec
+        exhausted_ts = item.get("exhausted_at_ts")
+        if exhausted_ts is None:
+            return True, current_time
+
+        eligible_ts = float(exhausted_ts) + cooldown
+        if current_time >= eligible_ts:
+            return True, eligible_ts
+        return False, eligible_ts
+
+    def _apply_recovery_cycle(
+        self,
+        item: Dict[str, Any],
+        max_recovery_cycles: Optional[int] = None,
+        reason: str = "after cooldown",
+    ):
+        """
+        Applies a recovery cycle mutation to an eligible item in-place:
+        Increments recovery_cycle, resets attempt_count to 0, sets state to PENDING,
+        and clears exhaustion markers.
+        """
+        max_cycles = max_recovery_cycles if max_recovery_cycles is not None else self.max_recovery_cycles
+        item["recovery_cycle"] = item.get("recovery_cycle", 0) + 1
+        item["attempt_count"] = 0
+        item["state"] = UploadState.PENDING
+        item["exhausted_at"] = None
+        item["exhausted_at_ts"] = None
+        item["next_attempt_at"] = None
+        item["last_error"] = f"Recovered for cycle {item['recovery_cycle']}/{max_cycles} ({reason})"
+
     def register_file(
         self,
         filepath: Path,
@@ -269,19 +325,15 @@ class UploadQueue:
                 if existing.get("state") == UploadState.UPLOADED and existing.get("remote_verified"):
                     return existing, None
 
-                # Bounded recovery upon re-registration if exhausted
+                # Bounded recovery upon re-registration if exhausted (must NOT bypass cooldown)
                 if existing.get("state") == UploadState.FAILED_EXHAUSTED:
-                    rec_cycle = existing.get("recovery_cycle", 0)
-                    if rec_cycle < self.max_recovery_cycles:
-                        existing["recovery_cycle"] = rec_cycle + 1
-                        existing["attempt_count"] = 0
-                        existing["state"] = UploadState.PENDING
-                        existing["exhausted_at"] = None
-                        existing["exhausted_at_ts"] = None
-                        existing["next_attempt_at"] = None
-                        existing["last_error"] = f"Re-registered for recovery cycle {existing['recovery_cycle']}/{self.max_recovery_cycles}"
+                    is_eligible, _ = self.get_recovery_eligibility(existing)
+                    if is_eligible:
+                        self._apply_recovery_cycle(existing, reason="upon re-registration")
                         return existing, data
                     else:
+                        # Cooldown has not elapsed or max recovery cycles reached:
+                        # Cannot bypass cooldown; remains FAILED_EXHAUSTED.
                         return existing, None
 
                 return existing, None
@@ -657,33 +709,31 @@ class UploadQueue:
         self,
         cooldown_sec: Optional[float] = None,
         max_recovery_cycles: Optional[int] = None,
+        now: Optional[float] = None,
     ) -> int:
         """
         Autonomous bounded recovery for FAILED_EXHAUSTED items after cooldown has elapsed.
         Increments recovery_cycle and resets attempt_count to 0, returning state to PENDING.
-        If max_recovery_cycles has been reached, item remains FAILED_EXHAUSTED.
+        If max_recovery_cycles has been reached or cooldown has not elapsed, item remains FAILED_EXHAUSTED.
         """
-        cooldown = cooldown_sec if cooldown_sec is not None else self.recovery_cooldown_sec
+        rec_cooldown = cooldown_sec if cooldown_sec is not None else self.recovery_cooldown_sec
         max_cycles = max_recovery_cycles if max_recovery_cycles is not None else self.max_recovery_cycles
-        now = time.time()
+        current_time = now if now is not None else time.time()
 
         def _tx(data: Dict[str, Any]):
             recovered = 0
             items = data.setdefault("items", {})
             for k, item in items.items():
                 if item.get("state") == UploadState.FAILED_EXHAUSTED:
-                    exhausted_ts = item.get("exhausted_at_ts")
-                    cycle = item.get("recovery_cycle", 0)
-                    if cycle < max_cycles:
-                        if exhausted_ts is None or (now - exhausted_ts) >= cooldown:
-                            item["recovery_cycle"] = cycle + 1
-                            item["attempt_count"] = 0
-                            item["state"] = UploadState.PENDING
-                            item["exhausted_at"] = None
-                            item["exhausted_at_ts"] = None
-                            item["next_attempt_at"] = None
-                            item["last_error"] = f"Recovered for cycle {item['recovery_cycle']}/{max_cycles} after cooldown"
-                            recovered += 1
+                    is_eligible, _ = self.get_recovery_eligibility(
+                        item,
+                        now=current_time,
+                        cooldown_sec=rec_cooldown,
+                        max_recovery_cycles=max_cycles,
+                    )
+                    if is_eligible:
+                        self._apply_recovery_cycle(item, max_recovery_cycles=max_cycles, reason="after cooldown")
+                        recovered += 1
             return recovered, data if recovered > 0 else None
 
         recovered_count = self._locked_transaction(_tx)
@@ -744,14 +794,15 @@ class UploadQueue:
 
     def run_until_empty(
         self,
-        max_wait_sec: int = 900,
+        max_wait_sec: int = DEFAULT_MAX_WAIT_SEC,
         poll_interval_sec: float = 2.0,
         staging_dirs: Optional[List[Path]] = None,
+        temp_dirs: Optional[List[Path]] = None,
     ) -> Tuple[bool, str]:
         """
-        Processes queue items until empty, timeout, or all remaining items are FAILED_EXHAUSTED.
+        Processes queue items until empty, timeout, or all remaining items are FAILED_EXHAUSTED and unrecoverable.
         When successfully empty, invokes lifecycle_manager.complete_drain_if_ready().
-        Fails closed on any lifecycle completion error.
+        Fails closed on any lifecycle completion error or when all items are permanently exhausted.
         """
         print(f"🚀 Standalone uploader started (max_wait: {max_wait_sec}s)...")
         self.recover_pending()
@@ -779,7 +830,7 @@ class UploadQueue:
                 print("✅ All items in upload queue have been uploaded and remote verified.")
                 try:
                     from scripts.lifecycle_manager import complete_drain_if_ready
-                    ok, msg = complete_drain_if_ready(staging_dirs=staging_dirs_to_check)
+                    ok, msg = complete_drain_if_ready(temp_dirs=temp_dirs, staging_dirs=staging_dirs_to_check)
                     if ok:
                         print(f"✅ Drain finalized: {msg}")
                         return True, f"Uploads finished and drain completed: {msg}"
@@ -795,10 +846,39 @@ class UploadQueue:
             # Check if all remaining items are FAILED_EXHAUSTED
             all_exhausted = all(item.get("state") == UploadState.FAILED_EXHAUSTED for item in unresolved)
             if all_exhausted:
-                exhausted_names = [item.get("key", item.get("filename")) for item in unresolved]
-                err_msg = f"All remaining items ({len(unresolved)}) are FAILED_EXHAUSTED: {exhausted_names}"
-                print(f"🚨 Standalone uploader stopped: {err_msg}")
-                return False, err_msg
+                # Determine whether any exhausted item has remaining recovery cycles
+                recoverable_items = []
+                earliest_eligible_ts = None
+                now = time.time()
+                for item in unresolved:
+                    is_eligible, eligible_ts = self.get_recovery_eligibility(item, now=now)
+                    if is_eligible:
+                        recoverable_items.append(item)
+                        earliest_eligible_ts = now if earliest_eligible_ts is None else min(earliest_eligible_ts, now)
+                    elif eligible_ts is not None:
+                        recoverable_items.append(item)
+                        earliest_eligible_ts = eligible_ts if earliest_eligible_ts is None else min(earliest_eligible_ts, eligible_ts)
+
+                if not recoverable_items:
+                    # All items have exhausted ALL recovery cycles: fail closed immediately
+                    exhausted_names = [item.get("key", item.get("filename")) for item in unresolved]
+                    err_msg = f"All remaining items ({len(unresolved)}) are permanently FAILED_EXHAUSTED (max cycles reached): {exhausted_names}"
+                    print(f"🚨 Standalone uploader stopped: {err_msg}")
+                    return False, err_msg
+
+                # Items are recoverable after cooldown: sleep until earliest eligibility or budget
+                remaining_budget = max_wait_sec - (time.time() - start_t)
+                if remaining_budget <= 0:
+                    break
+
+                wait_sec = max(0.0, (earliest_eligible_ts - time.time())) if earliest_eligible_ts is not None else 0.0
+                sleep_duration = min(wait_sec, remaining_budget)
+                # Add 0.1s margin to ensure time >= eligible_ts upon wakeup
+                sleep_target = min(sleep_duration + 0.1, remaining_budget)
+                if sleep_target > 0:
+                    print(f"⏳ All {len(unresolved)} remaining item(s) are in recovery cooldown. Sleeping {sleep_target:.1f}s until earliest recovery eligibility...")
+                    time.sleep(sleep_target)
+                continue
 
             # Process ready items
             now = time.time()
@@ -895,7 +975,7 @@ def main():
     subparsers.add_parser("recover", help="Recover in-flight uploads")
 
     run_empty_p = subparsers.add_parser("run-until-empty", help="Run uploader until queue is empty and trigger drain completion")
-    run_empty_p.add_argument("--max-wait-sec", type=int, default=900, help="Max seconds to wait")
+    run_empty_p.add_argument("--max-wait-sec", type=int, default=DEFAULT_MAX_WAIT_SEC, help="Max seconds to wait")
     run_empty_p.add_argument("--poll-interval", type=float, default=2.0, help="Poll interval in seconds")
 
     reg_p = subparsers.add_parser("register", help="Register a local file for upload")

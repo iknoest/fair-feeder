@@ -8,4 +8,4 @@ User=pi5
 WorkingDirectory=/home/pi5/Feeder/fair-feeder
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/home/pi5/Feeder/fair-feeder/.env
-ExecStart=/home/pi5/Feeder/fair-feeder/.venv/bin/python scripts/upload_queue.py run-until-empty --max-wait-sec 900
+ExecStart=/home/pi5/Feeder/fair-feeder/.venv/bin/python scripts/upload_queue.py run-until-empty --max-wait-sec 2700

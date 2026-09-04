@@ -107,21 +107,24 @@ def schedule_systemd_wake(
 
 
 def cancel_systemd_wake(timer_unit: str = DEFAULT_WAKE_TIMER_UNIT) -> Tuple[bool, str]:
-    """Cancels any pending systemd transient wake timer."""
+    """Cancels any pending systemd transient wake timer and clears associated service unit."""
     if not shutil.which("systemctl"):
         return False, "systemctl not found"
 
-    cmd = ["systemctl", "stop", f"{timer_unit}.timer"]
+    timer = f"{timer_unit}.timer"
+    service = f"{timer_unit}.service"
+
+    cmd = ["systemctl", "stop", timer, service]
     if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() != 0 and shutil.which("sudo"):
         cmd = ["sudo", "-n"] + cmd
 
     try:
         subprocess.run(cmd, capture_output=True, text=True, check=False)
-        reset_cmd = ["systemctl", "reset-failed", f"{timer_unit}.timer"]
+        reset_cmd = ["systemctl", "reset-failed", service, timer]
         if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() != 0 and shutil.which("sudo"):
             reset_cmd = ["sudo", "-n"] + reset_cmd
         subprocess.run(reset_cmd, capture_output=True, text=True, check=False)
-        return True, f"Cancelled {timer_unit}.timer"
+        return True, f"Cancelled {timer_unit}.timer and {timer_unit}.service"
     except Exception as e:
         return False, str(e)
 
@@ -1150,6 +1153,7 @@ def main():
     run_empty_p.add_argument("--no-schedule-wake", action="store_true", help="Disable systemd wake scheduling on cooldown")
     run_empty_p.add_argument("--wake-service", default=DEFAULT_WAKE_SERVICE_NAME, help="Systemd service unit to wake")
     run_empty_p.add_argument("--wake-timer", default=DEFAULT_WAKE_TIMER_UNIT, help="Systemd transient timer unit name")
+    run_empty_p.add_argument("--no-scan-staging", action="store_true", help="Do not scan staging directories on startup")
 
     reg_p = subparsers.add_parser("register", help="Register a local file for upload", parents=[parent_parser])
     reg_p.add_argument("filepath", help="Path to video file")
@@ -1177,12 +1181,14 @@ def main():
         print(f"Recovered {rec} item(s).")
     elif args.command == "run-until-empty":
         schedule_wake = False if args.no_schedule_wake else None
+        staging_dirs = [] if args.no_scan_staging else None
         ok, msg = queue.run_until_empty(
             max_wait_sec=args.max_wait_sec,
             poll_interval_sec=args.poll_interval,
             schedule_wake_on_cooldown=schedule_wake,
             wake_service_name=args.wake_service,
             wake_timer_unit=args.wake_timer,
+            staging_dirs=staging_dirs,
         )
         print(msg)
         sys.exit(0 if ok else 1)

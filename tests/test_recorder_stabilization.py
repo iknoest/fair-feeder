@@ -19,6 +19,11 @@ from motion_recorder import (
 
 # ── Process Lock Tests (Cases 4 & 5) ──────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def isolate_ledger_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("UPLOAD_LEDGER_PATH", str(tmp_path / "test_ledger.json"))
+    monkeypatch.setenv("FAIR_FEEDER_STATE_FILE", str(tmp_path / "test_state.json"))
+
 def test_process_lock_first_attempt_succeeds(tmp_path, monkeypatch):
     monkeypatch.setenv("TEMP", str(tmp_path))
     lock_file = acquire_process_lock("rtsp")

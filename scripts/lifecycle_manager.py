@@ -324,13 +324,25 @@ def check_drain_prerequisites(
 
         for sd in staging_dirs:
             if sd.exists():
+                from config import get_camera_target_for_path
+                target = get_camera_target_for_path(sd)
+                cam = target["camera_type"]
+                dest = target["rclone_dest_path"]
+                remote = target["rclone_remote"]
+
                 for mp4_file in sd.glob("*.mp4"):
-                    item = upload_queue.get_item(mp4_file.name)
+                    key = f"{cam}:{mp4_file.name}"
+                    item = upload_queue.get_item(key)
                     if not item:
                         try:
-                            upload_queue.register_file(mp4_file)
+                            upload_queue.register_file(
+                                mp4_file,
+                                camera_type=cam,
+                                rclone_remote=remote,
+                                rclone_dest_path=dest,
+                            )
                         except Exception as e:
-                            print(f"⚠️ Failed auto-registering staging file {mp4_file.name}: {e}")
+                            print(f"⚠️ Failed auto-registering staging file {key}: {e}")
                         return False, f"Untracked clip found in staging {sd.name}/{mp4_file.name}; registered into upload queue"
                     from scripts.upload_queue import UploadState
                     if item.get("state") != UploadState.UPLOADED or not item.get("remote_verified"):
@@ -346,16 +358,32 @@ def complete_drain_if_ready(
     """
     Deterministically transitions lifecycle to DAYTIME_IDLE once all drain prerequisites
     (recordings, workers, staging directories, durable uploads) are satisfied.
+    Guards against invalid transitions from MORNING_ACTIVE or active heavy services/processes.
     Triggers event-driven morning report dispatch exactly once.
     """
+    state_data = read_state()
+    current_state = state_data.get("state")
+
+    # Guard 1: Must be in LOCAL_MORNING_DRAIN or DAYTIME_IDLE
+    if current_state not in (LifecycleState.LOCAL_MORNING_DRAIN, LifecycleState.DAYTIME_IDLE):
+        return False, f"Invalid lifecycle state transition: cannot complete drain from '{current_state}' (must be LOCAL_MORNING_DRAIN or DAYTIME_IDLE)"
+
+    # Guard 2: Heavy services must not be active
+    if is_service_active("cat-monitor") or is_service_active("usb-monitor"):
+        return False, "Heavy recorder service still active (cat-monitor or usb-monitor); refusing false host-idle publication"
+
+    # Guard 3: Running recorder processes must not be present
+    fair_procs = get_fair_feeder_processes()
+    if any("motion_recorder" in p.get("cmd", "") for p in fair_procs):
+        return False, f"Motion recorder process still running ({len(fair_procs)} processes found); refusing false host-idle publication"
+
     drained, reason = check_drain_prerequisites(temp_dirs=temp_dirs, staging_dirs=staging_dirs, check_uploads=True)
     if not drained:
         return False, f"Prerequisites not met: {reason}"
 
     now = get_amsterdam_now()
-    state_data = read_state()
     already_done = (
-        state_data.get("state") == LifecycleState.DAYTIME_IDLE
+        current_state == LifecycleState.DAYTIME_IDLE
         and state_data.get("source_evidence_ready")
     )
 

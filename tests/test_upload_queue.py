@@ -489,6 +489,8 @@ def test_complete_drain_if_ready_transitions_to_daytime_idle_and_dispatches_repo
          patch("scripts.lifecycle_manager.get_mem_available_mb", return_value=1600), \
          patch("scripts.daily_watchdog.check_and_recover_report") as mock_watchdog:
 
+        write_state({"state": LifecycleState.LOCAL_MORNING_DRAIN, "services_active": False})
+
         # First call: completes drain and dispatches report
         ok, reason = complete_drain_if_ready(temp_dirs=[], staging_dirs=[staging_dir])
         assert ok is True
@@ -576,4 +578,409 @@ def test_motion_recorder_records_registration_faults_without_untracked_fallback(
     assert len(recorder.registration_faults) == 1
     assert "upload_queue is None" in recorder.registration_faults[0]["error"]
     assert recorder.registration_faults[0]["file"] == str(dest_file)
+
+
+# ==============================================================================
+# Final Upload-Authority Correction: 14 Required Regression Tests
+# ==============================================================================
+
+def test_identical_filenames_across_cameras_produce_separate_ledger_identities(tmp_path):
+    """Test 1: TAPO and USB files with identical filenames produce separate ledger identities."""
+    queue = UploadQueue(ledger_path=tmp_path / "ledger.json")
+    tapo_file = tmp_path / "tapo" / "motion_20260904_shared.mp4"
+    tapo_file.parent.mkdir()
+    tapo_file.write_bytes(b"tapo_bytes")
+
+    usb_file = tmp_path / "usb" / "motion_20260904_shared.mp4"
+    usb_file.parent.mkdir()
+    usb_file.write_bytes(b"usb_bytes")
+
+    tapo_item = queue.register_file(tapo_file, camera_type="rtsp", rclone_dest_path="")
+    usb_item = queue.register_file(usb_file, camera_type="usb", rclone_dest_path="14yBPCZvjrztIqxI5l-ckgZYkC7D0ZTdS")
+
+    assert tapo_item["key"] == "rtsp:motion_20260904_shared.mp4"
+    assert usb_item["key"] == "usb:motion_20260904_shared.mp4"
+    assert tapo_item["key"] != usb_item["key"]
+
+    all_items = queue.get_all_items()
+    assert "rtsp:motion_20260904_shared.mp4" in all_items
+    assert "usb:motion_20260904_shared.mp4" in all_items
+    assert len(all_items) == 2
+
+
+def test_tapo_verification_cannot_satisfy_usb_upload_authority(tmp_path):
+    """Test 2: TAPO verification cannot satisfy USB upload authority."""
+    queue = UploadQueue(ledger_path=tmp_path / "ledger.json")
+    tapo_file = tmp_path / "tapo" / "motion_test.mp4"
+    tapo_file.parent.mkdir()
+    tapo_file.write_bytes(b"tapo_data")
+    usb_file = tmp_path / "usb" / "motion_test.mp4"
+    usb_file.parent.mkdir()
+    usb_file.write_bytes(b"usb_data")
+
+    queue.register_file(tapo_file, camera_type="rtsp", rclone_dest_path="")
+    queue.register_file(usb_file, camera_type="usb", rclone_dest_path="14yBPCZvjrztIqxI5l-ckgZYkC7D0ZTdS")
+
+    # Mark TAPO uploaded and verified
+    queue._update_item_state("rtsp:motion_test.mp4", UploadState.UPLOADED, verified=True)
+
+    # Verify USB item is STILL unresolved
+    usb_item = queue.get_item("motion_test.mp4", camera_type="usb")
+    assert usb_item["state"] == UploadState.PENDING
+    assert usb_item["remote_verified"] is False
+
+    has_unres, count, details = queue.has_unresolved_uploads()
+    assert has_unres is True
+    assert count == 1
+    assert "usb:motion_test.mp4" in details
+
+
+def test_usb_staging_auto_registration_receives_usb_contract(tmp_path):
+    """Test 3: USB staging auto-registration receives the USB camera/destination contract."""
+    staging = tmp_path / "usb-camera-sync"
+    staging.mkdir()
+    clip = staging / "motion_usb_auto.mp4"
+    clip.write_bytes(b"usb_clip_data")
+
+    queue = UploadQueue(ledger_path=tmp_path / "ledger.json")
+    registered = queue.scan_and_register_untracked_clips(staging)
+
+    assert len(registered) == 1
+    item = registered[0]
+    assert item["key"] == "usb:motion_usb_auto.mp4"
+    assert item["camera_type"] == "usb"
+    assert item["rclone_dest_path"] == "14yBPCZvjrztIqxI5l-ckgZYkC7D0ZTdS"
+    assert item["state"] == UploadState.PENDING
+
+
+def test_tapo_staging_auto_registration_receives_tapo_contract(tmp_path):
+    """Test 4: TAPO staging auto-registration receives the TAPO camera/destination contract."""
+    staging = tmp_path / "gdrive-randomdice-sync"
+    staging.mkdir()
+    clip = staging / "motion_tapo_auto.mp4"
+    clip.write_bytes(b"tapo_clip_data")
+
+    queue = UploadQueue(ledger_path=tmp_path / "ledger.json")
+    registered = queue.scan_and_register_untracked_clips(staging)
+
+    assert len(registered) == 1
+    item = registered[0]
+    assert item["key"] == "rtsp:motion_tapo_auto.mp4"
+    assert item["camera_type"] == "rtsp"
+    assert item["rclone_dest_path"] == ""
+    assert item["state"] == UploadState.PENDING
+
+
+def test_contract_mismatch_fails_visibly_rather_than_reusing_record(tmp_path):
+    """Test 5: existing UPLOADED item with same filename but different camera/path/destination is not incorrectly reused."""
+    queue = UploadQueue(ledger_path=tmp_path / "ledger.json")
+    clip = tmp_path / "motion_reuse.mp4"
+    clip.write_bytes(b"data")
+
+    queue.register_file(clip, camera_type="rtsp", rclone_dest_path="")
+    queue._update_item_state("rtsp:motion_reuse.mp4", UploadState.UPLOADED, verified=True)
+
+    # Attempting to re-register under rtsp key with conflicting destination must fail visibly
+    with pytest.raises(ValueError) as exc:
+        queue.register_file(clip, camera_type="rtsp", rclone_dest_path="14yBPCZvjrztIqxI5l-ckgZYkC7D0ZTdS")
+    assert "Destination mismatch" in str(exc.value)
+
+    # Moving file to a different path under same key must also fail visibly
+    clip2 = tmp_path / "sub" / "motion_reuse.mp4"
+    clip2.parent.mkdir()
+    clip2.write_bytes(b"data")
+    with pytest.raises(ValueError) as exc2:
+        queue.register_file(clip2, camera_type="rtsp", rclone_dest_path="")
+    assert "Filepath mismatch" in str(exc2.value)
+
+
+def test_v1_filename_only_ledger_migrates_safely(tmp_path):
+    """Test 6: existing v1 filename-only ledger migrates safely."""
+    ledger_file = tmp_path / "upload_ledger.json"
+    tapo_p = tmp_path / "gdrive-randomdice-sync" / "motion_tapo.mp4"
+    tapo_p.parent.mkdir()
+    tapo_p.write_bytes(b"tapo")
+    usb_p = tmp_path / "usb-camera-sync" / "motion_usb.mp4"
+    usb_p.parent.mkdir()
+    usb_p.write_bytes(b"usb")
+
+    v1_data = {
+        "version": 1,
+        "updated_at": "2026-09-04T12:00:00+02:00",
+        "items": {
+            "motion_tapo.mp4": {
+                "filename": "motion_tapo.mp4",
+                "filepath": str(tapo_p),
+                "camera_type": "rtsp",
+                "rclone_remote": "gdrive-randomdice:",
+                "rclone_dest_path": "",
+                "file_size_bytes": 4,
+                "state": "UPLOADED",
+                "attempt_count": 1,
+                "remote_verified": True,
+            },
+            "motion_usb.mp4": {
+                "filename": "motion_usb.mp4",
+                "filepath": str(usb_p),
+                "camera_type": "usb",
+                "rclone_remote": "gdrive-randomdice:",
+                "rclone_dest_path": "14yBPCZvjrztIqxI5l-ckgZYkC7D0ZTdS",
+                "file_size_bytes": 3,
+                "state": "UPLOADED",
+                "attempt_count": 1,
+                "remote_verified": True,
+            },
+        },
+    }
+    import json
+    ledger_file.write_text(json.dumps(v1_data))
+
+    queue = UploadQueue(ledger_path=ledger_file)
+    all_items = queue.get_all_items()
+
+    assert "rtsp:motion_tapo.mp4" in all_items
+    assert "usb:motion_usb.mp4" in all_items
+    assert len(all_items) == 2
+
+    disk_data = json.loads(ledger_file.read_text())
+    assert disk_data["version"] == 2
+
+
+def test_misclassified_historical_usb_entry_is_detected_and_reconciled(tmp_path):
+    """Test 7: misclassified historical USB entry is detected rather than trusted."""
+    ledger_file = tmp_path / "upload_ledger.json"
+    usb_p = tmp_path / "usb-camera-sync" / "motion_misclassified.mp4"
+    usb_p.parent.mkdir()
+    usb_p.write_bytes(b"usb_content")
+
+    # Simulate historical defect: USB staging file recorded as rtsp with root destination
+    v1_data = {
+        "version": 1,
+        "updated_at": "2026-09-04T12:00:00+02:00",
+        "items": {
+            "motion_misclassified.mp4": {
+                "filename": "motion_misclassified.mp4",
+                "filepath": str(usb_p),
+                "camera_type": "rtsp",
+                "rclone_remote": "gdrive-randomdice:",
+                "rclone_dest_path": "",
+                "file_size_bytes": 11,
+                "state": "UPLOADED",
+                "attempt_count": 1,
+                "remote_verified": True,
+            },
+        },
+    }
+    import json
+    ledger_file.write_text(json.dumps(v1_data))
+
+    queue = UploadQueue(ledger_path=ledger_file)
+    all_items = queue.get_all_items()
+
+    assert "usb:motion_misclassified.mp4" in all_items
+    item = all_items["usb:motion_misclassified.mp4"]
+    assert item["camera_type"] == "usb"
+    assert item["rclone_dest_path"] == "14yBPCZvjrztIqxI5l-ckgZYkC7D0ZTdS"
+    assert item["remote_verified"] is False
+    assert item["state"] == UploadState.PENDING
+
+
+def test_failed_exhausted_bounded_later_recovery_path(tmp_path):
+    """Test 8: FAILED_EXHAUSTED has a bounded later recovery path."""
+    ledger_file = tmp_path / "upload_ledger.json"
+    queue = UploadQueue(ledger_path=ledger_file, max_attempts=2, max_recovery_cycles=2, recovery_cooldown_sec=10.0)
+    clip = tmp_path / "motion_exhaust.mp4"
+    clip.write_bytes(b"data")
+
+    queue.register_file(clip, camera_type="rtsp", rclone_dest_path="")
+    queue._update_item_state(
+        "rtsp:motion_exhaust.mp4",
+        UploadState.FAILED_EXHAUSTED,
+        error="test error",
+        exhausted_at="2026-09-04T12:00:00Z",
+        exhausted_at_ts=time.time() - 20.0,
+    )
+
+    item_before = queue.get_item("rtsp:motion_exhaust.mp4")
+    assert item_before["state"] == UploadState.FAILED_EXHAUSTED
+
+    recovered = queue.reset_exhausted_items()
+    assert recovered == 1
+
+    item_after = queue.get_item("rtsp:motion_exhaust.mp4")
+    assert item_after["state"] == UploadState.PENDING
+    assert item_after["attempt_count"] == 0
+    assert item_after["recovery_cycle"] == 1
+
+
+def test_recovery_does_not_produce_unbounded_hammering(tmp_path):
+    """Test 9: recovery does not produce continuous/unbounded retry hammering."""
+    ledger_file = tmp_path / "upload_ledger.json"
+    queue = UploadQueue(ledger_path=ledger_file, max_attempts=2, max_recovery_cycles=2, recovery_cooldown_sec=60.0)
+    clip = tmp_path / "motion_hammer.mp4"
+    clip.write_bytes(b"data")
+
+    queue.register_file(clip, camera_type="rtsp", rclone_dest_path="")
+
+    # 1. During cooldown, recovery must NOT trigger
+    queue._update_item_state(
+        "rtsp:motion_hammer.mp4",
+        UploadState.FAILED_EXHAUSTED,
+        error="network down",
+        exhausted_at_ts=time.time() - 5.0,
+    )
+    recovered = queue.reset_exhausted_items()
+    assert recovered == 0
+    assert queue.get_item("rtsp:motion_hammer.mp4")["state"] == UploadState.FAILED_EXHAUSTED
+
+    # 2. When max_recovery_cycles reached, recovery permanently refuses
+    queue._update_item_state(
+        "rtsp:motion_hammer.mp4",
+        UploadState.FAILED_EXHAUSTED,
+        exhausted_at_ts=time.time() - 100.0,
+        recovery_cycle=2,
+    )
+    recovered2 = queue.reset_exhausted_items()
+    assert recovered2 == 0
+    assert queue.get_item("rtsp:motion_hammer.mp4")["state"] == UploadState.FAILED_EXHAUSTED
+
+
+def test_lifecycle_completion_exception_causes_uploader_failure(tmp_path):
+    """Test 10: lifecycle-completion exception causes uploader service failure."""
+    ledger_file = tmp_path / "upload_ledger.json"
+    queue = UploadQueue(ledger_path=ledger_file)
+    clip = tmp_path / "motion_clean.mp4"
+    clip.write_bytes(b"data")
+    queue.register_file(clip)
+    queue._update_item_state("rtsp:motion_clean.mp4", UploadState.UPLOADED, verified=True)
+
+    with patch("scripts.lifecycle_manager.complete_drain_if_ready", side_effect=RuntimeError("Disk full or lock timeout")):
+        ok, msg = queue.run_until_empty(max_wait_sec=2, poll_interval_sec=0.05, staging_dirs=[])
+        assert ok is False
+        assert "Lifecycle completion failed with exception" in msg
+        assert "Disk full or lock timeout" in msg
+
+
+def test_complete_drain_if_ready_refuses_invalid_morning_active_transition(tmp_path):
+    """Test 11: complete_drain_if_ready refuses an invalid MORNING_ACTIVE -> DAYTIME_IDLE transition."""
+    state_file = tmp_path / "state.json"
+    ledger_file = tmp_path / "ledger.json"
+    UploadQueue(ledger_path=ledger_file)
+
+    with patch.dict(os.environ, {"FAIR_FEEDER_STATE_FILE": str(state_file), "UPLOAD_LEDGER_PATH": str(ledger_file)}), \
+         patch("scripts.lifecycle_manager.get_fair_feeder_processes", return_value=[]), \
+         patch("scripts.lifecycle_manager.is_service_active", return_value=False):
+
+        write_state({"state": LifecycleState.MORNING_ACTIVE, "services_active": True})
+
+        ok, reason = complete_drain_if_ready(temp_dirs=[], staging_dirs=[])
+        assert ok is False
+        assert "Invalid lifecycle state transition" in reason
+        assert "MORNING_ACTIVE" in reason
+
+        state = read_state()
+        assert state["state"] == LifecycleState.MORNING_ACTIVE
+
+
+def test_heavy_recorder_active_prevents_false_host_idle_publication(tmp_path):
+    """Test 12: actual heavy recorder still active prevents false host-idle publication."""
+    state_file = tmp_path / "state.json"
+    ledger_file = tmp_path / "ledger.json"
+    UploadQueue(ledger_path=ledger_file)
+
+    with patch.dict(os.environ, {"FAIR_FEEDER_STATE_FILE": str(state_file), "UPLOAD_LEDGER_PATH": str(ledger_file)}):
+        write_state({"state": LifecycleState.LOCAL_MORNING_DRAIN, "services_active": True})
+
+        # Case A: cat-monitor systemd service active
+        with patch("scripts.lifecycle_manager.is_service_active", side_effect=lambda svc: svc == "cat-monitor"), \
+             patch("scripts.lifecycle_manager.get_fair_feeder_processes", return_value=[]):
+            ok, reason = complete_drain_if_ready(temp_dirs=[], staging_dirs=[])
+            assert ok is False
+            assert "Heavy recorder service still active" in reason
+
+        # Case B: motion_recorder process running
+        with patch("scripts.lifecycle_manager.is_service_active", return_value=False), \
+             patch("scripts.lifecycle_manager.get_fair_feeder_processes", return_value=[{"pid": "1234", "cmd": "python motion_recorder.py", "pss_kb": 50000}]):
+            ok, reason = complete_drain_if_ready(temp_dirs=[], staging_dirs=[])
+            assert ok is False
+            assert "Motion recorder process still running" in reason
+
+        state = read_state()
+        assert state["state"] == LifecycleState.LOCAL_MORNING_DRAIN
+        assert state.get("source_evidence_ready") is not True
+
+
+def test_valid_local_morning_drain_to_daytime_idle_succeeds(tmp_path):
+    """Test 13: valid LOCAL_MORNING_DRAIN -> upload complete -> DAYTIME_IDLE still succeeds."""
+    staging_dir = tmp_path / "gdrive-randomdice-sync"
+    staging_dir.mkdir()
+    clip = staging_dir / "motion_valid.mp4"
+    clip.write_bytes(b"clip_content")
+
+    state_file = tmp_path / "state.json"
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(ledger_path=ledger_file)
+    queue.register_file(clip, camera_type="rtsp", rclone_dest_path="")
+    queue._update_item_state("rtsp:motion_valid.mp4", UploadState.UPLOADED, verified=True)
+
+    with patch.dict(os.environ, {"FAIR_FEEDER_STATE_FILE": str(state_file), "UPLOAD_LEDGER_PATH": str(ledger_file)}), \
+         patch("scripts.lifecycle_manager.get_fair_feeder_processes", return_value=[]), \
+         patch("scripts.lifecycle_manager.is_service_active", return_value=False), \
+         patch("scripts.lifecycle_manager.get_mem_available_mb", return_value=1800), \
+         patch("scripts.daily_watchdog.check_and_recover_report"):
+
+        write_state({"state": LifecycleState.LOCAL_MORNING_DRAIN, "services_active": False})
+
+        ok, reason = complete_drain_if_ready(temp_dirs=[], staging_dirs=[staging_dir])
+        assert ok is True
+        assert "Drain completed and DAYTIME_IDLE active" in reason
+
+        state = read_state()
+        assert state["state"] == LifecycleState.DAYTIME_IDLE
+        assert state["source_evidence_ready"] is True
+        assert state["local_drain_complete"] is True
+        assert state["services_active"] is False
+
+
+def test_existing_exact_file_upload_and_remote_size_verification_remain_green(tmp_path):
+    """Test 14: existing exact-file upload and remote size verification remain green."""
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(ledger_path=ledger_file)
+    clip = tmp_path / "motion_single_upload.mp4"
+    clip.write_bytes(b"exact_bytes_test")
+    sz = clip.stat().st_size
+
+    queue.register_file(clip, camera_type="rtsp", rclone_dest_path="")
+
+    copyto_called = []
+    lsf_called = []
+
+    def mock_run(cmd, *args, **kwargs):
+        res = MagicMock()
+        res.returncode = 0
+        if "copyto" in cmd:
+            copyto_called.append(cmd)
+        elif "lsf" in cmd:
+            lsf_called.append(cmd)
+            if copyto_called:
+                res.stdout = f"{sz};motion_single_upload.mp4\n"
+            else:
+                res.stdout = ""
+        return res
+
+    with patch("shutil.which", return_value="/usr/bin/rclone"), \
+         patch("subprocess.run", side_effect=mock_run):
+        ok, msg = queue.upload_file("rtsp:motion_single_upload.mp4")
+        assert ok is True
+        assert "Upload successful and remote verified" in msg
+
+        assert len(copyto_called) == 1
+        assert "copyto" in copyto_called[0]
+        assert str(clip) in copyto_called[0]
+        assert "gdrive-randomdice:motion_single_upload.mp4" in copyto_called[0]
+
+        item = queue.get_item("rtsp:motion_single_upload.mp4")
+        assert item["state"] == UploadState.UPLOADED
+        assert item["remote_verified"] is True
+
 

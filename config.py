@@ -9,20 +9,52 @@
 FRAME_WIDTH = 1280 # Tapo Stream 1 is usually HD
 FRAME_HEIGHT = 720
 
+import os
+from pathlib import Path
+from typing import Any, Dict
+
 # System Mode: 'rtsp' (Tapo) or 'usb' (Logitech)
 # Can also be set via environment variable CAMERA_TYPE
-CAMERA_TYPE = 'rtsp' 
+CAMERA_TYPE = os.getenv('CAMERA_TYPE', 'rtsp')
 
 # USB Camera Configuration
-USB_CAMERA_INDEX = 0
+USB_CAMERA_INDEX = int(os.getenv('USB_CAMERA_INDEX', 0))
+LOGITECH_DRIVE_FOLDER_ID = "14yBPCZvjrztIqxI5l-ckgZYkC7D0ZTdS"
 
 # rclone sync destination path or folder ID
-RCLONE_REMOTE = 'gdrive-randomdice:'
-RCLONE_DEST_PATH = '' # Leave empty for root, or set to a folder ID/name
+RCLONE_REMOTE = os.getenv('RCLONE_REMOTE', 'gdrive-randomdice:')
+RCLONE_DEST_PATH = os.getenv('RCLONE_DEST_PATH', '') # Leave empty for root, or set to a folder ID/name
+
+# Authoritative camera staging and destination mapping
+CAMERA_TARGETS: Dict[str, Dict[str, Any]] = {
+    "rtsp": {
+        "camera_type": "rtsp",
+        "rclone_remote": RCLONE_REMOTE,
+        "rclone_dest_path": "",
+        "staging_dir": Path("/home/pi5/Pictures/gdrive-randomdice-sync"),
+        "dev_staging_dir": Path("/tmp/gdrive-randomdice-sync"),
+    },
+    "usb": {
+        "camera_type": "usb",
+        "rclone_remote": RCLONE_REMOTE,
+        "rclone_dest_path": LOGITECH_DRIVE_FOLDER_ID,
+        "staging_dir": Path("/home/pi5/Pictures/usb-camera-sync"),
+        "dev_staging_dir": Path("/tmp/usb-camera-sync"),
+    },
+}
+
+def get_camera_target_for_path(path: Any) -> Dict[str, Any]:
+    """Resolves camera target config from staging directory or file path."""
+    p_str = str(path)
+    if "usb" in p_str:
+        return CAMERA_TARGETS["usb"]
+    if "gdrive-randomdice" in p_str:
+        return CAMERA_TARGETS["rtsp"]
+    cam = os.getenv("CAMERA_TYPE", "rtsp")
+    return CAMERA_TARGETS.get(cam, CAMERA_TARGETS["rtsp"])
 
 # Tapo Camera Configuration
 # Credentials are loaded from Infisical (Colab) or environment variables (local).
-import os
 
 def _load_tapo_credentials():
     """Load Tapo credentials from Infisical (Colab) or env vars (local)."""

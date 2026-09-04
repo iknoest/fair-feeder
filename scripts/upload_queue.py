@@ -34,6 +34,14 @@ DEFAULT_LEDGER_PATH = repo_root / "upload_ledger.json"
 DEFAULT_UPLOAD_TIMEOUT_SEC = 600
 DEFAULT_VERIFY_TIMEOUT_SEC = 30
 DEFAULT_MAX_ATTEMPTS = 5
+DEFAULT_MAX_RECOVERY_CYCLES = 3
+DEFAULT_RECOVERY_COOLDOWN_SEC = 300.0
+
+from config import (
+    LOGITECH_DRIVE_FOLDER_ID,
+    CAMERA_TARGETS,
+    get_camera_target_for_path,
+)
 
 
 class CorruptLedgerError(RuntimeError):
@@ -58,6 +66,8 @@ class UploadQueue:
         upload_timeout_sec: int = DEFAULT_UPLOAD_TIMEOUT_SEC,
         verify_timeout_sec: int = DEFAULT_VERIFY_TIMEOUT_SEC,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        max_recovery_cycles: int = DEFAULT_MAX_RECOVERY_CYCLES,
+        recovery_cooldown_sec: float = DEFAULT_RECOVERY_COOLDOWN_SEC,
         backoff_base_sec: float = 5.0,
         backoff_max_sec: float = 300.0,
     ):
@@ -70,6 +80,8 @@ class UploadQueue:
         self.upload_timeout_sec = upload_timeout_sec
         self.verify_timeout_sec = verify_timeout_sec
         self.max_attempts = max_attempts
+        self.max_recovery_cycles = max_recovery_cycles
+        self.recovery_cooldown_sec = recovery_cooldown_sec
         self.backoff_base_sec = backoff_base_sec
         self.backoff_max_sec = backoff_max_sec
         self._thread_lock = threading.Lock()
@@ -78,22 +90,77 @@ class UploadQueue:
     def _get_lock_path(self) -> Path:
         return self.ledger_path.with_suffix(".lock")
 
+    def _migrate_v1_to_v2(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Migrates ledger schema from v1 (filename-only keys) to v2 (camera_type:filename keys).
+        Reconciles misclassified USB staging items and sets version=2.
+        """
+        old_items = data.get("items", {})
+        new_items = {}
+        for old_key, item in old_items.items():
+            filepath_str = item.get("filepath", "")
+            target = get_camera_target_for_path(filepath_str)
+            expected_cam = target["camera_type"]
+            expected_dest = target["rclone_dest_path"]
+            expected_remote = target.get("rclone_remote", "gdrive-randomdice:")
+
+            filename = item.get("filename", old_key)
+
+            # Check if historical entry was in USB staging but registered as rtsp or with empty dest
+            if expected_cam == "usb":
+                cam_type = "usb"
+                dest_path = expected_dest
+                remote_verified = item.get("remote_verified", False)
+                # If it was verified against root (""), it must be re-verified against the USB folder
+                if item.get("rclone_dest_path") != expected_dest:
+                    remote_verified = False
+            else:
+                cam_type = item.get("camera_type", "rtsp")
+                dest_path = item.get("rclone_dest_path", "")
+                remote_verified = item.get("remote_verified", False)
+
+            new_key = f"{cam_type}:{filename}"
+            item["key"] = new_key
+            item["filename"] = filename
+            item["camera_type"] = cam_type
+            item["rclone_remote"] = item.get("rclone_remote") or expected_remote
+            item["rclone_dest_path"] = dest_path
+            item["remote_verified"] = remote_verified
+            if not remote_verified and item.get("state") == UploadState.UPLOADED:
+                item["state"] = UploadState.PENDING
+
+            if "recovery_cycle" not in item:
+                item["recovery_cycle"] = 0
+            if "exhausted_at" not in item:
+                item["exhausted_at"] = None
+            if "exhausted_at_ts" not in item:
+                item["exhausted_at_ts"] = None
+
+            new_items[new_key] = item
+
+        data["version"] = 2
+        data["items"] = new_items
+        return data
+
     def _init_ledger(self):
         with self._thread_lock:
             if not self.ledger_path.exists():
                 self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
                 init_data = {
-                    "version": 1,
+                    "version": 2,
                     "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                     "items": {},
                 }
                 self._write_ledger_unlocked(init_data)
             else:
-                self._read_ledger_unlocked()
+                data = self._read_ledger_unlocked()
+                if data.get("version") == 1:
+                    migrated = self._migrate_v1_to_v2(data)
+                    self._write_ledger_unlocked(migrated)
 
     def _read_ledger_unlocked(self) -> Dict[str, Any]:
         if not self.ledger_path.exists():
-            return {"version": 1, "updated_at": None, "items": {}}
+            return {"version": 2, "updated_at": None, "items": {}}
         try:
             with open(self.ledger_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -101,6 +168,12 @@ class UploadQueue:
                 raise CorruptLedgerError(
                     f"Upload ledger at {self.ledger_path} has invalid schema (expected dict with 'items' dict)"
                 )
+            if data.get("version") == 1:
+                data = self._migrate_v1_to_v2(data)
+                try:
+                    self._write_ledger_unlocked(data)
+                except Exception:
+                    pass
             return data
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise CorruptLedgerError(f"Upload ledger at {self.ledger_path} is corrupt: {e}") from e
@@ -148,13 +221,14 @@ class UploadQueue:
     def register_file(
         self,
         filepath: Path,
-        camera_type: str = "rtsp",
-        rclone_remote: str = "gdrive-randomdice:",
-        rclone_dest_path: str = "",
+        camera_type: Optional[str] = None,
+        rclone_remote: Optional[str] = None,
+        rclone_dest_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Durably registers a finalized local file into the ledger as PENDING.
         Must be called BEFORE upload begins.
+        Enforces deterministic composite key (camera_type:filename) and immutable upload contract.
         """
         filepath = Path(filepath).resolve()
         if not filepath.exists():
@@ -163,39 +237,111 @@ class UploadQueue:
         file_size = filepath.stat().st_size
         filename = filepath.name
 
+        target = get_camera_target_for_path(filepath)
+        effective_camera = camera_type if camera_type is not None else target["camera_type"]
+        effective_remote = rclone_remote if rclone_remote is not None else target["rclone_remote"]
+        effective_dest = rclone_dest_path if rclone_dest_path is not None else target["rclone_dest_path"]
+
+        key = f"{effective_camera}:{filename}"
+
         def _tx(data: Dict[str, Any]):
             items = data.setdefault("items", {})
-            existing = items.get(filename)
-            if existing and existing.get("state") == UploadState.UPLOADED and existing.get("remote_verified"):
+            existing = items.get(key)
+            if existing:
+                # Enforce immutable contract integrity
+                if existing.get("camera_type") != effective_camera:
+                    raise ValueError(
+                        f"Camera mismatch for ledger key '{key}': existing='{existing.get('camera_type')}', requested='{effective_camera}'"
+                    )
+                if existing.get("rclone_dest_path") != effective_dest:
+                    raise ValueError(
+                        f"Destination mismatch for ledger key '{key}': existing='{existing.get('rclone_dest_path')}', requested='{effective_dest}'"
+                    )
+                if existing.get("rclone_remote") != effective_remote:
+                    raise ValueError(
+                        f"Remote mismatch for ledger key '{key}': existing='{existing.get('rclone_remote')}', requested='{effective_remote}'"
+                    )
+                if str(Path(existing.get("filepath", "")).resolve()) != str(filepath):
+                    raise ValueError(
+                        f"Filepath mismatch for ledger key '{key}': existing='{existing.get('filepath')}', requested='{filepath}'"
+                    )
+
+                if existing.get("state") == UploadState.UPLOADED and existing.get("remote_verified"):
+                    return existing, None
+
+                # Bounded recovery upon re-registration if exhausted
+                if existing.get("state") == UploadState.FAILED_EXHAUSTED:
+                    rec_cycle = existing.get("recovery_cycle", 0)
+                    if rec_cycle < self.max_recovery_cycles:
+                        existing["recovery_cycle"] = rec_cycle + 1
+                        existing["attempt_count"] = 0
+                        existing["state"] = UploadState.PENDING
+                        existing["exhausted_at"] = None
+                        existing["exhausted_at_ts"] = None
+                        existing["next_attempt_at"] = None
+                        existing["last_error"] = f"Re-registered for recovery cycle {existing['recovery_cycle']}/{self.max_recovery_cycles}"
+                        return existing, data
+                    else:
+                        return existing, None
+
                 return existing, None
 
             now_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             item = {
+                "key": key,
                 "filename": filename,
                 "filepath": str(filepath),
-                "camera_type": camera_type,
-                "rclone_remote": rclone_remote,
-                "rclone_dest_path": rclone_dest_path,
+                "camera_type": effective_camera,
+                "rclone_remote": effective_remote,
+                "rclone_dest_path": effective_dest,
                 "file_size_bytes": file_size,
                 "state": UploadState.PENDING,
-                "attempt_count": existing.get("attempt_count", 0) if existing else 0,
-                "created_at": existing.get("created_at", now_iso) if existing else now_iso,
-                "last_attempt_at": existing.get("last_attempt_at") if existing else None,
+                "attempt_count": 0,
+                "recovery_cycle": 0,
+                "exhausted_at": None,
+                "exhausted_at_ts": None,
+                "created_at": now_iso,
+                "last_attempt_at": None,
                 "last_error": None,
                 "remote_verified": False,
                 "uploaded_at": None,
                 "next_attempt_at": None,
             }
-            items[filename] = item
+            items[key] = item
             return item, data
 
         registered_item = self._locked_transaction(_tx)
-        print(f"📋 Registered for durable upload: {filename} ({file_size / (1024*1024):.1f} MB, state={UploadState.PENDING})")
+        print(f"📋 Registered for durable upload: {key} ({file_size / (1024*1024):.1f} MB, state={registered_item.get('state')})")
         return registered_item
 
-    def get_item(self, filename: str) -> Optional[Dict[str, Any]]:
+    def get_item(self, key_or_filename: str, camera_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves an item by its exact key (e.g. 'rtsp:motion_...mp4'),
+        or by camera-qualified filename, or by unique filename.
+        """
         def _tx(data: Dict[str, Any]):
-            return data.get("items", {}).get(filename), None
+            items = data.get("items", {})
+            if key_or_filename in items:
+                return items[key_or_filename], None
+
+            if camera_type:
+                k = f"{camera_type}:{key_or_filename}"
+                if k in items:
+                    return items[k], None
+
+            matches = [it for it in items.values() if it.get("filename") == key_or_filename]
+            if len(matches) == 1:
+                return matches[0], None
+            elif len(matches) > 1:
+                if camera_type:
+                    for m in matches:
+                        if m.get("camera_type") == camera_type:
+                            return m, None
+                raise ValueError(
+                    f"Ambiguous item lookup: '{key_or_filename}' exists for multiple cameras: {[m.get('key') for m in matches]}. Specify camera_type."
+                )
+            return None, None
+
         return self._locked_transaction(_tx)
 
     def get_all_items(self) -> Dict[str, Dict[str, Any]]:
@@ -226,7 +372,7 @@ class UploadQueue:
         unresolved = self.get_unresolved_items()
         if not unresolved:
             return False, 0, "No unresolved uploads in queue"
-        names = [u["filename"] for u in unresolved[:3]]
+        names = [u.get("key", u.get("filename")) for u in unresolved[:3]]
         sample_str = ", ".join(names)
         if len(unresolved) > 3:
             sample_str += f" (+{len(unresolved) - 3} more)"
@@ -240,13 +386,12 @@ class UploadQueue:
         def _tx(data: Dict[str, Any]):
             recovered_count = 0
             items = data.setdefault("items", {})
-            for name, item in items.items():
+            for key, item in items.items():
                 if item.get("state") == UploadState.UPLOADING:
                     item["state"] = UploadState.PENDING
                     item["last_error"] = "Process restarted while upload in-flight"
                     recovered_count += 1
 
-                # Check file existence if pending or retryable
                 if item.get("state") in (UploadState.PENDING, UploadState.FAILED_RETRYABLE):
                     p = Path(item.get("filepath", ""))
                     if not p.exists():
@@ -305,7 +450,7 @@ class UploadQueue:
         except Exception as e:
             return False, None, f"Remote verification error: {e}"
 
-    def upload_file(self, filename: str) -> Tuple[bool, str]:
+    def upload_file(self, key_or_filename: str, camera_type: Optional[str] = None) -> Tuple[bool, str]:
         """
         Uploads a single exact file with full lifecycle:
         1. Pre-check idempotency (already on remote).
@@ -314,17 +459,28 @@ class UploadQueue:
         4. Verify remote file existence and size.
         5. Set state = UPLOADED on success, or FAILED_RETRYABLE / FAILED_EXHAUSTED on failure.
         """
-        item = self.get_item(filename)
+        item = self.get_item(key_or_filename, camera_type=camera_type)
         if not item:
-            return False, f"File not registered in upload ledger: {filename}"
+            return False, f"File not registered in upload ledger: {key_or_filename}"
+
+        key = item.get("key", f"{item.get('camera_type', 'rtsp')}:{item.get('filename')}")
+        filename = item["filename"]
 
         if item.get("state") == UploadState.UPLOADED and item.get("remote_verified"):
-            return True, f"Already uploaded and verified: {filename}"
+            return True, f"Already uploaded and verified: {key}"
 
         current_attempts = item.get("attempt_count", 0)
         if current_attempts >= self.max_attempts or item.get("state") == UploadState.FAILED_EXHAUSTED:
-            msg = f"Max upload attempts ({self.max_attempts}) reached for {filename}"
-            self._update_item_state(filename, UploadState.FAILED_EXHAUSTED, error=msg, next_attempt_at=None)
+            msg = f"Max upload attempts ({self.max_attempts}) reached for {key}"
+            now_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            self._update_item_state(
+                key,
+                UploadState.FAILED_EXHAUSTED,
+                error=msg,
+                next_attempt_at=None,
+                exhausted_at=now_iso,
+                exhausted_at_ts=time.time(),
+            )
             return False, msg
 
         local_path = Path(item["filepath"])
@@ -335,12 +491,15 @@ class UploadQueue:
             err_msg = f"Local file missing: {local_path}"
             backoff = min(self.backoff_max_sec, self.backoff_base_sec * (2 ** (new_attempts - 1)))
             next_at = (time.time() + backoff) if not is_exhausted else None
+            now_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             self._update_item_state(
-                filename,
+                key,
                 next_state,
                 inc_attempt=True,
                 error=err_msg,
                 next_attempt_at=next_at,
+                exhausted_at=now_iso if is_exhausted else None,
+                exhausted_at_ts=time.time() if is_exhausted else None,
             )
             return False, err_msg
 
@@ -353,17 +512,17 @@ class UploadQueue:
         if verified:
             now_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             self._update_item_state(
-                filename,
+                key,
                 UploadState.UPLOADED,
                 verified=True,
                 uploaded_at=now_iso,
                 next_attempt_at=None,
             )
-            print(f"✅ Remote idempotent match: {filename} already exists with {rem_sz} bytes.")
+            print(f"✅ Remote idempotent match: {key} already exists with {rem_sz} bytes.")
             return True, f"Idempotent match: {vmsg}"
 
         # Step 2: Mark UPLOADING and increment attempt count
-        self._update_item_state(filename, UploadState.UPLOADING, inc_attempt=True)
+        self._update_item_state(key, UploadState.UPLOADING, inc_attempt=True)
         new_attempts = current_attempts + 1
 
         def _record_failure(reason: str) -> Tuple[bool, str]:
@@ -376,13 +535,16 @@ class UploadQueue:
             )
             backoff = min(self.backoff_max_sec, self.backoff_base_sec * (2 ** (new_attempts - 1)))
             next_at = (time.time() + backoff) if not is_exhausted else None
+            now_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z")
             self._update_item_state(
-                filename,
+                key,
                 next_state,
                 error=full_msg,
                 next_attempt_at=next_at,
+                exhausted_at=now_iso if is_exhausted else None,
+                exhausted_at_ts=time.time() if is_exhausted else None,
             )
-            print(f"⚠️ Upload {'exhausted' if is_exhausted else 'failed'}: {filename} -> {full_msg}")
+            print(f"⚠️ Upload {'exhausted' if is_exhausted else 'failed'}: {key} -> {full_msg}")
             return False, full_msg
 
         # Step 3: Execute single-file copyto command
@@ -400,7 +562,7 @@ class UploadQueue:
             dst = f"{remote.rstrip('/')}/{dest_path.lstrip('/')}/{filename}"
             cmd = [rclone_bin, "copyto", str(local_path), dst]
 
-        print(f"🚀 Starting exact-file upload: {filename} ({expected_size / (1024*1024):.1f} MB, attempt {new_attempts}/{self.max_attempts}) -> {dst}...")
+        print(f"🚀 Starting exact-file upload: {key} ({expected_size / (1024*1024):.1f} MB, attempt {new_attempts}/{self.max_attempts}) -> {dst}...")
         start_t = time.time()
         try:
             res = subprocess.run(
@@ -420,13 +582,13 @@ class UploadQueue:
             if ver_ok:
                 now_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z")
                 self._update_item_state(
-                    filename,
+                    key,
                     UploadState.UPLOADED,
                     verified=True,
                     uploaded_at=now_iso,
                     next_attempt_at=None,
                 )
-                print(f"✅ Upload & verified durable: {filename} in {elapsed:.1f}s ({final_sz} bytes)")
+                print(f"✅ Upload & verified durable: {key} in {elapsed:.1f}s ({final_sz} bytes)")
                 return True, f"Upload successful and remote verified in {elapsed:.1f}s"
             else:
                 err_msg = f"Upload command succeeded but remote verification failed: {ver_msg}"
@@ -442,20 +604,32 @@ class UploadQueue:
 
     def _update_item_state(
         self,
-        filename: str,
+        key_or_filename: str,
         state: str,
         inc_attempt: bool = False,
         error: Optional[str] = None,
         verified: Optional[bool] = None,
         uploaded_at: Optional[str] = None,
         next_attempt_at: Optional[float] = None,
+        exhausted_at: Optional[str] = None,
+        exhausted_at_ts: Optional[float] = None,
+        reset_attempts: bool = False,
+        recovery_cycle: Optional[int] = None,
     ):
         def _tx(data: Dict[str, Any]):
             items = data.setdefault("items", {})
-            if filename in items:
-                item = items[filename]
+            target_key = key_or_filename
+            if target_key not in items:
+                matches = [k for k, it in items.items() if it.get("filename") == key_or_filename]
+                if len(matches) == 1:
+                    target_key = matches[0]
+
+            if target_key in items:
+                item = items[target_key]
                 item["state"] = state
-                if inc_attempt:
+                if reset_attempts:
+                    item["attempt_count"] = 0
+                elif inc_attempt:
                     item["attempt_count"] = item.get("attempt_count", 0) + 1
                     item["last_attempt_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
                 if error is not None:
@@ -468,10 +642,54 @@ class UploadQueue:
                     item["next_attempt_at"] = next_attempt_at
                 elif state in (UploadState.UPLOADED, UploadState.FAILED_EXHAUSTED):
                     item["next_attempt_at"] = None
+                if exhausted_at is not None:
+                    item["exhausted_at"] = exhausted_at
+                if exhausted_at_ts is not None:
+                    item["exhausted_at_ts"] = exhausted_at_ts
+                if recovery_cycle is not None:
+                    item["recovery_cycle"] = recovery_cycle
                 return item, data
             return None, None
 
         self._locked_transaction(_tx)
+
+    def reset_exhausted_items(
+        self,
+        cooldown_sec: Optional[float] = None,
+        max_recovery_cycles: Optional[int] = None,
+    ) -> int:
+        """
+        Autonomous bounded recovery for FAILED_EXHAUSTED items after cooldown has elapsed.
+        Increments recovery_cycle and resets attempt_count to 0, returning state to PENDING.
+        If max_recovery_cycles has been reached, item remains FAILED_EXHAUSTED.
+        """
+        cooldown = cooldown_sec if cooldown_sec is not None else self.recovery_cooldown_sec
+        max_cycles = max_recovery_cycles if max_recovery_cycles is not None else self.max_recovery_cycles
+        now = time.time()
+
+        def _tx(data: Dict[str, Any]):
+            recovered = 0
+            items = data.setdefault("items", {})
+            for k, item in items.items():
+                if item.get("state") == UploadState.FAILED_EXHAUSTED:
+                    exhausted_ts = item.get("exhausted_at_ts")
+                    cycle = item.get("recovery_cycle", 0)
+                    if cycle < max_cycles:
+                        if exhausted_ts is None or (now - exhausted_ts) >= cooldown:
+                            item["recovery_cycle"] = cycle + 1
+                            item["attempt_count"] = 0
+                            item["state"] = UploadState.PENDING
+                            item["exhausted_at"] = None
+                            item["exhausted_at_ts"] = None
+                            item["next_attempt_at"] = None
+                            item["last_error"] = f"Recovered for cycle {item['recovery_cycle']}/{max_cycles} after cooldown"
+                            recovered += 1
+            return recovered, data if recovered > 0 else None
+
+        recovered_count = self._locked_transaction(_tx)
+        if recovered_count > 0:
+            print(f"🔄 Recovered {recovered_count} exhausted upload(s) after cooldown.")
+        return recovered_count
 
     def process_all_pending(self, max_items: Optional[int] = None) -> int:
         """Processes all unresolved items sequentially."""
@@ -481,8 +699,8 @@ class UploadQueue:
 
         success_count = 0
         for item in unresolved:
-            fname = item["filename"]
-            ok, msg = self.upload_file(fname)
+            key = item.get("key", item.get("filename"))
+            ok, msg = self.upload_file(key)
             if ok:
                 success_count += 1
         return success_count
@@ -490,32 +708,38 @@ class UploadQueue:
     def scan_and_register_untracked_clips(
         self,
         staging_dir: Path,
-        camera_type: str = "rtsp",
-        rclone_remote: str = "gdrive-randomdice:",
-        rclone_dest_path: str = "",
+        camera_type: Optional[str] = None,
+        rclone_remote: Optional[str] = None,
+        rclone_dest_path: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Scans staging directory for .mp4 clips. If any clip is not registered in the ledger,
-        registers it as PENDING to ensure no clip is left untracked.
+        Scans staging directory for .mp4 clips. Uses camera targets authority to register
+        any untracked clips with the correct camera identity and destination.
         """
         staging_dir = Path(staging_dir)
         if not staging_dir.exists():
             return []
 
+        target = get_camera_target_for_path(staging_dir)
+        cam = camera_type if camera_type is not None else target["camera_type"]
+        remote = rclone_remote if rclone_remote is not None else target["rclone_remote"]
+        dest = rclone_dest_path if rclone_dest_path is not None else target["rclone_dest_path"]
+
         registered = []
         for p in sorted(staging_dir.glob("*.mp4")):
-            item = self.get_item(p.name)
+            key = f"{cam}:{p.name}"
+            item = self.get_item(key)
             if not item:
                 try:
                     reg_item = self.register_file(
                         p,
-                        camera_type=camera_type,
-                        rclone_remote=rclone_remote,
-                        rclone_dest_path=rclone_dest_path,
+                        camera_type=cam,
+                        rclone_remote=remote,
+                        rclone_dest_path=dest,
                     )
                     registered.append(reg_item)
                 except Exception as e:
-                    print(f"⚠️ Failed to auto-register {p.name}: {e}")
+                    print(f"⚠️ Failed to auto-register {key}: {e}")
         return registered
 
     def run_until_empty(
@@ -527,6 +751,7 @@ class UploadQueue:
         """
         Processes queue items until empty, timeout, or all remaining items are FAILED_EXHAUSTED.
         When successfully empty, invokes lifecycle_manager.complete_drain_if_ready().
+        Fails closed on any lifecycle completion error.
         """
         print(f"🚀 Standalone uploader started (max_wait: {max_wait_sec}s)...")
         self.recover_pending()
@@ -546,6 +771,9 @@ class UploadQueue:
             for sd in staging_dirs_to_check:
                 self.scan_and_register_untracked_clips(sd)
 
+            # Check for autonomous recovery of exhausted items
+            self.reset_exhausted_items()
+
             unresolved = self.get_unresolved_items()
             if not unresolved:
                 print("✅ All items in upload queue have been uploaded and remote verified.")
@@ -560,12 +788,14 @@ class UploadQueue:
                         time.sleep(poll_interval_sec)
                         continue
                 except Exception as e:
-                    return True, f"Uploads finished but lifecycle completion notice: {e}"
+                    err_msg = f"Lifecycle completion failed with exception: {e}"
+                    print(f"🚨 {err_msg}")
+                    return False, err_msg
 
             # Check if all remaining items are FAILED_EXHAUSTED
             all_exhausted = all(item.get("state") == UploadState.FAILED_EXHAUSTED for item in unresolved)
             if all_exhausted:
-                exhausted_names = [item["filename"] for item in unresolved]
+                exhausted_names = [item.get("key", item.get("filename")) for item in unresolved]
                 err_msg = f"All remaining items ({len(unresolved)}) are FAILED_EXHAUSTED: {exhausted_names}"
                 print(f"🚨 Standalone uploader stopped: {err_msg}")
                 return False, err_msg
@@ -581,8 +811,8 @@ class UploadQueue:
                     if next_at and now < next_at:
                         continue
 
-                fname = item["filename"]
-                self.upload_file(fname)
+                key = item.get("key", item.get("filename"))
+                self.upload_file(key)
 
             time.sleep(poll_interval_sec)
 
@@ -644,11 +874,11 @@ class UploadQueueWorker:
                         if next_at and now < next_at:
                             continue
 
-                    filename = item["filename"]
+                    key = item.get("key", item.get("filename"))
                     try:
-                        self.queue.upload_file(filename)
+                        self.queue.upload_file(key)
                     except Exception as e:
-                        print(f"⚠️ UploadQueueWorker error processing {filename}: {e}")
+                        print(f"⚠️ UploadQueueWorker error processing {key}: {e}")
 
             # Wait for wake event or timeout
             self._wake_event.wait(timeout=self.poll_interval)

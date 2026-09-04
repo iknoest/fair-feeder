@@ -146,13 +146,13 @@ class UploadQueue:
         else:
             self.ledger_path = Path(ledger_path)
 
-        self.upload_timeout_sec = upload_timeout_sec
-        self.verify_timeout_sec = verify_timeout_sec
-        self.max_attempts = max_attempts
-        self.max_recovery_cycles = max_recovery_cycles
-        self.recovery_cooldown_sec = recovery_cooldown_sec
-        self.backoff_base_sec = backoff_base_sec
-        self.backoff_max_sec = backoff_max_sec
+        self.upload_timeout_sec = int(os.environ.get("UPLOAD_QUEUE_UPLOAD_TIMEOUT_SEC", upload_timeout_sec))
+        self.verify_timeout_sec = int(os.environ.get("UPLOAD_QUEUE_VERIFY_TIMEOUT_SEC", verify_timeout_sec))
+        self.max_attempts = int(os.environ.get("UPLOAD_QUEUE_MAX_ATTEMPTS", max_attempts))
+        self.max_recovery_cycles = int(os.environ.get("UPLOAD_QUEUE_MAX_RECOVERY_CYCLES", max_recovery_cycles))
+        self.recovery_cooldown_sec = float(os.environ.get("UPLOAD_QUEUE_RECOVERY_COOLDOWN_SEC", recovery_cooldown_sec))
+        self.backoff_base_sec = float(os.environ.get("UPLOAD_QUEUE_BACKOFF_BASE_SEC", backoff_base_sec))
+        self.backoff_max_sec = float(os.environ.get("UPLOAD_QUEUE_BACKOFF_MAX_SEC", backoff_max_sec))
         self._thread_lock = threading.Lock()
         self._init_ledger()
 
@@ -1135,6 +1135,7 @@ class UploadQueueWorker:
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Fair Feeder Durable Upload Queue CLI")
+    parser.add_argument("--ledger-path", default=None, help="Explicit path to ledger JSON file")
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("status", help="Show upload ledger status")
@@ -1142,6 +1143,7 @@ def main():
     subparsers.add_parser("recover", help="Recover in-flight uploads")
 
     run_empty_p = subparsers.add_parser("run-until-empty", help="Run uploader until queue is empty and trigger drain completion")
+    run_empty_p.add_argument("--ledger-path", default=None, help="Explicit path to ledger JSON file")
     run_empty_p.add_argument("--max-wait-sec", type=int, default=DEFAULT_MAX_WAIT_SEC, help="Max seconds to wait")
     run_empty_p.add_argument("--poll-interval", type=float, default=2.0, help="Poll interval in seconds")
     run_empty_p.add_argument("--no-schedule-wake", action="store_true", help="Disable systemd wake scheduling on cooldown")
@@ -1149,13 +1151,15 @@ def main():
     run_empty_p.add_argument("--wake-timer", default=DEFAULT_WAKE_TIMER_UNIT, help="Systemd transient timer unit name")
 
     reg_p = subparsers.add_parser("register", help="Register a local file for upload")
+    reg_p.add_argument("--ledger-path", default=None, help="Explicit path to ledger JSON file")
     reg_p.add_argument("filepath", help="Path to video file")
     reg_p.add_argument("--camera", default="rtsp", help="Camera type (rtsp/usb)")
     reg_p.add_argument("--remote", default="gdrive-randomdice:", help="rclone remote")
     reg_p.add_argument("--dest-path", default="", help="rclone destination path or folder ID")
 
     args = parser.parse_args()
-    queue = UploadQueue()
+    ledger_p = getattr(args, "ledger_path", None)
+    queue = UploadQueue(ledger_path=ledger_p)
 
     if args.command == "status":
         items = queue.get_all_items()

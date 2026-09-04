@@ -1134,24 +1134,24 @@ class UploadQueueWorker:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Fair Feeder Durable Upload Queue CLI")
-    parser.add_argument("--ledger-path", default=None, help="Explicit path to ledger JSON file")
+    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser.add_argument("--ledger-path", default=None, help="Explicit path to ledger JSON file")
+
+    parser = argparse.ArgumentParser(description="Fair Feeder Durable Upload Queue CLI", parents=[parent_parser])
     subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("status", help="Show upload ledger status")
-    subparsers.add_parser("process", help="Process all pending uploads")
-    subparsers.add_parser("recover", help="Recover in-flight uploads")
+    subparsers.add_parser("status", help="Show upload ledger status", parents=[parent_parser])
+    subparsers.add_parser("process", help="Process all pending uploads", parents=[parent_parser])
+    subparsers.add_parser("recover", help="Recover in-flight uploads", parents=[parent_parser])
 
-    run_empty_p = subparsers.add_parser("run-until-empty", help="Run uploader until queue is empty and trigger drain completion")
-    run_empty_p.add_argument("--ledger-path", default=None, help="Explicit path to ledger JSON file")
+    run_empty_p = subparsers.add_parser("run-until-empty", help="Run uploader until queue is empty and trigger drain completion", parents=[parent_parser])
     run_empty_p.add_argument("--max-wait-sec", type=int, default=DEFAULT_MAX_WAIT_SEC, help="Max seconds to wait")
     run_empty_p.add_argument("--poll-interval", type=float, default=2.0, help="Poll interval in seconds")
     run_empty_p.add_argument("--no-schedule-wake", action="store_true", help="Disable systemd wake scheduling on cooldown")
     run_empty_p.add_argument("--wake-service", default=DEFAULT_WAKE_SERVICE_NAME, help="Systemd service unit to wake")
     run_empty_p.add_argument("--wake-timer", default=DEFAULT_WAKE_TIMER_UNIT, help="Systemd transient timer unit name")
 
-    reg_p = subparsers.add_parser("register", help="Register a local file for upload")
-    reg_p.add_argument("--ledger-path", default=None, help="Explicit path to ledger JSON file")
+    reg_p = subparsers.add_parser("register", help="Register a local file for upload", parents=[parent_parser])
     reg_p.add_argument("filepath", help="Path to video file")
     reg_p.add_argument("--camera", default="rtsp", help="Camera type (rtsp/usb)")
     reg_p.add_argument("--remote", default="gdrive-randomdice:", help="rclone remote")

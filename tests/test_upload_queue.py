@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -10,7 +11,14 @@ import pytest
 repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root))
 
-from scripts.upload_queue import UploadQueue, UploadQueueWorker, UploadState, CorruptLedgerError
+from scripts.upload_queue import (
+    UploadQueue,
+    UploadQueueWorker,
+    UploadState,
+    CorruptLedgerError,
+    DEFAULT_WAKE_SERVICE_NAME,
+    DEFAULT_WAKE_TIMER_UNIT,
+)
 from scripts.lifecycle_manager import (
     check_drain_prerequisites,
     complete_drain_if_ready,
@@ -1517,6 +1525,496 @@ def test_valid_upload_completion_reaches_daytime_idle_and_dispatch_is_idempotent
         ok2, msg2 = complete_drain_if_ready(temp_dirs=[], staging_dirs=[staging_dir])
         assert ok2 is True
         mock_watchdog.assert_not_called()
+
+
+# ── Timing Budget & Cross-Invocation Wake Tests (14 Scenarios) ─────────────────
+
+def test_wake_scenario_1_slow_upload_timeout_preserves_future_recovery_eligibility(tmp_path):
+    """Scenario 1: Slow upload timeout can consume a large part of one invocation without losing future recovery eligibility."""
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(
+        ledger_path=ledger_file,
+        upload_timeout_sec=600,
+        max_attempts=2,
+        recovery_cooldown_sec=300.0,
+        max_recovery_cycles=2,
+    )
+    clip = tmp_path / "slow_motion.mp4"
+    clip.write_bytes(b"slow_video_bytes")
+    queue.register_file(clip, camera_type="rtsp")
+
+    fake_time = FakeTimeContext(1000.0)
+
+    def mock_slow_timeout(cmd, *args, **kwargs):
+        res = MagicMock()
+        if "copyto" in cmd:
+            fake_time.sleep(600.0)
+            res.returncode = 1
+            res.stderr = "rclone copyto timed out after 600s"
+            return res
+        res.returncode = 0
+        return res
+
+    with patch("time.time", side_effect=fake_time.time), \
+         patch("time.sleep", side_effect=fake_time.sleep), \
+         patch("shutil.which", return_value="/usr/bin/rclone"), \
+         patch("subprocess.run", side_effect=mock_slow_timeout):
+
+        ok, msg = queue.run_until_empty(max_wait_sec=3600, poll_interval_sec=1.0, staging_dirs=[], schedule_wake_on_cooldown=False)
+        item = queue.get_item("rtsp:slow_motion.mp4")
+        assert item["recovery_cycle"] >= 1
+
+
+def test_wake_scenario_2_invocation_timeout_preserves_and_schedules_future_recovery(tmp_path):
+    """Scenario 2: Uploader invocation timing out does not eliminate a scheduled future recovery."""
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(
+        ledger_path=ledger_file,
+        upload_timeout_sec=600,
+        max_attempts=5,
+        recovery_cooldown_sec=300.0,
+        max_recovery_cycles=2,
+    )
+    clip = tmp_path / "timeout_clip.mp4"
+    clip.write_bytes(b"data")
+    queue.register_file(clip, camera_type="rtsp")
+
+    queue._update_item_state(
+        "rtsp:timeout_clip.mp4",
+        UploadState.FAILED_EXHAUSTED,
+        exhausted_at_ts=1000.0,
+        recovery_cycle=0,
+    )
+
+    wake_calls = []
+
+    def mock_wake(wait_sec, service_name=DEFAULT_WAKE_SERVICE_NAME, timer_unit=DEFAULT_WAKE_TIMER_UNIT):
+        wake_calls.append((wait_sec, service_name, timer_unit))
+        return True, "Mock wake scheduled"
+
+    fake_time = FakeTimeContext(1050.0)
+    with patch("time.time", side_effect=fake_time.time), \
+         patch("scripts.upload_queue.schedule_systemd_wake", side_effect=mock_wake):
+        ok, msg = queue.run_until_empty(max_wait_sec=10, poll_interval_sec=1.0, staging_dirs=[], schedule_wake_on_cooldown=True)
+        assert ok is False
+        assert len(wake_calls) == 1
+        assert wake_calls[0][0] == pytest.approx(250.0, abs=1.0)
+
+
+def test_wake_scenario_3_temporarily_failed_exhausted_produces_automatic_future_wake(tmp_path):
+    """Scenario 3: Temporarily FAILED_EXHAUSTED item produces an automatic future wake."""
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(
+        ledger_path=ledger_file,
+        recovery_cooldown_sec=300.0,
+        max_recovery_cycles=3,
+        max_attempts=1,
+    )
+    clip = tmp_path / "wake_clip.mp4"
+    clip.write_bytes(b"data")
+    queue.register_file(clip, camera_type="rtsp")
+
+    scheduled_wakes = []
+
+    def mock_schedule(wait_sec, service_name=DEFAULT_WAKE_SERVICE_NAME, timer_unit=DEFAULT_WAKE_TIMER_UNIT):
+        scheduled_wakes.append(wait_sec)
+        return True, "Scheduled"
+
+    fake_time = FakeTimeContext(1000.0)
+
+    def mock_fail(cmd, *args, **kwargs):
+        res = MagicMock()
+        if "copyto" in cmd:
+            res.returncode = 1
+            res.stderr = "network error"
+            return res
+        res.returncode = 0
+        return res
+
+    with patch("time.time", side_effect=fake_time.time), \
+         patch("shutil.which", return_value="/usr/bin/rclone"), \
+         patch("subprocess.run", side_effect=mock_fail), \
+         patch("scripts.upload_queue.schedule_systemd_wake", side_effect=mock_schedule):
+
+        ok, msg = queue.run_until_empty(max_wait_sec=600, poll_interval_sec=1.0, staging_dirs=[], schedule_wake_on_cooldown=True)
+        assert ok is False
+        assert "in recovery cooldown" in msg
+        assert len(scheduled_wakes) == 1
+        assert scheduled_wakes[0] == pytest.approx(300.0, abs=1.0)
+
+        item = queue.get_item("rtsp:wake_clip.mp4")
+        assert item["state"] == UploadState.FAILED_EXHAUSTED
+        assert item["earliest_recovery_ts"] == pytest.approx(1300.0, abs=1.0)
+
+
+def test_wake_scenario_4_wake_after_cooldown_starts_next_cycle_without_human_action(tmp_path):
+    """Scenario 4: Wake after cooldown starts the next cycle without human action across process boundary."""
+    ledger_file = tmp_path / "ledger.json"
+    clip = tmp_path / "proc_boundary.mp4"
+    clip.write_bytes(b"data")
+    sz = clip.stat().st_size
+
+    # --- INVOCATION A ---
+    queue_a = UploadQueue(
+        ledger_path=ledger_file,
+        recovery_cooldown_sec=100.0,
+        max_recovery_cycles=2,
+        max_attempts=1,
+    )
+    queue_a.register_file(clip, camera_type="rtsp")
+
+    wake_scheduled = []
+    with patch("time.time", return_value=1000.0), \
+         patch("shutil.which", return_value="/usr/bin/rclone"), \
+         patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="transient fail")), \
+         patch("scripts.upload_queue.schedule_systemd_wake", side_effect=lambda w, **kw: (wake_scheduled.append(w), (True, "ok"))[1]):
+        ok_a, msg_a = queue_a.run_until_empty(schedule_wake_on_cooldown=True, staging_dirs=[])
+        assert ok_a is False
+        assert len(wake_scheduled) == 1
+        assert wake_scheduled[0] == pytest.approx(100.0, abs=1.0)
+
+    item_after_a = queue_a.get_item("rtsp:proc_boundary.mp4")
+    assert item_after_a["state"] == UploadState.FAILED_EXHAUSTED
+    assert item_after_a["recovery_cycle"] == 0
+
+    # --- TIME PASSES: 105s later, systemd timer fires, starting INVOCATION B ---
+    queue_b = UploadQueue(
+        ledger_path=ledger_file,
+        recovery_cooldown_sec=100.0,
+        max_recovery_cycles=2,
+        max_attempts=1,
+    )
+
+    copyto_called = []
+    def mock_success(cmd, *args, **kwargs):
+        res = MagicMock(returncode=0)
+        if "lsf" in cmd:
+            res.stdout = f"{sz};proc_boundary.mp4\n" if copyto_called else ""
+        elif "copyto" in cmd:
+            copyto_called.append(True)
+        return res
+
+    with patch("time.time", return_value=1105.0), \
+         patch("shutil.which", return_value="/usr/bin/rclone"), \
+         patch("subprocess.run", side_effect=mock_success), \
+         patch("scripts.lifecycle_manager.complete_drain_if_ready", return_value=(True, "Drain done")):
+        ok_b, msg_b = queue_b.run_until_empty(schedule_wake_on_cooldown=True, staging_dirs=[])
+        assert ok_b is True
+
+    item_after_b = queue_b.get_item("rtsp:proc_boundary.mp4")
+    assert item_after_b["state"] == UploadState.UPLOADED
+    assert item_after_b["recovery_cycle"] == 1
+    assert item_after_b["attempt_count"] == 1
+
+
+def test_wake_scenario_5_multiple_recovery_cycles_across_separate_invocations(tmp_path):
+    """Scenario 5: Multiple recovery cycles can occur across separate uploader invocations."""
+    ledger_file = tmp_path / "ledger.json"
+    clip = tmp_path / "multi_invoc.mp4"
+    clip.write_bytes(b"data")
+    sz = clip.stat().st_size
+
+    # Cycle 0: Invocation 1 fails -> FAILED_EXHAUSTED (cycle 0)
+    q1 = UploadQueue(ledger_path=ledger_file, recovery_cooldown_sec=60.0, max_recovery_cycles=2, max_attempts=1)
+    q1.register_file(clip, camera_type="rtsp")
+
+    with patch("time.time", return_value=1000.0), \
+         patch("shutil.which", return_value="/usr/bin/rclone"), \
+         patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="fail1")), \
+         patch("scripts.upload_queue.schedule_systemd_wake", return_value=(True, "ok")):
+        ok1, _ = q1.run_until_empty(schedule_wake_on_cooldown=True, staging_dirs=[])
+        assert ok1 is False
+
+    assert q1.get_item("rtsp:multi_invoc.mp4")["recovery_cycle"] == 0
+
+    # Cycle 1: Invocation 2 wakes at t=1070.0 (cooldown elapsed), fails again -> FAILED_EXHAUSTED (cycle 1)
+    q2 = UploadQueue(ledger_path=ledger_file, recovery_cooldown_sec=60.0, max_recovery_cycles=2, max_attempts=1)
+    with patch("time.time", return_value=1070.0), \
+         patch("shutil.which", return_value="/usr/bin/rclone"), \
+         patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="fail2")), \
+         patch("scripts.upload_queue.schedule_systemd_wake", return_value=(True, "ok")):
+        ok2, _ = q2.run_until_empty(schedule_wake_on_cooldown=True, staging_dirs=[])
+        assert ok2 is False
+
+    assert q2.get_item("rtsp:multi_invoc.mp4")["recovery_cycle"] == 1
+
+    # Cycle 2: Invocation 3 wakes at t=1140.0 (cooldown elapsed), succeeds!
+    q3 = UploadQueue(ledger_path=ledger_file, recovery_cooldown_sec=60.0, max_recovery_cycles=2, max_attempts=1)
+
+    def mock_q3_run(cmd, *args, **kwargs):
+        res = MagicMock(returncode=0)
+        if "lsf" in cmd:
+            res.stdout = f"{sz};multi_invoc.mp4\n"
+        return res
+
+    with patch("time.time", return_value=1140.0), \
+         patch("shutil.which", return_value="/usr/bin/rclone"), \
+         patch("subprocess.run", side_effect=mock_q3_run), \
+         patch("scripts.lifecycle_manager.complete_drain_if_ready", return_value=(True, "Drain done")):
+        ok3, _ = q3.run_until_empty(schedule_wake_on_cooldown=True, staging_dirs=[])
+        assert ok3 is True
+
+    item_final = q3.get_item("rtsp:multi_invoc.mp4")
+    assert item_final["state"] == UploadState.UPLOADED
+    assert item_final["recovery_cycle"] == 2
+
+
+def test_wake_scenario_6_max_recovery_cycle_ceiling_stops_future_scheduling(tmp_path):
+    """Scenario 6: Max recovery-cycle ceiling stops future scheduling and cancels wake timer."""
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(
+        ledger_path=ledger_file,
+        recovery_cooldown_sec=50.0,
+        max_recovery_cycles=1,
+        max_attempts=1,
+    )
+    clip = tmp_path / "ceiling_clip.mp4"
+    clip.write_bytes(b"data")
+    queue.register_file(clip, camera_type="rtsp")
+
+    queue._update_item_state(
+        "rtsp:ceiling_clip.mp4",
+        UploadState.FAILED_EXHAUSTED,
+        exhausted_at_ts=1000.0,
+        recovery_cycle=1,
+    )
+
+    wake_calls = []
+    cancel_calls = []
+
+    with patch("time.time", return_value=10000.0), \
+         patch("scripts.upload_queue.schedule_systemd_wake", side_effect=lambda *a, **k: (wake_calls.append(a), (True, "ok"))[1]), \
+         patch("scripts.upload_queue.cancel_systemd_wake", side_effect=lambda *a, **k: (cancel_calls.append(a), (True, "ok"))[1]):
+        ok, msg = queue.run_until_empty(schedule_wake_on_cooldown=True, staging_dirs=[])
+        assert ok is False
+        assert "permanently FAILED_EXHAUSTED (max cycles reached)" in msg
+        assert len(wake_calls) == 0
+        assert len(cancel_calls) == 1
+
+
+def test_wake_scenario_7_reboot_restart_reconstructs_pending_future_recovery(tmp_path):
+    """Scenario 7: Reboot/restart reconstructs pending future recovery from ledger."""
+    ledger_file = tmp_path / "ledger.json"
+    clip = tmp_path / "reboot_clip.mp4"
+    clip.write_bytes(b"data")
+
+    q_init = UploadQueue(ledger_path=ledger_file, recovery_cooldown_sec=300.0, max_recovery_cycles=2)
+    q_init.register_file(clip, camera_type="rtsp")
+    q_init._update_item_state(
+        "rtsp:reboot_clip.mp4",
+        UploadState.FAILED_EXHAUSTED,
+        exhausted_at_ts=1000.0,
+        recovery_cycle=0,
+    )
+
+    raw_data = json.loads(ledger_file.read_text())
+    assert raw_data["items"]["rtsp:reboot_clip.mp4"]["earliest_recovery_ts"] == pytest.approx(1300.0)
+    assert raw_data["next_recovery_ts"] == pytest.approx(1300.0)
+
+    q_boot = UploadQueue(ledger_path=ledger_file, recovery_cooldown_sec=300.0, max_recovery_cycles=2)
+    assert q_boot.get_earliest_recovery_ts(now=1100.0) == pytest.approx(1300.0)
+
+    wake_scheduled = []
+    with patch("time.time", return_value=1100.0), \
+         patch("scripts.upload_queue.schedule_systemd_wake", side_effect=lambda w, **kw: (wake_scheduled.append(w), (True, "ok"))[1]):
+        ok, msg = q_boot.run_until_empty(schedule_wake_on_cooldown=True, staging_dirs=[])
+        assert ok is False
+        assert len(wake_scheduled) == 1
+        assert wake_scheduled[0] == pytest.approx(200.0, abs=1.0)
+
+
+def test_wake_scenario_8_uploading_crash_recovery_resets_to_pending(tmp_path):
+    """Scenario 8: UPLOADING crash recovery remains correct across reboot/crash."""
+    ledger_file = tmp_path / "ledger.json"
+    clip = tmp_path / "crash_clip.mp4"
+    clip.write_bytes(b"data")
+
+    q1 = UploadQueue(ledger_path=ledger_file)
+    q1.register_file(clip, camera_type="rtsp")
+    q1._update_item_state("rtsp:crash_clip.mp4", UploadState.UPLOADING)
+
+    q2 = UploadQueue(ledger_path=ledger_file)
+    assert q2.get_item("rtsp:crash_clip.mp4")["state"] == UploadState.UPLOADING
+
+    recovered = q2.recover_pending()
+    assert recovered == 1
+    assert q2.get_item("rtsp:crash_clip.mp4")["state"] == UploadState.PENDING
+
+
+def test_wake_scenario_9_no_rapid_timer_or_restart_hammering(tmp_path):
+    """Scenario 9: No rapid timer or restart hammering (bounded scheduling)."""
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(
+        ledger_path=ledger_file,
+        recovery_cooldown_sec=300.0,
+        max_recovery_cycles=2,
+        max_attempts=1,
+    )
+    clip = tmp_path / "hammer_clip.mp4"
+    clip.write_bytes(b"data")
+    queue.register_file(clip, camera_type="rtsp")
+
+    wakes = []
+    with patch("time.time", return_value=1000.0), \
+         patch("shutil.which", return_value="/usr/bin/rclone"), \
+         patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="fail")), \
+         patch("scripts.upload_queue.schedule_systemd_wake", side_effect=lambda w, **kw: (wakes.append(w), (True, "ok"))[1]):
+        ok, _ = queue.run_until_empty(schedule_wake_on_cooldown=True, staging_dirs=[])
+        assert ok is False
+        assert len(wakes) == 1
+        assert wakes[0] >= 300.0
+
+
+def test_wake_scenario_10_successful_later_cycle_performs_remote_verification(tmp_path):
+    """Scenario 10: Successful later cycle performs remote existence and size verification."""
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(
+        ledger_path=ledger_file,
+        recovery_cooldown_sec=50.0,
+        max_recovery_cycles=2,
+        max_attempts=1,
+    )
+    clip = tmp_path / "verify_clip.mp4"
+    clip.write_bytes(b"valid_payload_bytes")
+    sz = clip.stat().st_size
+
+    queue.register_file(clip, camera_type="rtsp")
+    queue._update_item_state(
+        "rtsp:verify_clip.mp4",
+        UploadState.FAILED_EXHAUSTED,
+        exhausted_at_ts=1000.0,
+        recovery_cycle=0,
+    )
+
+    commands_run = []
+
+    def mock_run(cmd, *args, **kwargs):
+        commands_run.append(" ".join(cmd) if isinstance(cmd, list) else str(cmd))
+        res = MagicMock(returncode=0)
+        if "lsf" in cmd:
+            res.stdout = f"{sz};verify_clip.mp4\n"
+        return res
+
+    with patch("time.time", return_value=1100.0), \
+         patch("shutil.which", return_value="/usr/bin/rclone"), \
+         patch("subprocess.run", side_effect=mock_run), \
+         patch("scripts.lifecycle_manager.complete_drain_if_ready", return_value=(True, "Drain done")):
+        ok, _ = queue.run_until_empty(schedule_wake_on_cooldown=True, staging_dirs=[])
+        assert ok is True
+
+    item = queue.get_item("rtsp:verify_clip.mp4")
+    assert item["state"] == UploadState.UPLOADED
+    assert item["remote_verified"] is True
+    assert any("lsf" in c for c in commands_run)
+
+
+def test_wake_scenario_11_late_success_completes_drain_report_dispatch_daytime_idle(tmp_path):
+    """Scenario 11: Late success still completes drain, report dispatch, and DAYTIME_IDLE transition."""
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    clip = staging_dir / "late_success.mp4"
+    clip.write_bytes(b"data")
+    sz = clip.stat().st_size
+
+    state_file = tmp_path / "state.json"
+    ledger_file = tmp_path / "ledger.json"
+
+    queue = UploadQueue(
+        ledger_path=ledger_file,
+        recovery_cooldown_sec=50.0,
+        max_recovery_cycles=2,
+        max_attempts=1,
+    )
+    queue.register_file(clip, camera_type="rtsp", rclone_dest_path="")
+    queue._update_item_state(
+        "rtsp:late_success.mp4",
+        UploadState.FAILED_EXHAUSTED,
+        exhausted_at_ts=1000.0,
+        recovery_cycle=0,
+    )
+
+    def mock_run(cmd, *args, **kwargs):
+        res = MagicMock(returncode=0)
+        if "lsf" in cmd:
+            res.stdout = f"{sz};late_success.mp4\n"
+        return res
+
+    with patch.dict(os.environ, {"FAIR_FEEDER_STATE_FILE": str(state_file), "UPLOAD_LEDGER_PATH": str(ledger_file)}), \
+         patch("time.time", return_value=1100.0), \
+         patch("shutil.which", return_value="/usr/bin/rclone"), \
+         patch("subprocess.run", side_effect=mock_run), \
+         patch("scripts.lifecycle_manager.get_fair_feeder_processes", return_value=[]), \
+         patch("scripts.lifecycle_manager.is_service_active", return_value=False), \
+         patch("scripts.lifecycle_manager.get_mem_available_mb", return_value=1800), \
+         patch("scripts.daily_watchdog.check_and_recover_report") as mock_report_dispatch:
+
+        write_state({"state": LifecycleState.LOCAL_MORNING_DRAIN, "services_active": False})
+
+        ok, msg = queue.run_until_empty(schedule_wake_on_cooldown=True, staging_dirs=[staging_dir])
+        assert ok is True
+        mock_report_dispatch.assert_called_once()
+
+        state = read_state()
+        assert state["state"] == LifecycleState.DAYTIME_IDLE
+        assert state["source_evidence_ready"] is True
+        assert state["local_drain_complete"] is True
+
+
+def test_wake_scenario_12_unresolved_state_still_blocks_host_ready(tmp_path):
+    """Scenario 12: Unresolved state still blocks host-ready and drain prerequisites."""
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(
+        ledger_path=ledger_file,
+        recovery_cooldown_sec=300.0,
+        max_recovery_cycles=2,
+    )
+    clip = tmp_path / "blocking_clip.mp4"
+    clip.write_bytes(b"data")
+    queue.register_file(clip, camera_type="rtsp")
+    queue._update_item_state(
+        "rtsp:blocking_clip.mp4",
+        UploadState.FAILED_EXHAUSTED,
+        exhausted_at_ts=1000.0,
+    )
+
+    drained, reason = check_drain_prerequisites(temp_dirs=[], staging_dirs=[], upload_queue=queue)
+    assert drained is False
+    assert "unresolved upload(s) in queue" in reason
+
+
+def test_wake_scenario_13_camera_safe_rtsp_usb_identity_remains_unchanged(tmp_path):
+    """Scenario 13: Camera-safe rtsp:* / usb:* ledger separation remains unchanged."""
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(ledger_path=ledger_file)
+    tapo = tmp_path / "motion_same.mp4"
+    tapo.write_bytes(b"tapo")
+    usb = tmp_path / "usb_dir" / "motion_same.mp4"
+    usb.parent.mkdir()
+    usb.write_bytes(b"usb")
+
+    it_tapo = queue.register_file(tapo, camera_type="rtsp")
+    it_usb = queue.register_file(usb, camera_type="usb")
+
+    assert it_tapo["key"] == "rtsp:motion_same.mp4"
+    assert it_usb["key"] == "usb:motion_same.mp4"
+    assert it_tapo["key"] != it_usb["key"]
+
+
+def test_wake_scenario_14_tapo_logitech_destination_routing_remains_unchanged(tmp_path):
+    """Scenario 14: TAPO / Logitech destination routing remains unchanged."""
+    ledger_file = tmp_path / "ledger.json"
+    queue = UploadQueue(ledger_path=ledger_file)
+    tapo = tmp_path / "motion_tapo.mp4"
+    tapo.write_bytes(b"tapo")
+    usb = tmp_path / "motion_usb.mp4"
+    usb.write_bytes(b"usb")
+
+    it_tapo = queue.register_file(tapo, camera_type="rtsp", rclone_dest_path="")
+    it_usb = queue.register_file(usb, camera_type="usb", rclone_dest_path="14yBPCZvjrztIqxI5l-ckgZYkC7D0ZTdS")
+
+    assert it_tapo["rclone_dest_path"] == ""
+    assert it_usb["rclone_dest_path"] == "14yBPCZvjrztIqxI5l-ckgZYkC7D0ZTdS"
+
 
 
 

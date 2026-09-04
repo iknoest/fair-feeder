@@ -1,0 +1,10 @@
+[Unit]
+Description=Fair Feeder Reboot Recovery Wake Timer
+After=network-online.target
+
+[Timer]
+OnBootSec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

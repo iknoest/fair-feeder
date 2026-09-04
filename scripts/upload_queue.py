@@ -31,12 +31,14 @@ except ImportError:
 repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root))
 DEFAULT_LEDGER_PATH = repo_root / "upload_ledger.json"
-DEFAULT_MAX_WAIT_SEC = 2700
+DEFAULT_MAX_WAIT_SEC = 3600  # Bounds one active uploader invocation / attempt cycle
 DEFAULT_UPLOAD_TIMEOUT_SEC = 600
 DEFAULT_VERIFY_TIMEOUT_SEC = 30
 DEFAULT_MAX_ATTEMPTS = 5
 DEFAULT_MAX_RECOVERY_CYCLES = 3
 DEFAULT_RECOVERY_COOLDOWN_SEC = 300.0
+DEFAULT_WAKE_TIMER_UNIT = "fair-feeder-uploader-wake"
+DEFAULT_WAKE_SERVICE_NAME = "fair-feeder-uploader.service"
 
 from config import (
     LOGITECH_DRIVE_FOLDER_ID,
@@ -56,6 +58,72 @@ class UploadState:
     FAILED_RETRYABLE = "FAILED_RETRYABLE"
     FAILED_EXHAUSTED = "FAILED_EXHAUSTED"
     UPLOADED = "UPLOADED"
+
+
+def schedule_systemd_wake(
+    wait_sec: float,
+    service_name: str = DEFAULT_WAKE_SERVICE_NAME,
+    timer_unit: str = DEFAULT_WAKE_TIMER_UNIT,
+) -> Tuple[bool, str]:
+    """
+    Schedules a transient systemd timer to wake service_name after wait_sec seconds.
+    Uses systemd-run. Bounded and non-hammering: cancels any previous timer for the same unit first.
+    """
+    sctl = shutil.which("systemctl")
+    srun = shutil.which("systemd-run")
+    if not sctl or "systemctl" not in sctl or not srun or "systemd-run" not in srun:
+        return False, "systemd-run or systemctl not found (non-systemd / local environment)"
+
+    cancel_systemd_wake(timer_unit)
+
+    import math
+    delay_sec = max(1, int(math.ceil(wait_sec)))
+    cmd = [
+        "systemd-run",
+        f"--unit={timer_unit}",
+        f"--on-active={delay_sec}s",
+        "--description=Fair Feeder Autonomous Upload Recovery Wake",
+        "systemctl",
+        "start",
+        service_name,
+    ]
+    if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() != 0 and shutil.which("sudo"):
+        cmd = ["sudo", "-n"] + cmd
+
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode == 0:
+            msg = f"Scheduled systemd wake timer ({timer_unit}) for {service_name} in {delay_sec}s"
+            print(f"⏰ {msg}")
+            return True, msg
+        else:
+            msg = f"Failed to schedule systemd wake timer: {res.stderr.strip()}"
+            print(f"⚠️ {msg}")
+            return False, msg
+    except Exception as e:
+        msg = f"Exception scheduling systemd wake timer: {e}"
+        print(f"⚠️ {msg}")
+        return False, msg
+
+
+def cancel_systemd_wake(timer_unit: str = DEFAULT_WAKE_TIMER_UNIT) -> Tuple[bool, str]:
+    """Cancels any pending systemd transient wake timer."""
+    if not shutil.which("systemctl"):
+        return False, "systemctl not found"
+
+    cmd = ["systemctl", "stop", f"{timer_unit}.timer"]
+    if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() != 0 and shutil.which("sudo"):
+        cmd = ["sudo", "-n"] + cmd
+
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, check=False)
+        reset_cmd = ["systemctl", "reset-failed", f"{timer_unit}.timer"]
+        if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() != 0 and shutil.which("sudo"):
+            reset_cmd = ["sudo", "-n"] + reset_cmd
+        subprocess.run(reset_cmd, capture_output=True, text=True, check=False)
+        return True, f"Cancelled {timer_unit}.timer"
+    except Exception as e:
+        return False, str(e)
 
 
 class UploadQueue:
@@ -271,6 +339,8 @@ class UploadQueue:
         item["state"] = UploadState.PENDING
         item["exhausted_at"] = None
         item["exhausted_at_ts"] = None
+        item["earliest_recovery_ts"] = None
+        item["earliest_recovery_at"] = None
         item["next_attempt_at"] = None
         item["last_error"] = f"Recovered for cycle {item['recovery_cycle']}/{max_cycles} ({reason})"
 
@@ -700,6 +770,27 @@ class UploadQueue:
                     item["exhausted_at_ts"] = exhausted_at_ts
                 if recovery_cycle is not None:
                     item["recovery_cycle"] = recovery_cycle
+
+                if state == UploadState.FAILED_EXHAUSTED:
+                    max_cycles = getattr(self, "max_recovery_cycles", DEFAULT_MAX_RECOVERY_CYCLES)
+                    cooldown = getattr(self, "recovery_cooldown_sec", DEFAULT_RECOVERY_COOLDOWN_SEC)
+                    if item.get("recovery_cycle", 0) < max_cycles:
+                        ex_ts = item.get("exhausted_at_ts")
+                        if ex_ts is None:
+                            ex_ts = time.time()
+                            item["exhausted_at_ts"] = ex_ts
+                        item["earliest_recovery_ts"] = float(ex_ts) + cooldown
+                        item["earliest_recovery_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(item["earliest_recovery_ts"]))
+                    else:
+                        item["earliest_recovery_ts"] = None
+                        item["earliest_recovery_at"] = None
+                elif state in (UploadState.PENDING, UploadState.UPLOADED):
+                    item["earliest_recovery_ts"] = None
+                    item["earliest_recovery_at"] = None
+
+                recoverable = [it["earliest_recovery_ts"] for it in items.values() if it.get("earliest_recovery_ts") is not None]
+                data["next_recovery_ts"] = min(recoverable) if recoverable else None
+
                 return item, data
             return None, None
 
@@ -734,6 +825,9 @@ class UploadQueue:
                     if is_eligible:
                         self._apply_recovery_cycle(item, max_recovery_cycles=max_cycles, reason="after cooldown")
                         recovered += 1
+            if recovered > 0:
+                recoverable = [it["earliest_recovery_ts"] for it in items.values() if it.get("earliest_recovery_ts") is not None]
+                data["next_recovery_ts"] = min(recoverable) if recoverable else None
             return recovered, data if recovered > 0 else None
 
         recovered_count = self._locked_transaction(_tx)
@@ -792,12 +886,51 @@ class UploadQueue:
                     print(f"⚠️ Failed to auto-register {key}: {e}")
         return registered
 
+    def get_earliest_recovery_ts(self, now: Optional[float] = None) -> Optional[float]:
+        """
+        Returns the earliest recovery eligibility timestamp across all unresolved items,
+        or None if no items have remaining recovery cycles.
+        """
+        current_time = now if now is not None else time.time()
+        earliest_ts = None
+        for item in self.get_unresolved_items():
+            if item.get("state") == UploadState.FAILED_EXHAUSTED:
+                is_eligible, eligible_ts = self.get_recovery_eligibility(item, now=current_time)
+                if is_eligible:
+                    return current_time
+                elif eligible_ts is not None:
+                    earliest_ts = eligible_ts if earliest_ts is None else min(earliest_ts, eligible_ts)
+            elif item.get("state") in (UploadState.PENDING, UploadState.FAILED_RETRYABLE, UploadState.UPLOADING):
+                next_at = item.get("next_attempt_at")
+                if next_at is not None:
+                    earliest_ts = next_at if earliest_ts is None else min(earliest_ts, next_at)
+                else:
+                    return current_time
+        return earliest_ts
+
+    def schedule_wake(
+        self,
+        wake_ts: float,
+        now: Optional[float] = None,
+        service_name: str = DEFAULT_WAKE_SERVICE_NAME,
+        timer_unit: str = DEFAULT_WAKE_TIMER_UNIT,
+    ) -> Tuple[bool, str]:
+        current_time = now if now is not None else time.time()
+        wait_sec = max(1.0, wake_ts - current_time)
+        return schedule_systemd_wake(wait_sec, service_name=service_name, timer_unit=timer_unit)
+
+    def cancel_wake(self, timer_unit: str = DEFAULT_WAKE_TIMER_UNIT) -> Tuple[bool, str]:
+        return cancel_systemd_wake(timer_unit=timer_unit)
+
     def run_until_empty(
         self,
         max_wait_sec: int = DEFAULT_MAX_WAIT_SEC,
         poll_interval_sec: float = 2.0,
         staging_dirs: Optional[List[Path]] = None,
         temp_dirs: Optional[List[Path]] = None,
+        schedule_wake_on_cooldown: Optional[bool] = None,
+        wake_service_name: str = DEFAULT_WAKE_SERVICE_NAME,
+        wake_timer_unit: str = DEFAULT_WAKE_TIMER_UNIT,
     ) -> Tuple[bool, str]:
         """
         Processes queue items until empty, timeout, or all remaining items are FAILED_EXHAUSTED and unrecoverable.
@@ -832,6 +965,7 @@ class UploadQueue:
                     from scripts.lifecycle_manager import complete_drain_if_ready
                     ok, msg = complete_drain_if_ready(temp_dirs=temp_dirs, staging_dirs=staging_dirs_to_check)
                     if ok:
+                        self.cancel_wake(wake_timer_unit)
                         print(f"✅ Drain finalized: {msg}")
                         return True, f"Uploads finished and drain completed: {msg}"
                     else:
@@ -861,19 +995,38 @@ class UploadQueue:
 
                 if not recoverable_items:
                     # All items have exhausted ALL recovery cycles: fail closed immediately
+                    self.cancel_wake(wake_timer_unit)
                     exhausted_names = [item.get("key", item.get("filename")) for item in unresolved]
                     err_msg = f"All remaining items ({len(unresolved)}) are permanently FAILED_EXHAUSTED (max cycles reached): {exhausted_names}"
                     print(f"🚨 Standalone uploader stopped: {err_msg}")
                     return False, err_msg
 
-                # Items are recoverable after cooldown: sleep until earliest eligibility or budget
+                # If cooldown has already elapsed, loop immediately so reset_exhausted_items recovers it
+                if earliest_eligible_ts is not None and time.time() >= earliest_eligible_ts:
+                    continue
+
+                # Items are recoverable in the future.
+                use_wake = schedule_wake_on_cooldown
+                if use_wake is None:
+                    sctl = shutil.which("systemctl")
+                    srun = shutil.which("systemd-run")
+                    use_wake = bool(sctl and "systemctl" in sctl and srun and "systemd-run" in srun)
+
+                wait_sec = max(0.0, (earliest_eligible_ts - time.time())) if earliest_eligible_ts is not None else 0.0
+
+                if use_wake:
+                    self.schedule_wake(earliest_eligible_ts, service_name=wake_service_name, timer_unit=wake_timer_unit)
+                    iso_ts = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(earliest_eligible_ts)) if earliest_eligible_ts else ""
+                    msg = f"All {len(unresolved)} remaining item(s) are in recovery cooldown. Scheduled wake at {iso_ts} ({wait_sec:.1f}s). Exiting bounded invocation."
+                    print(f"⏳ {msg}")
+                    return False, msg
+
+                # Fallback: sleep in-process bounded by remaining budget (for mock/non-systemd environments)
                 remaining_budget = max_wait_sec - (time.time() - start_t)
                 if remaining_budget <= 0:
                     break
 
-                wait_sec = max(0.0, (earliest_eligible_ts - time.time())) if earliest_eligible_ts is not None else 0.0
                 sleep_duration = min(wait_sec, remaining_budget)
-                # Add 0.1s margin to ensure time >= eligible_ts upon wakeup
                 sleep_target = min(sleep_duration + 0.1, remaining_budget)
                 if sleep_target > 0:
                     print(f"⏳ All {len(unresolved)} remaining item(s) are in recovery cooldown. Sleeping {sleep_target:.1f}s until earliest recovery eligibility...")
@@ -897,7 +1050,21 @@ class UploadQueue:
             time.sleep(poll_interval_sec)
 
         unres = self.get_unresolved_items()
-        err_msg = f"Standalone uploader timed out after {max_wait_sec}s with {len(unres)} unresolved item(s)."
+        earliest_ts = self.get_earliest_recovery_ts()
+        use_wake = schedule_wake_on_cooldown
+        if use_wake is None:
+            sctl = shutil.which("systemctl")
+            srun = shutil.which("systemd-run")
+            use_wake = bool(sctl and "systemctl" in sctl and srun and "systemd-run" in srun)
+
+        if earliest_ts is not None and use_wake:
+            now = time.time()
+            wait_sec = max(0.0, earliest_ts - now)
+            self.schedule_wake(earliest_ts, now=now, service_name=wake_service_name, timer_unit=wake_timer_unit)
+            err_msg = f"Standalone uploader timed out after {max_wait_sec}s with {len(unres)} unresolved item(s). Scheduled future recovery wake in {wait_sec:.1f}s."
+        else:
+            err_msg = f"Standalone uploader timed out after {max_wait_sec}s with {len(unres)} unresolved item(s)."
+
         print(f"🚨 {err_msg}")
         return False, err_msg
 
@@ -977,6 +1144,9 @@ def main():
     run_empty_p = subparsers.add_parser("run-until-empty", help="Run uploader until queue is empty and trigger drain completion")
     run_empty_p.add_argument("--max-wait-sec", type=int, default=DEFAULT_MAX_WAIT_SEC, help="Max seconds to wait")
     run_empty_p.add_argument("--poll-interval", type=float, default=2.0, help="Poll interval in seconds")
+    run_empty_p.add_argument("--no-schedule-wake", action="store_true", help="Disable systemd wake scheduling on cooldown")
+    run_empty_p.add_argument("--wake-service", default=DEFAULT_WAKE_SERVICE_NAME, help="Systemd service unit to wake")
+    run_empty_p.add_argument("--wake-timer", default=DEFAULT_WAKE_TIMER_UNIT, help="Systemd transient timer unit name")
 
     reg_p = subparsers.add_parser("register", help="Register a local file for upload")
     reg_p.add_argument("filepath", help="Path to video file")
@@ -1002,7 +1172,14 @@ def main():
         rec = queue.recover_pending()
         print(f"Recovered {rec} item(s).")
     elif args.command == "run-until-empty":
-        ok, msg = queue.run_until_empty(max_wait_sec=args.max_wait_sec, poll_interval_sec=args.poll_interval)
+        schedule_wake = False if args.no_schedule_wake else None
+        ok, msg = queue.run_until_empty(
+            max_wait_sec=args.max_wait_sec,
+            poll_interval_sec=args.poll_interval,
+            schedule_wake_on_cooldown=schedule_wake,
+            wake_service_name=args.wake_service,
+            wake_timer_unit=args.wake_timer,
+        )
         print(msg)
         sys.exit(0 if ok else 1)
     elif args.command == "register":

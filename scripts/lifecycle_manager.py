@@ -484,7 +484,7 @@ def drain_and_idle(
                 import threading
                 from scripts.upload_queue import UploadQueue
                 uploader_t = threading.Thread(
-                    target=lambda: UploadQueue().run_until_empty(max_wait_sec=2700),
+                    target=lambda: UploadQueue().run_until_empty(max_wait_sec=3600),
                     name="BackgroundUploader",
                     daemon=True,
                 )

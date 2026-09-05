@@ -145,8 +145,6 @@ jobs:
           GDRIVE_OUTPUT_FOLDER_ID: ${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}
           GDRIVE_UPLOAD_FOLDER_ID: ${{ secrets.GDRIVE_UPLOAD_FOLDER_ID }}
           GDRIVE_MODEL_FILE_ID: ${{ secrets.GDRIVE_MODEL_FILE_ID }}
-          TelegramBotToken: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TelegramChatId: ${{ secrets.TELEGRAM_CHAT_ID }}
           ROBOFLOW_API_KEY: ${{ secrets.ROBOFLOW_API_KEY }}
           ROBOFLOW_WORKSPACE: ${{ secrets.ROBOFLOW_WORKSPACE }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -170,13 +168,13 @@ jobs:
         run: |
           python scripts/send_tapo_replay_test.py
 
-      - name: Upload TAPO timeline artifact
+      - name: Upload TAPO evidence artifact
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
-          name: tapo-timeline-${{ needs.prepare.outputs.target_date }}
-          path: /tmp/output/tapo_timeline_${{ needs.prepare.outputs.target_date }}.json
+          name: tapo-evidence-${{ needs.prepare.outputs.target_date }}
+          path: /tmp/output/
           retention-days: 3
 
       - name: Upload output notebook (only when analysis fails)
@@ -283,20 +281,18 @@ jobs:
           echo "GDRIVE_OUTPUT_FOLDER_ID=${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}" >> "$GITHUB_ENV"
           echo "TARGET_DATE=${{ needs.prepare.outputs.target_date }}" >> "$GITHUB_ENV"
 
-      - name: Download TAPO timeline artifact
+      - name: Download TAPO evidence artifact
         continue-on-error: true
         uses: actions/download-artifact@v6
         with:
-          name: tapo-timeline-${{ needs.prepare.outputs.target_date }}
-          path: /tmp/tapo_timeline_artifact
+          name: tapo-evidence-${{ needs.prepare.outputs.target_date }}
+          path: /tmp/output
 
       - name: Run Logitech Gemini VLM Shadow Report
         env:
           GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
           GDRIVE_LOGITECH_FOLDER_ID: ${{ secrets.GDRIVE_LOGITECH_FOLDER_ID }}
           GDRIVE_OUTPUT_FOLDER_ID: ${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ROBOFLOW_API_KEY: ${{ secrets.ROBOFLOW_API_KEY }}
           ROBOFLOW_WORKSPACE: ${{ secrets.ROBOFLOW_WORKSPACE }}
         run: |
@@ -304,10 +300,10 @@ jobs:
           python scripts/prepare_vlm_references.py --out-dir "$REF_DIR"
           
           TIMELINE_ARG=""
-          if [ -f "/tmp/tapo_timeline_artifact/tapo_timeline_${TARGET_DATE}.json" ]; then
-            TIMELINE_ARG="--tapo-timeline /tmp/tapo_timeline_artifact/tapo_timeline_${TARGET_DATE}.json"
-          elif [ -f "/tmp/output/tapo_timeline_${TARGET_DATE}.json" ]; then
+          if [ -f "/tmp/output/tapo_timeline_${TARGET_DATE}.json" ]; then
             TIMELINE_ARG="--tapo-timeline /tmp/output/tapo_timeline_${TARGET_DATE}.json"
+          elif [ -f "/tmp/tapo_timeline_artifact/tapo_timeline_${TARGET_DATE}.json" ]; then
+            TIMELINE_ARG="--tapo-timeline /tmp/tapo_timeline_artifact/tapo_timeline_${TARGET_DATE}.json"
           fi
 
           if [ "${{ needs.prepare.outputs.target_date }}" == "REPLAY_TEST" ]; then
@@ -319,10 +315,8 @@ jobs:
               --confirm-cost \
               --vlm-provider gemini \
               --vlm-model gemini-2.5-flash \
-              --send-telegram-shadow \
               --reference-dir "$REF_DIR" \
-              --custom-header "$CUSTOM_HDR" \
-              --cleanup-downloaded-videos
+              --custom-header "$CUSTOM_HDR"
           else
             python scripts/logitech_vlm_shadow.py \
               --date "$TARGET_DATE" \
@@ -331,14 +325,21 @@ jobs:
               --confirm-cost \
               --vlm-provider gemini \
               --vlm-model gemini-2.5-flash \
-              --send-telegram-shadow \
               --reference-dir "$REF_DIR" \
-              --cleanup-downloaded-videos \
               $TIMELINE_ARG
           fi
             
           # Clean up ephemeral references immediately
           rm -rf "$REF_DIR"
+
+      - name: Upload Logitech evidence artifact
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: logitech-evidence-${{ needs.prepare.outputs.target_date }}
+          path: /tmp/logitech_vlm_shadow_${{ needs.prepare.outputs.target_date }}/
+          retention-days: 3
 
       - name: Upload output notebook (only when analysis fails)
         if: failure()
@@ -373,3 +374,73 @@ jobs:
           print(f"- Scheduler delay: `{os.environ.get('GHA_SCHEDULE_DELAY_MIN') or 'n/a'} min`")
           print(f"- Job runtime so far: `{runtime} min`")
           PY
+
+  unified-delivery:
+    needs: [prepare, tapo-report, logitech-report]
+    if: always() && !cancelled() && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: fair-feeder-${{ needs.prepare.outputs.target_date }}-UNIFIED
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install dependencies
+        run: |
+          pip install \
+            opencv-python-headless \
+            requests \
+            google-auth \
+            google-api-python-client \
+            numpy
+
+      - name: Download TAPO evidence artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: tapo-evidence-${{ needs.prepare.outputs.target_date }}
+          path: /tmp/tapo_evidence
+
+      - name: Download Logitech evidence artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: logitech-evidence-${{ needs.prepare.outputs.target_date }}
+          path: /tmp/logitech_evidence
+
+      - name: Execute Unified Breakfast Delivery
+        env:
+          TARGET_DATE: ${{ needs.prepare.outputs.target_date }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
+          GDRIVE_OUTPUT_FOLDER_ID: ${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}
+          GDRIVE_UPLOAD_FOLDER_ID: ${{ secrets.GDRIVE_UPLOAD_FOLDER_ID }}
+          GDRIVE_LOGITECH_FOLDER_ID: ${{ secrets.GDRIVE_LOGITECH_FOLDER_ID }}
+        run: |
+          python scripts/unified_breakfast.py deliver \
+            --date "$TARGET_DATE" \
+            --tapo-dir "/tmp/tapo_evidence" \
+            --logitech-dir "/tmp/logitech_evidence" \
+            --out-dir "/tmp/unified_delivery_${TARGET_DATE}"
+
+      - name: Upload unified delivery artifacts
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: unified-delivery-${{ needs.prepare.outputs.target_date }}
+          path: /tmp/unified_delivery_${{ needs.prepare.outputs.target_date }}/
+          retention-days: 3

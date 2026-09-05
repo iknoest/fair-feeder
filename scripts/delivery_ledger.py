@@ -158,7 +158,7 @@ def save_delivery_registry(
 
 def is_breakfast_fully_delivered(
     arg1: Any,
-    arg2: Any,
+    arg2: Any = None,
     target_date: Optional[str] = None,
     local_fallback_dir: Optional[Path] = None
 ) -> bool:
@@ -183,12 +183,87 @@ def is_breakfast_fully_delivered(
     unified = date_info.get("unified", {})
     if unified.get("fully_delivered", False):
         return True
-    if unified.get("items", {}).get("summary", {}).get("delivered", False):
-        return True
+    
+    # Track unified items: summary alone must NOT mark breakfast complete!
+    unified_items = unified.get("items", {})
+    if unified_items:
+        required_unified = ["summary", "combined_video"]
+        if all(unified_items.get(k, {}).get("delivered", False) for k in required_unified):
+            return True
+
+    # Camera-specific fallback for historical/independent multi-camera deliveries
     cameras = date_info.get("cameras", {})
     tapo_ok = cameras.get("TAPO", {}).get("camera_fully_delivered", False)
     logi_ok = cameras.get("LOGITECH", {}).get("camera_fully_delivered", False)
     return bool(tapo_ok and logi_ok)
+
+
+def is_unified_item_delivered(
+    arg1: Any,
+    arg2: Any,
+    arg3: Optional[str] = None,
+    local_fallback_dir: Optional[Path] = None
+) -> bool:
+    """
+    Checks if a unified delivery item (e.g. 'summary' or 'combined_video') is delivered.
+    Supports two calling signatures:
+    1. is_unified_item_delivered(registry_data, target_date, item_key)
+    2. is_unified_item_delivered(drive_service, folder_id, target_date, item_key, local_fallback_dir=...)
+    """
+    if isinstance(arg1, dict):
+        registry_data = arg1
+        clean_date = str(arg2).replace("-", "").strip()
+        item_key = str(arg3)
+    else:
+        drive_service = arg1
+        folder_id = arg2
+        clean_date = str(arg3).replace("-", "").strip()
+        # In this 4-arg signature, local_fallback_dir might have been passed positionally or via kwargs
+        # Let's handle standard usage: load registry first
+        registry_data = load_delivery_registry(drive_service, folder_id, local_fallback_dir=local_fallback_dir)
+        item_key = str(local_fallback_dir) if local_fallback_dir and isinstance(local_fallback_dir, str) else ""
+
+    date_info = registry_data.get("dates", {}).get(clean_date, {})
+    unified = date_info.get("unified", {})
+    return bool(unified.get("items", {}).get(item_key, {}).get("delivered", False))
+
+
+def record_unified_item_delivered(
+    drive_service: Any,
+    folder_id: str,
+    registry_data: Dict[str, Any],
+    target_date: str,
+    item_key: str,
+    message_id: Optional[int] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    local_fallback_dir: Optional[Path] = None
+) -> Optional[str]:
+    """Marks a unified delivery item as delivered and commits immediately to Drive/registry."""
+    clean_date = str(target_date).replace("-", "").strip()
+    now_utc = datetime.now(timezone.utc).isoformat()
+    if "dates" not in registry_data:
+        registry_data["dates"] = {}
+    if clean_date not in registry_data["dates"]:
+        registry_data["dates"][clean_date] = {
+            "breakfast_fully_delivered": False,
+            "cameras": {},
+            "unified": {"items": {}}
+        }
+    if "unified" not in registry_data["dates"][clean_date]:
+        registry_data["dates"][clean_date]["unified"] = {"items": {}}
+    if "items" not in registry_data["dates"][clean_date]["unified"]:
+        registry_data["dates"][clean_date]["unified"]["items"] = {}
+
+    entry = {
+        "delivered": True,
+        "delivered_at_utc": now_utc,
+        "message_id": message_id
+    }
+    if extra:
+        entry.update(extra)
+
+    registry_data["dates"][clean_date]["unified"]["items"][item_key] = entry
+    return save_delivery_registry(drive_service, folder_id, registry_data, local_fallback_dir=local_fallback_dir)
 
 
 def commit_breakfast_completion(
@@ -196,22 +271,45 @@ def commit_breakfast_completion(
     folder_id: str,
     target_date: str,
     extra: Optional[Dict[str, Any]] = None,
+    required_items: Optional[List[str]] = None,
     local_fallback_dir: Optional[Path] = None
 ) -> bool:
-    """Marks entire breakfast as completed in the registry and commits to Drive."""
+    """
+    Marks entire breakfast as completed in the registry and commits to Drive.
+    Fails closed:
+    - If required items are specified (or defaults), verifies they are all delivered.
+    - If drive_service and folder_id are provided and Drive persistence fails, returns False.
+    """
     clean_date = str(target_date).replace("-", "").strip()
     registry = load_delivery_registry(drive_service, folder_id, local_fallback_dir=local_fallback_dir)
     if "dates" not in registry:
         registry["dates"] = {}
     if clean_date not in registry["dates"]:
-        registry["dates"][clean_date] = {"cameras": {}, "items": {}}
+        registry["dates"][clean_date] = {"cameras": {}, "unified": {"items": {}}}
 
-    registry["dates"][clean_date]["breakfast_fully_delivered"] = True
-    registry["dates"][clean_date]["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+    date_entry = registry["dates"][clean_date]
+    unified_entry = date_entry.setdefault("unified", {"items": {}})
+    unified_items = unified_entry.setdefault("items", {})
+
+    reqs = required_items if required_items is not None else ["summary", "combined_video"]
+    if reqs:
+        for req in reqs:
+            if not unified_items.get(req, {}).get("delivered", False):
+                print(f"[DeliveryLedger] Cannot commit breakfast completion: required item '{req}' is not delivered.")
+                return False
+
+    date_entry["breakfast_fully_delivered"] = True
+    date_entry["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+    unified_entry["fully_delivered"] = True
+    unified_entry["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
     if extra:
-        registry["dates"][clean_date].update(extra)
+        date_entry.update(extra)
 
-    save_delivery_registry(drive_service, folder_id, registry, local_fallback_dir=local_fallback_dir)
+    file_id = save_delivery_registry(drive_service, folder_id, registry, local_fallback_dir=local_fallback_dir)
+    if drive_service and folder_id and not file_id:
+        print(f"[DeliveryLedger] CRITICAL: Failed to persist delivery registry to Drive for {clean_date}. Failing closed.")
+        return False
+
     return True
 
 

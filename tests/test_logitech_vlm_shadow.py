@@ -1505,8 +1505,8 @@ def test_morning_report_workflow_vlm_isolation():
     assert "--confirm-cost" in content
     assert "--vlm-provider gemini" in content
     assert "--vlm-model gemini-2.5-flash" in content
-    assert "--send-telegram-shadow" in content
-    # assert "FAIR_FEEDER_GEMINI_API_KEY" in content
+    assert "unified-delivery:" in content
+    assert "unified_breakfast.py deliver" in content
 
     # Ensure logitech_vlm_shadow.py is invoked in the workflow
     vlm_steps = [line for line in content.splitlines() if "logitech_vlm_shadow.py" in line]

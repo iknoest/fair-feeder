@@ -86,82 +86,167 @@ def generate_unified_breakfast_report(
     - Dan and Sanbo conclusions where reliable
     - Uncertainty stated explicitly where evidence is insufficient/conflicted
     - Theft asserted ONLY if proven and reliable
-    - No competing conclusions exposed to user
+    - Suppress per-cat kibble split if TAPO visual identity is contested
+    - Symmetric physical exclusion rules out impossible simultaneous dual-room claims
+    - No hardcoded fixture defaults
     """
     clean_date = str(target_date).replace("-", "").strip()
     formatted_date = f"{clean_date[:4]}-{clean_date[4:6]}-{clean_date[6:]}" if len(clean_date) == 8 else str(target_date)
 
-    # 1. Timeline Window Span
-    tapo_start = tapo_summary.get("start_time", "06:20:00")
-    tapo_end = tapo_summary.get("end_time", "06:21:05")
-    logi_start = logitech_session.get("session_start_time", "06:19:49")
-    logi_end = logitech_session.get("session_end_time", "06:20:45")
+    # 1. Timeline Window Span (strictly from evidence)
+    tapo_start = tapo_summary.get("start_time") or tapo_summary.get("start_ts")
+    tapo_end = tapo_summary.get("end_time") or tapo_summary.get("end_ts")
+    logi_start = logitech_session.get("session_start_time") or logitech_session.get("start_time")
+    logi_end = logitech_session.get("session_end_time") or logitech_session.get("end_time")
 
-    times = [t for t in [tapo_start, tapo_end, logi_start, logi_end] if t and ":" in t]
-    start_time = min(times) if times else "06:19:49"
-    end_time = max(times) if times else "06:21:05"
+    times = [t for t in [tapo_start, tapo_end, logi_start, logi_end] if t and isinstance(t, str) and ":" in t]
+    start_time = min(times) if times else "unknown"
+    end_time = max(times) if times else "unknown"
 
-    try:
-        t0 = datetime.strptime(start_time, "%H:%M:%S")
-        t1 = datetime.strptime(end_time, "%H:%M:%S")
-        span_sec = max(0, int((t1 - t0).total_seconds()))
-        m, s = divmod(span_sec, 60)
-        span_str = f"{m}m {s}s" if m > 0 else f"{s}s"
-    except Exception:
-        span_str = "1m 16s"
+    span_str = "unknown"
+    if start_time != "unknown" and end_time != "unknown":
+        try:
+            t0 = datetime.strptime(start_time.strip()[-8:], "%H:%M:%S")
+            t1 = datetime.strptime(end_time.strip()[-8:], "%H:%M:%S")
+            span_sec = max(0, int((t1 - t0).total_seconds()))
+            m, s = divmod(span_sec, 60)
+            span_str = f"{m}m {s}s" if m > 0 else f"{s}s"
+        except Exception:
+            pass
 
-    # 2. TAPO Evidence Extraction
-    dan_kibble = tapo_summary.get("dan_kibble", 14)
-    dan_pct = tapo_summary.get("dan_percent", 47)
-    dan_bowl_time = tapo_summary.get("dan_bowl_time", "0m 20s")
-
-    sanbo_kibble = tapo_summary.get("sanbo_kibble", 16)
-    sanbo_pct = tapo_summary.get("sanbo_percent", 53)
-    sanbo_bowl_time = tapo_summary.get("sanbo_bowl_time", "0m 22s")
+    # 2. TAPO Evidence Extraction (zero hardcoded fixture numbers)
+    dan_kibble = tapo_summary.get("dan_kibble") if tapo_summary.get("dan_kibble") is not None else tapo_summary.get("dan_kibble_eaten")
+    sanbo_kibble = tapo_summary.get("sanbo_kibble") if tapo_summary.get("sanbo_kibble") is not None else tapo_summary.get("sanbo_kibble_eaten")
+    dan_pct = tapo_summary.get("dan_percent")
+    sanbo_pct = tapo_summary.get("sanbo_percent")
+    dan_bowl_time = tapo_summary.get("dan_bowl_time")
+    if not dan_bowl_time and "dan_bowl_seconds" in tapo_summary:
+        dan_bowl_time = f"{int(tapo_summary['dan_bowl_seconds'])}s"
+    sanbo_bowl_time = tapo_summary.get("sanbo_bowl_time")
+    if not sanbo_bowl_time and "sanbo_bowl_seconds" in tapo_summary:
+        sanbo_bowl_time = f"{int(tapo_summary['sanbo_bowl_seconds'])}s"
 
     has_tapo_conflict = tapo_summary.get("has_conflict", False)
-    conflict_frames = tapo_summary.get("conflict_frames", 28)
-    total_start_kibble = tapo_summary.get("start_kibble", 30)
+    conflict_frames = tapo_summary.get("conflict_frames", 0)
+    total_start_kibble = tapo_summary.get("start_kibble")
+    total_end_kibble = tapo_summary.get("end_kibble")
+
+    total_kibble_eaten = 0
+    if dan_kibble is not None or sanbo_kibble is not None:
+        total_kibble_eaten = (dan_kibble or 0) + (sanbo_kibble or 0)
+    elif total_start_kibble is not None and total_end_kibble is not None:
+        total_kibble_eaten = max(0, total_start_kibble - total_end_kibble)
+
+    if total_kibble_eaten > 0 and (dan_pct is None or sanbo_pct is None):
+        if dan_kibble is not None:
+            dan_pct = round((dan_kibble / total_kibble_eaten) * 100)
+        if sanbo_kibble is not None:
+            sanbo_pct = round((sanbo_kibble / total_kibble_eaten) * 100)
 
     # 3. Logitech Evidence Extraction
-    logi_cat = logitech_session.get("cat_identity", "Sanbo")
-    logi_eating = logitech_session.get("eating_evidence", "yes")
-    logi_vis = logitech_session.get("visibility", "poor (dark morning RGB)")
+    logi_cat = logitech_session.get("cat_identity") or logitech_session.get("cat") or "unknown"
+    logi_eating = logitech_session.get("eating_evidence") or "unknown"
+    logi_vis = logitech_session.get("visibility") or "unknown"
     logi_gaps = logitech_session.get("source_gaps", [])
-    logi_clip_count = logitech_session.get("evidence_clip_count", 2)
+    logi_clip_count = logitech_session.get("evidence_clip_count", len(logitech_session.get("selected_clip_names", [])))
+    if logi_clip_count == 0 and "session_count" in logitech_session:
+        logi_clip_count = logitech_session.get("session_count", 0)
 
     gap_note = ""
     if logi_gaps:
-        g_sec = int(logi_gaps[0].get("gap_sec", 11))
-        gap_note = f", {g_sec}s low-motion gap preserved"
+        g_sec = int(logi_gaps[0].get("gap_sec", 0))
+        if g_sec > 0:
+            gap_note = f", {g_sec}s low-motion gap preserved"
 
-    # 4. House-Level Synthesis
-    theft_verdict = "unconfirmed / uncertain"
-    theft_explanation = "TAPO visual identity had active conflict; evidence does not support confident theft"
+    # 4. House-Level Synthesis & Physical Exclusion Analysis
+    is_sanbo_at_logi = (logi_cat == "Sanbo" and logi_eating in ("yes", True, "eating", "observed"))
+    has_identity_conflict = bool(has_tapo_conflict or conflict_frames > 15)
 
-    # Check if physical exclusion or conflict guard active
-    if has_tapo_conflict or conflict_frames > 15 or abs(dan_pct - sanbo_pct) <= 10:
-        house_dan_status = f"~{dan_kibble} kibble ({dan_pct}%), bowl {dan_bowl_time}; visual conflict present at feeder"
-        house_sanbo_status = f"Confirmed eating at Sanbo feeder ({logi_start}–{logi_end}); TAPO co-presence uncertain due to conflict"
-        house_theft = "No theft confirmed (identity evidence conflicted at Dan feeder)"
+    # Check temporal overlap between TAPO feeding and Logitech feeding
+    has_temporal_overlap = False
+    if tapo_start and tapo_end and logi_start and logi_end:
+        try:
+            ts_t0 = datetime.strptime(tapo_start.strip()[-8:], "%H:%M:%S")
+            ts_t1 = datetime.strptime(tapo_end.strip()[-8:], "%H:%M:%S")
+            ls_t0 = datetime.strptime(logi_start.strip()[-8:], "%H:%M:%S")
+            ls_t1 = datetime.strptime(logi_end.strip()[-8:], "%H:%M:%S")
+            has_temporal_overlap = (ts_t0 <= ls_t1) and (ls_t0 <= ts_t1)
+        except Exception:
+            has_temporal_overlap = True
+
+    if has_identity_conflict:
+        # Suppress per-cat kibble split because underlying classifier is contested
+        if is_sanbo_at_logi and has_temporal_overlap:
+            # Physical exclusion: Sanbo confirmed at Logitech feeder during this exact window
+            # Sanbo CANNOT be physically eating at Dan feeder at the same time!
+            house_dan_status = (
+                f"Eating confirmed at Dan feeder (~{total_kibble_eaten} kibble); "
+                f"TAPO classifier showed Dan/Sanbo conflict, resolved via physical exclusion from Sanbo feeder"
+            )
+            house_sanbo_status = (
+                f"Confirmed eating at Sanbo feeder ({logi_start}–{logi_end}); "
+                f"ruled out from Dan feeder during overlap"
+            )
+            house_theft = "No theft confirmed (both cats ate at their own bowls; late visit to Dan bowl found it already empty)"
+        else:
+            house_dan_status = (
+                f"~{total_kibble_eaten} kibble eaten at Dan feeder; "
+                f"per-cat split unresolved due to classifier conflict ({conflict_frames} conflict frames)"
+            )
+            house_sanbo_status = f"Status at Sanbo feeder: cat={logi_cat}, eating={logi_eating}"
+            house_theft = "No theft confirmed (identity evidence conflicted at Dan feeder)"
     else:
-        house_dan_status = f"~{dan_kibble} kibble ({dan_pct}%), bowl {dan_bowl_time}"
-        house_sanbo_status = f"Eating at Sanbo feeder ({logi_start}–{logi_end})"
-        house_theft = "No theft detected"
+        # Clean unambiguous classification
+        dan_str = f"~{dan_kibble} kibble" if dan_kibble is not None else "eating observed"
+        if dan_pct is not None:
+            dan_str += f" ({dan_pct}%)"
+        if dan_bowl_time:
+            dan_str += f", bowl {dan_bowl_time}"
+        house_dan_status = dan_str
 
+        sanbo_str = f"Eating at Sanbo feeder ({logi_start}–{logi_end})" if is_sanbo_at_logi else f"Sanbo feeder: {logi_cat} (eating: {logi_eating})"
+        house_sanbo_status = sanbo_str
+
+        # Theft evaluation
+        if sanbo_kibble and sanbo_kibble > 5 and (dan_kibble is None or dan_kibble < 5):
+            house_theft = "Theft confirmed: Sanbo ate at Dan feeder"
+        else:
+            house_theft = "No theft detected"
+
+    # Build Telegram report lines
     lines = [
         f"🍳 **Breakfast · {formatted_date}**",
         f"⏱ {start_time}–{end_time} ({span_str})",
         "",
         "**TAPO (Dan Feeder):**",
-        f"- Active: {tapo_start}–{tapo_end}",
-        f"- Start: ~{total_start_kibble} kibble",
-        f"- Dan: ~{dan_kibble} kibble ({dan_pct}%), bowl {dan_bowl_time}",
-        f"- Sanbo: ~{sanbo_kibble} kibble ({sanbo_pct}%), bowl {sanbo_bowl_time}",
-        f"- Visibility: High Dan/Sanbo conflict ({conflict_frames} conflict frames)",
+        f"- Active: {tapo_start or 'unknown'}–{tapo_end or 'unknown'}",
+    ]
+    if total_start_kibble is not None:
+        lines.append(f"- Start: ~{total_start_kibble} kibble")
+
+    if has_identity_conflict:
+        lines.append(f"- Feeding: ~{total_kibble_eaten} kibble total (per-cat split suppressed due to classifier conflict)")
+        lines.append(f"- Classifier: Contested ({conflict_frames} conflict frames)")
+    else:
+        if dan_kibble is not None:
+            dan_line = f"- Dan: ~{dan_kibble} kibble"
+            if dan_pct is not None:
+                dan_line += f" ({dan_pct}%)"
+            if dan_bowl_time:
+                dan_line += f", bowl {dan_bowl_time}"
+            lines.append(dan_line)
+        if sanbo_kibble is not None and sanbo_kibble > 0:
+            sanbo_line = f"- Sanbo: ~{sanbo_kibble} kibble"
+            if sanbo_pct is not None:
+                sanbo_line += f" ({sanbo_pct}%)"
+            if sanbo_bowl_time:
+                sanbo_line += f", bowl {sanbo_bowl_time}"
+            lines.append(sanbo_line)
+
+    lines.extend([
         "",
         "**LOGITECH (Sanbo Feeder):**",
-        f"- Active: {logi_start}–{logi_end} (1 feeding session, {logi_clip_count} clips{gap_note})",
+        f"- Active: {logi_start or 'unknown'}–{logi_end or 'unknown'} ({logi_clip_count} clip(s){gap_note})",
         f"- Cat: {logi_cat} (eating: {logi_eating})",
         f"- Visibility: {logi_vis}",
         "",
@@ -169,7 +254,7 @@ def generate_unified_breakfast_report(
         f"- Dan: {house_dan_status}",
         f"- Sanbo: {house_sanbo_status}",
         f"- Theft: {house_theft}"
-    ]
+    ])
 
     report_text = "\n".join(lines)
     return {
@@ -184,7 +269,7 @@ def generate_unified_breakfast_report(
     }
 
 
-# ── Synchronized Side-by-Side Combined Video (Track F) ────────────────────────
+# ── Synchronized Vertical Combined Video (Track F) ───────────────────────────
 
 def create_neutral_placeholder(
     width: int,
@@ -203,18 +288,18 @@ def create_neutral_placeholder(
     # Status text
     font = cv2.FONT_HERSHEY_SIMPLEX
     text = reason
-    font_scale = 0.8
+    font_scale = 0.75
     thickness = 2
     (tw, th), _ = cv2.getTextSize(text, font, font_scale, thickness)
     tx = max(10, (width - tw) // 2)
-    ty = (height // 2) - 10
+    ty = (height // 2) - 8
     cv2.putText(img, text, (tx, ty), font, font_scale, (160, 160, 175), thickness, cv2.LINE_AA)
 
     subtext = f"Clock running: {timestamp_str}"
-    font_scale_sub = 0.5
+    font_scale_sub = 0.48
     (stw, sth), _ = cv2.getTextSize(subtext, font, font_scale_sub, 1)
     stx = max(10, (width - stw) // 2)
-    sty = ty + 35
+    sty = ty + 32
     cv2.putText(img, subtext, (stx, sty), font, font_scale_sub, (110, 110, 125), 1, cv2.LINE_AA)
 
     return img
@@ -226,27 +311,68 @@ def draw_panel_overlay(
     timestamp_str: str,
     is_live_footage: bool = True
 ) -> np.ndarray:
-    """Draws top header bar with camera name and current wall-clock timestamp."""
+    """Legacy helper: draws top header bar for backward compatibility."""
     out = panel_img.copy()
     h, w, _ = out.shape
-
-    # Semi-transparent top banner
     banner_h = 36
     overlay = out.copy()
     cv2.rectangle(overlay, (0, 0), (w, banner_h), (10, 10, 15), -1)
     cv2.addWeighted(overlay, 0.75, out, 0.25, 0, out)
 
-    # Title
     font = cv2.FONT_HERSHEY_SIMPLEX
     dot_color = (0, 220, 0) if is_live_footage else (100, 100, 110)
     cv2.circle(out, (14, 18), 5, dot_color, -1)
     cv2.putText(out, camera_title, (26, 23), font, 0.55, (240, 240, 245), 1, cv2.LINE_AA)
 
-    # Timestamp
     (tsw, _), _ = cv2.getTextSize(timestamp_str, font, 0.55, 1)
     cv2.putText(out, timestamp_str, (w - tsw - 12, 23), font, 0.55, (240, 240, 245), 1, cv2.LINE_AA)
-
     return out
+
+
+def render_header_bar(
+    width: int,
+    height: int,
+    title: str,
+    timestamp_str: str,
+    is_live: bool = True
+) -> np.ndarray:
+    """Renders a dedicated header or footer bar placed entirely outside source pixels."""
+    bar = np.zeros((height, width, 3), dtype=np.uint8)
+    bar[:] = (20, 20, 24)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    dot_color = (0, 220, 0) if is_live else (100, 100, 110)
+    cv2.circle(bar, (18, height // 2), 5, dot_color, -1)
+
+    cv2.putText(bar, title, (32, (height // 2) + 5), font, 0.52, (240, 240, 245), 1, cv2.LINE_AA)
+
+    (tsw, _), _ = cv2.getTextSize(timestamp_str, font, 0.50, 1)
+    cv2.putText(bar, timestamp_str, (width - tsw - 16, (height // 2) + 5), font, 0.50, (240, 240, 245), 1, cv2.LINE_AA)
+
+    return bar
+
+
+def render_separator_bar(
+    width: int,
+    height: int,
+    text: str = "-- SHARED TIMELINE (4x speedup) --"
+) -> np.ndarray:
+    """Renders the central timeline separator bar between TAPO and Logitech panels."""
+    bar = np.zeros((height, width, 3), dtype=np.uint8)
+    bar[:] = (25, 25, 30)
+
+    # Top and bottom hairline dividers
+    cv2.line(bar, (0, 0), (width, 0), (45, 45, 50), 1)
+    cv2.line(bar, (0, height - 1), (width, height - 1), (45, 45, 50), 1)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.45
+    (tw, th), _ = cv2.getTextSize(text, font, font_scale, 1)
+    tx = max(10, (width - tw) // 2)
+    ty = (height // 2) + 4
+    cv2.putText(bar, text, (tx, ty), font, font_scale, (140, 140, 150), 1, cv2.LINE_AA)
+
+    return bar
 
 
 class VideoStreamSampler:
@@ -259,23 +385,27 @@ class VideoStreamSampler:
                 continue
             st = parse_clip_timestamp(p.name)
             dur = extract_clip_duration(p.name)
-            if not st or dur <= 0:
-                cap = cv2.VideoCapture(str(p))
-                fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-                fc = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
-                cap.release()
-                dur = (fc / fps) if fps > 0 else dur
+            # Verify actual video duration using OpenCV
+            cap = cv2.VideoCapture(str(p))
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            fc = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+            cap.release()
+            real_dur = (fc / fps) if (fps > 0 and fc > 0) else dur
+            dur = max(dur, real_dur)
+
             if st and dur > 0:
                 self.clips.append({
                     "path": p,
                     "start": st,
                     "end": st + timedelta(seconds=dur),
                     "duration": dur,
-                    "cap": None
+                    "cap": None,
+                    "fps": fps,
+                    "last_frame_idx": -1
                 })
         self.clips.sort(key=lambda x: x["start"])
 
-    def get_frame_at(self, dt: datetime, target_size: Tuple[int, int]) -> Tuple[np.ndarray, bool]:
+    def get_frame_at(self, dt: datetime, target_size: Tuple[int, int]) -> Tuple[Optional[np.ndarray], bool]:
         """Returns (frame, is_live_footage) for given wall-clock timestamp."""
         w, h = target_size
         for c in self.clips:
@@ -284,16 +414,22 @@ class VideoStreamSampler:
                 if c["cap"] is None:
                     c["cap"] = cv2.VideoCapture(str(c["path"]))
                 cap = c["cap"]
-                fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+                fps = c.get("fps") or cap.get(cv2.CAP_PROP_FPS) or 25.0
                 frame_idx = int(offset_sec * fps)
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+
+                # Avoid redundant seek if next sequential frame
+                if frame_idx != c["last_frame_idx"]:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+
                 ret, frame = cap.read()
+                c["last_frame_idx"] = frame_idx + 1 if ret else -1
+
                 if ret and frame is not None:
                     if self.is_logitech:
                         # Apply low-light enhancement if dark
                         if np.mean(frame) < 30.0:
                             frame = enhance_image_gamma_clahe(frame, gamma=2.5)
-                    # Resize preserving aspect
+                    # Resize preserving exact aspect ratio
                     resized = cv2.resize(frame, (w, h))
                     return resized, True
 
@@ -312,17 +448,22 @@ def generate_combined_breakfast_video(
     output_path: Union[Path, str],
     target_date: str = "20260905",
     speedup_factor: float = 4.0,
-    out_height: int = 480,
+    out_width: int = 720,
     target_fps: float = 16.0,
     start_time_override: Optional[datetime] = None,
     end_time_override: Optional[datetime] = None
 ) -> Path:
     """
-    Renders synchronized side-by-side video on a shared wall-clock timeline.
-    Left: TAPO (Dan Feeder)
-    Right: LOGITECH (Sanbo Feeder)
-    Shows same wall-clock timestamp on both panels.
+    Renders synchronized vertical full-frame video on a shared wall-clock timeline.
+    Layout:
+    - Dedicated Header (38px): TAPO status dot, title, timestamp
+    - Top Panel (720x405): TAPO (Dan Feeder) - uncropped 16:9, ZERO overlay on source pixels!
+    - Central Separator (34px): Shared timeline indicator
+    - Bottom Panel (720x405): LOGITECH (Sanbo Feeder) - uncropped 16:9, ZERO overlay on source pixels!
+    - Dedicated Footer (38px): LOGITECH status dot, title, timestamp
+    Total Canvas: 720x920 (both even numbers, H.264/yuv420p safe).
     Missing intervals show clean neutral placeholder without fake frames.
+    Speedup: 4x playback.
     Telegram-safe: H.264, yuv420p, +faststart, <45 MB.
     """
     output_path = Path(output_path)
@@ -334,7 +475,7 @@ def generate_combined_breakfast_video(
     tapo_sampler = VideoStreamSampler(tapo_paths, is_logitech=False)
     logi_sampler = VideoStreamSampler(logi_paths, is_logitech=True)
 
-    # Determine timeline boundaries
+    # Determine timeline boundaries dynamically from actual clips
     all_starts = [c["start"] for c in tapo_sampler.clips + logi_sampler.clips]
     all_ends = [c["end"] for c in tapo_sampler.clips + logi_sampler.clips]
 
@@ -344,49 +485,50 @@ def generate_combined_breakfast_video(
     t_start = start_time_override or min(all_starts)
     t_end = end_time_override or max(all_ends)
 
-    # Ensure reasonable bounded window for breakfast event
-    total_sec = max(1.0, (t_end - t_start).total_seconds())
-
-    # Panel dimensions: 16:9 aspect ratio per panel
-    # E.g., out_height = 480 -> panel_width = 854 -> total_width = 1708 (or 640x360 -> 1280x360)
-    panel_h = out_height
-    panel_w = int(panel_h * (16 / 9))
-    if panel_w % 2 != 0:
-        panel_w += 1
-    total_w = panel_w * 2
+    # Canvas Dimensions
+    width = out_width  # 720
+    panel_h = int(width * (9 / 16))  # 405
+    header_h = 38
+    sep_h = 34
+    footer_h = 38
+    total_h = header_h + panel_h + sep_h + panel_h + footer_h  # 38 + 405 + 34 + 405 + 38 = 920
 
     temp_raw = output_path.with_name(f"temp_raw_combined_{output_path.name}")
     if temp_raw.exists():
         temp_raw.unlink()
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    writer = cv2.VideoWriter(str(temp_raw), fourcc, target_fps, (total_w, panel_h))
+    writer = cv2.VideoWriter(str(temp_raw), fourcc, target_fps, (width, total_h))
     if not writer.isOpened():
         raise RuntimeError(f"Failed to open OpenCV VideoWriter for {temp_raw}")
 
-    # Wall-clock stepping: 1 frame per (1.0 / target_fps) seconds of real time
-    time_step = timedelta(seconds=1.0 / target_fps)
+    # Wall-clock stepping: 4x speedup means each output video frame advances 0.25s of real time
+    step_sec = speedup_factor / target_fps  # 4.0 / 16.0 = 0.25s real time per frame
+    time_step = timedelta(seconds=step_sec)
     curr_time = t_start
 
     try:
         while curr_time <= t_end:
             time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
 
-            # 1. Left Panel: TAPO
-            tapo_frame, tapo_is_live = tapo_sampler.get_frame_at(curr_time, (panel_w, panel_h))
+            # 1. TAPO Panel (Top)
+            tapo_frame, tapo_is_live = tapo_sampler.get_frame_at(curr_time, (width, panel_h))
             if not tapo_is_live or tapo_frame is None:
-                tapo_frame = create_neutral_placeholder(panel_w, panel_h, "TAPO", time_str, reason="No source footage")
-            tapo_panel = draw_panel_overlay(tapo_frame, "TAPO - Dan Feeder", time_str, is_live_footage=tapo_is_live)
+                tapo_frame = create_neutral_placeholder(width, panel_h, "TAPO", time_str, reason="No source footage")
 
-            # 2. Right Panel: LOGITECH
-            logi_frame, logi_is_live = logi_sampler.get_frame_at(curr_time, (panel_w, panel_h))
+            # 2. LOGITECH Panel (Bottom)
+            logi_frame, logi_is_live = logi_sampler.get_frame_at(curr_time, (width, panel_h))
             if not logi_is_live or logi_frame is None:
-                logi_frame = create_neutral_placeholder(panel_w, panel_h, "LOGITECH", time_str, reason="No source footage")
-            logi_panel = draw_panel_overlay(logi_frame, "LOGITECH - Sanbo Feeder", time_str, is_live_footage=logi_is_live)
+                logi_frame = create_neutral_placeholder(width, panel_h, "LOGITECH", time_str, reason="No source footage")
 
-            # 3. Stitch side-by-side
-            combined_frame = np.hstack([tapo_panel, logi_panel])
-            writer.write(combined_frame)
+            # 3. Header, Separator, Footer (dedicated bars OUTSIDE source pixels)
+            header_bar = render_header_bar(width, header_h, "TAPO - Dan Feeder", time_str, is_live=tapo_is_live)
+            separator_bar = render_separator_bar(width, sep_h, text="-- SHARED TIMELINE (4x speedup) --")
+            footer_bar = render_header_bar(width, footer_h, "LOGITECH - Sanbo Feeder", time_str, is_live=logi_is_live)
+
+            # 4. Vertical stack: 38 + 405 + 34 + 405 + 38 = 920px height
+            vertical_canvas = np.vstack([header_bar, tapo_frame, separator_bar, logi_frame, footer_bar])
+            writer.write(vertical_canvas)
 
             curr_time += time_step
     finally:
@@ -394,13 +536,14 @@ def generate_combined_breakfast_video(
         tapo_sampler.close()
         logi_sampler.close()
 
-    # 4. Transcode to H.264, faststart, 4x speedup, Telegram safe size
+    # 5. Transcode to H.264, faststart, yuv420p, Telegram safe size
+    # Since frames were sampled at 4x speedup, playback is already accelerated; use speedup_factor=1.0 for ffmpeg pass
     if compress_video_for_telegram:
         ok, safe_p, _ = compress_video_for_telegram(
             temp_raw,
             output_path=output_path,
-            speedup_factor=speedup_factor,
-            target_height=panel_h
+            speedup_factor=1.0,
+            target_height=total_h
         )
         if temp_raw.exists():
             temp_raw.unlink()
@@ -412,12 +555,12 @@ def generate_combined_breakfast_video(
     if ffmpeg_bin:
         cmd = [
             ffmpeg_bin, "-y", "-i", str(temp_raw),
-            "-vf", f"setpts={1.0 / speedup_factor:.4f}*PTS",
             "-c:v", "libx264",
             "-crf", "28",
             "-preset", "fast",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
+            "-r", str(int(target_fps)),
             "-an",
             str(output_path)
         ]
@@ -431,23 +574,250 @@ def generate_combined_breakfast_video(
     return output_path
 
 
+# ── Production Unified Delivery Engine ────────────────────────────────────────
+
+def deliver_unified_breakfast(
+    target_date: str,
+    tapo_dir: Optional[Path] = None,
+    logitech_dir: Optional[Path] = None,
+    out_dir: Optional[Path] = None,
+    preview: bool = False,
+    skip_telegram: bool = False,
+    force: bool = False,
+    drive_service: Any = None,
+    folder_id: Optional[str] = None
+) -> bool:
+    """
+    Executes the single-authority unified breakfast delivery:
+    1. Preflight check via delivery_registry.json
+    2. Collects TAPO and Logitech artifacts
+    3. Synthesizes truthful house report
+    4. Delivers summary (item: summary)
+    5. Renders & delivers vertical combined video (item: combined_video)
+    6. Commits terminal breakfast completion (fail closed)
+    """
+    import requests
+    from scripts.delivery_ledger import (
+        load_delivery_registry,
+        is_breakfast_fully_delivered,
+        is_unified_item_delivered,
+        record_unified_item_delivered,
+        commit_breakfast_completion
+    )
+
+    clean_date = str(target_date).replace("-", "").strip()
+    out_dir = Path(out_dir) if out_dir else Path(f"/tmp/unified_delivery_{clean_date}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+
+    # Step 1: Preflight Check
+    registry = load_delivery_registry(drive_service, folder_id, local_fallback_dir=out_dir)
+    if not force and is_breakfast_fully_delivered(registry, clean_date):
+        print(f"✅ [Preflight] Breakfast for {clean_date} already fully delivered. Skipping.")
+        return True
+
+    # Step 2: Ingest TAPO Artifacts
+    tapo_summary = {}
+    tapo_clips = []
+    tapo_search_dirs = [d for d in [tapo_dir, Path("/tmp/output"), Path("scratch/replay_sep5"), Path(".")] if d and Path(d).exists()]
+
+    for d in tapo_search_dirs:
+        sum_p = Path(d) / f"tapo_summary_{clean_date}.json"
+        if sum_p.exists():
+            try:
+                tapo_summary = json.loads(sum_p.read_text(encoding="utf-8"))
+                break
+            except Exception:
+                pass
+
+    if not tapo_summary:
+        # Check for individual *_summary.txt or fallback dict
+        for d in tapo_search_dirs:
+            for txt_f in Path(d).glob(f"*{clean_date}*_summary.txt"):
+                tapo_summary["raw_summary_text"] = txt_f.read_text(encoding="utf-8")
+                break
+            if "raw_summary_text" in tapo_summary:
+                break
+
+    # Collect TAPO video clips
+    for d in tapo_search_dirs:
+        for vid in sorted(Path(d).glob(f"*{clean_date}*.mp4")):
+            if "combined" not in vid.name and "annotated" not in vid.name and vid not in tapo_clips:
+                tapo_clips.append(vid)
+
+    # Step 3: Ingest Logitech Artifacts
+    logitech_summary = {}
+    logi_clips = []
+    logi_search_dirs = [d for d in [logitech_dir, Path(f"/tmp/logitech_vlm_shadow_{clean_date}"), Path("scratch/replay_sep5"), Path(".")] if d and Path(d).exists()]
+
+    for d in logi_search_dirs:
+        l_sum_p = Path(d) / "logitech_vlm_shadow_summary.json"
+        if not l_sum_p.exists():
+            l_sum_p = Path(d) / "summary.json"
+        if l_sum_p.exists():
+            try:
+                logitech_summary = json.loads(l_sum_p.read_text(encoding="utf-8"))
+                break
+            except Exception:
+                pass
+
+    for d in logi_search_dirs:
+        for vid in sorted(Path(d).glob(f"*{clean_date}*.mp4")):
+            if "combined" not in vid.name and "annotated" not in vid.name and vid not in logi_clips and vid not in tapo_clips:
+                logi_clips.append(vid)
+
+    # Step 4: Generate House-Level Report
+    report = generate_unified_breakfast_report(clean_date, tapo_summary, logitech_summary)
+    summary_text = report["telegram_text"]
+    if preview:
+        summary_text = f"[TEST][PREVIEW] Unified Breakfast UX · Sep-5 fixture\n\n{summary_text}"
+
+    # Step 5: Item-Level Delivery
+    base_tg = f"https://api.telegram.org/bot{bot_token}" if bot_token else None
+
+    # Item 1: Summary
+    if not is_unified_item_delivered(registry, clean_date, "summary"):
+        print(f"📤 Delivering unified breakfast summary for {clean_date}...")
+        sum_msg_id = None
+        if base_tg and chat_id and not skip_telegram:
+            resp = requests.post(f"{base_tg}/sendMessage", data={
+                "chat_id": chat_id,
+                "text": summary_text[:4096]
+            }, timeout=30)
+            if resp.status_code != 200:
+                print(f"❌ Failed to send summary to Telegram: {resp.text}")
+                return False
+            try:
+                sum_msg_id = resp.json().get("result", {}).get("message_id")
+            except Exception:
+                pass
+
+        record_unified_item_delivered(
+            drive_service, folder_id, registry, clean_date, "summary",
+            message_id=sum_msg_id, local_fallback_dir=out_dir
+        )
+        print(f"✅ Summary delivered (message_id={sum_msg_id})")
+    else:
+        print(f"ℹ️ Summary already delivered for {clean_date}. Skipping item.")
+
+    # Item 2: Combined Video
+    combined_video_path = out_dir / f"{clean_date}_combined_breakfast.mp4"
+    if not is_unified_item_delivered(registry, clean_date, "combined_video"):
+        print(f"🎥 Rendering unified vertical video for {clean_date}...")
+        if not tapo_clips or not logi_clips:
+            print(f"⚠️ Missing clips for video render (tapo={len(tapo_clips)}, logi={len(logi_clips)}). Cannot deliver video.")
+            return False
+
+        generate_combined_breakfast_video(
+            tapo_clips=tapo_clips,
+            logitech_clips=logi_clips,
+            output_path=combined_video_path,
+            target_date=clean_date,
+            speedup_factor=4.0
+        )
+
+        # Validate video size and content
+        vid_size_mb = combined_video_path.stat().st_size / (1024 * 1024)
+        if vid_size_mb >= 45.0:
+            print(f"❌ Video size {vid_size_mb:.2f} MB exceeds 45 MB Telegram limit")
+            return False
+
+        caption = "TAPO top · LOGITECH bottom · synchronized 4x · full-frame"
+        if preview:
+            caption = f"[TEST][PREVIEW] {caption}"
+
+        vid_msg_id = None
+        if base_tg and chat_id and not skip_telegram:
+            print(f"📤 Delivering combined video ({vid_size_mb:.2f} MB) to Telegram...")
+            with open(combined_video_path, "rb") as vf:
+                resp = requests.post(
+                    f"{base_tg}/sendVideo",
+                    data={"chat_id": chat_id, "caption": caption},
+                    files={"video": (combined_video_path.name, vf, "video/mp4")},
+                    timeout=180
+                )
+            if resp.status_code != 200:
+                print(f"❌ Failed to send combined video to Telegram: {resp.text}")
+                return False
+            try:
+                vid_msg_id = resp.json().get("result", {}).get("message_id")
+            except Exception:
+                pass
+
+        record_unified_item_delivered(
+            drive_service, folder_id, registry, clean_date, "combined_video",
+            message_id=vid_msg_id, local_fallback_dir=out_dir
+        )
+        print(f"✅ Combined video delivered (message_id={vid_msg_id})")
+    else:
+        print(f"ℹ️ Combined video already delivered for {clean_date}. Skipping item.")
+
+    # Step 6: Commit Breakfast Completion (Fail closed!)
+    committed = commit_breakfast_completion(
+        drive_service, folder_id, clean_date,
+        extra={"delivered_by": "unified_breakfast.py", "video": combined_video_path.name},
+        required_items=["summary", "combined_video"],
+        local_fallback_dir=out_dir
+    )
+    if not committed:
+        print(f"❌ Failed to commit breakfast completion for {clean_date}")
+        return False
+
+    print(f"🎉 Breakfast for {clean_date} fully delivered and registered.")
+    return True
+
+
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Unified Breakfast Generator")
-    parser.add_argument("--date", default="20260905", help="Target date YYYYMMDD")
-    parser.add_argument("--tapo-video", nargs="*", default=[], help="TAPO video file(s)")
-    parser.add_argument("--logitech-video", nargs="*", default=[], help="Logitech video file(s)")
-    parser.add_argument("--out-video", default="sep5_combined_breakfast.mp4", help="Output combined video path")
+    parser = argparse.ArgumentParser(description="Unified Breakfast Generator & Delivery Engine")
+    subparsers = parser.add_subparsers(dest="subcommand")
+
+    # generate command
+    p_gen = subparsers.add_parser("generate", help="Generate combined video and report")
+    p_gen.add_argument("--date", default="20260905", help="Target date YYYYMMDD")
+    p_gen.add_argument("--tapo-video", nargs="*", default=[], help="TAPO video file(s)")
+    p_gen.add_argument("--logitech-video", nargs="*", default=[], help="Logitech video file(s)")
+    p_gen.add_argument("--out-video", default="sep5_combined_breakfast.mp4", help="Output combined video path")
+
+    # deliver command
+    p_del = subparsers.add_parser("deliver", help="Execute single-authority unified delivery")
+    p_del.add_argument("--date", required=True, help="Target date YYYYMMDD")
+    p_del.add_argument("--tapo-dir", default=None, help="Directory containing TAPO artifacts")
+    p_del.add_argument("--logitech-dir", default=None, help="Directory containing Logitech artifacts")
+    p_del.add_argument("--out-dir", default=None, help="Output directory")
+    p_del.add_argument("--preview", action="store_true", help="Format as test preview")
+    p_del.add_argument("--skip-telegram", action="store_true", help="Skip Telegram API network calls")
+    p_del.add_argument("--force", action="store_true", help="Force delivery ignoring preflight")
+
     args = parser.parse_args()
 
-    if args.tapo_video and args.logitech_video:
-        out_p = generate_combined_breakfast_video(
-            tapo_clips=args.tapo_video,
-            logitech_clips=args.logitech_video,
-            output_path=args.out_video,
-            target_date=args.date
+    if args.subcommand == "deliver":
+        ok = deliver_unified_breakfast(
+            target_date=args.date,
+            tapo_dir=Path(args.tapo_dir) if args.tapo_dir else None,
+            logitech_dir=Path(args.logitech_dir) if args.logitech_dir else None,
+            out_dir=Path(args.out_dir) if args.out_dir else None,
+            preview=args.preview,
+            skip_telegram=args.skip_telegram,
+            force=args.force
         )
-        print(f"Generated combined breakfast video at: {out_p}")
+        sys.exit(0 if ok else 1)
+    else:
+        # Default / generate
+        date = getattr(args, "date", "20260905")
+        tapo_vid = getattr(args, "tapo_video", [])
+        logi_vid = getattr(args, "logitech_video", [])
+        out_vid = getattr(args, "out_video", "sep5_combined_breakfast.mp4")
+        if tapo_vid and logi_vid:
+            out_p = generate_combined_breakfast_video(
+                tapo_clips=tapo_vid,
+                logitech_clips=logi_vid,
+                output_path=out_vid,
+                target_date=date
+            )
+            print(f"Generated combined breakfast video at: {out_p}")
 
 
 if __name__ == "__main__":

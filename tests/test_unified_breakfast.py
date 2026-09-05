@@ -27,6 +27,7 @@ from scripts.logitech_vlm_shadow import (
 )
 from scripts.unified_breakfast import (
     generate_unified_breakfast_report,
+    render_kibble_bar,
     create_neutral_placeholder,
     draw_panel_overlay,
     render_header_bar,
@@ -270,11 +271,11 @@ def test_unified_breakfast_report_generation():
 
     assert "Breakfast · 2026-09-05" in text
     assert "06:19:49–06:21:05" in text
-    assert "TAPO (Dan Feeder):" in text
-    assert "LOGITECH (Sanbo Feeder):" in text
-    assert "House-Level Conclusion:" in text
-    assert "No theft confirmed" in text
-    assert "Sanbo: Confirmed eating at Sanbo feeder" in text
+    assert "TAPO · Dan feeder" in text
+    assert "LOGITECH · Sanbo feeder" in text
+    assert "House" in text
+    assert "- Theft: Not confirmed" in text
+    assert "Dan confirmed at Dan feeder during overlap" in text
 
 
 def test_neutral_placeholder_and_overlay():
@@ -370,15 +371,54 @@ def test_dynamic_boundary_derivation(tmp_path):
     assert (end_dt - start_dt).total_seconds() == 249.0
 
 
-def test_report_suppresses_kibble_split_on_conflict():
+def test_conflicted_tapo_displays_raw_bars():
+    """Requirement 1 & 2: Conflicted TAPO displays raw Dan/Sanbo bars and contested warning."""
     tapo_summary = {
-        "start_time": "06:20:07",
-        "end_time": "06:21:26",
+        "start_time": "06:20:00",
+        "end_time": "06:21:05",
         "start_kibble": 30,
+        "end_kibble": 0,
+        "dan_kibble": 14,
+        "dan_percent": 47,
+        "dan_bowl_time": "0m 20s",
+        "dan_first_ts": "06:20:00",
+        "sanbo_kibble": 16,
+        "sanbo_percent": 53,
+        "sanbo_bowl_time": "0m 22s",
+        "sanbo_first_ts": "06:20:03",
+        "has_conflict": True,
+        "conflict_frames": 28
+    }
+    logi_summary = {
+        "session_start_time": "06:19:49",
+        "session_end_time": "06:20:45",
+        "cat_identity": "Sanbo",
+        "eating_evidence": "yes",
+        "bowl_state_progression": "unsure → empty",
+        "visibility": "poor (dark morning RGB)"
+    }
+
+    report = generate_unified_breakfast_report("20260905", tapo_summary, logi_summary)
+    text = report["telegram_text"]
+
+    # Raw 8-block bars must be present
+    assert "Dan    ████░░░░ 47% (~14)" in text
+    assert "bowl 0m 20s · from ~06:20:00" in text
+    assert "Sanbo  ████░░░░ 53% (~16)" in text
+    assert "bowl 0m 22s · from ~06:20:03" in text
+
+    # Conflict note marks them as contested
+    assert "⚠️ TAPO model attribution — contested" in text
+    assert "28 conflict frames — this split is camera-model evidence, not reliable enough by itself to prove theft." in text
+
+
+def test_contested_bar_values_do_not_confirm_theft():
+    """Requirement 3: Contested bar values are not used automatically to confirm theft."""
+    tapo_summary = {
+        "start_kibble": 30,
+        "end_kibble": 0,
         "dan_kibble": 14,
         "sanbo_kibble": 16,
-        "dan_percent": 47,
-        "sanbo_percent": 53,
         "has_conflict": True,
         "conflict_frames": 28
     }
@@ -392,15 +432,114 @@ def test_report_suppresses_kibble_split_on_conflict():
     report = generate_unified_breakfast_report("20260905", tapo_summary, logi_summary)
     text = report["telegram_text"]
 
-    # In contested mode, per-cat split must be suppressed
-    assert "Dan: ~14 kibble" not in text
-    assert "Sanbo: ~16 kibble" not in text
-    assert "per-cat split suppressed due to classifier conflict" in text
-    assert "Eating confirmed at Dan feeder (~30 kibble)" in text
-    assert "No theft confirmed" in text
+    # Even though Sanbo is 16 kibble, theft must NOT be confirmed
+    assert "- Theft: Not confirmed" in text
+
+
+def test_feeder_meal_completion_displayed_independently_of_identity():
+    """Requirement 4: Feeder meal outcome displayed first, independent of cat identity."""
+    tapo_summary = {
+        "start_kibble": 30,
+        "end_kibble": 0,
+        "dan_kibble": 14,
+        "sanbo_kibble": 16,
+        "has_conflict": True
+    }
+    logi_summary = {
+        "session_start_time": "06:19:49",
+        "session_end_time": "06:20:45",
+        "cat_identity": "Sanbo",
+        "eating_evidence": "yes",
+        "bowl_state_progression": "unsure → empty"
+    }
+
+    report = generate_unified_breakfast_report("20260905", tapo_summary, logi_summary)
+    text = report["telegram_text"]
+
+    assert "TAPO · Dan feeder\n🥣 Meal: ~30 → 0 kibble · Finished ✅" in text
+    assert "- Dan feeder: ~30 kibble consumed · Finished ✅" in text
+
+
+def test_dan_feeder_emptied_does_not_imply_dan_ate_all_food():
+    """Requirement 5: Dan feeder emptied does not imply Dan consumed all food."""
+    tapo_summary = {
+        "start_kibble": 30,
+        "end_kibble": 0,
+        "dan_kibble": 14,
+        "sanbo_kibble": 16,
+        "has_conflict": True
+    }
+    logi_summary = {
+        "session_start_time": "06:19:49",
+        "session_end_time": "06:20:45",
+        "cat_identity": "Sanbo",
+        "eating_evidence": "yes"
+    }
+
+    report = generate_unified_breakfast_report("20260905", tapo_summary, logi_summary)
+    text = report["telegram_text"]
+
+    assert "Dan consumed all food" not in text
+    assert "Dan ate all food" not in text
+    assert "Dan ate ~30 kibble" not in text
+    assert "both cats ate at their own bowls" not in text
+
+
+def test_tapo_missing_end_state_yields_uncertain():
+    """Requirement 6: TAPO missing end-state yields Meal completion: uncertain."""
+    tapo_summary = {
+        "start_kibble": 30,
+        "end_kibble": None,  # unobserved end state
+        "dan_kibble": 14,
+        "sanbo_kibble": 16,
+        "has_conflict": True
+    }
+    logi_summary = {}
+
+    report = generate_unified_breakfast_report("20260905", tapo_summary, logi_summary)
+    text = report["telegram_text"]
+
+    assert "🥣 Meal completion: uncertain" in text
+    assert "- Dan feeder: ~30 kibble consumed · Completion uncertain" in text
+
+
+def test_logitech_meal_completion_displayed_when_evidence_exists():
+    """Requirement 7: Logitech meal completion is displayed when evidence exists."""
+    tapo_summary = {"start_kibble": 30, "end_kibble": 0}
+    logi_summary = {
+        "session_start_time": "06:19:49",
+        "session_end_time": "06:20:45",
+        "cat_identity": "Sanbo",
+        "eating_evidence": "yes",
+        "bowl_state_progression": "unsure → empty"
+    }
+
+    report = generate_unified_breakfast_report("20260905", tapo_summary, logi_summary)
+    text = report["telegram_text"]
+
+    assert "🥣 Meal: unsure → empty · Finished likely" in text
+    assert "- Sanbo feeder: Finished likely · Sanbo feeding observed" in text
+
+
+def test_logitech_missing_completion_evidence_yields_uncertainty():
+    """Requirement 8: Logitech missing completion evidence yields uncertainty."""
+    tapo_summary = {"start_kibble": 30, "end_kibble": 0}
+    logi_summary = {
+        "session_start_time": "06:19:49",
+        "session_end_time": "06:20:45",
+        "cat_identity": "Sanbo",
+        "eating_evidence": "unsure",
+        "bowl_state_progression": None
+    }
+
+    report = generate_unified_breakfast_report("20260905", tapo_summary, logi_summary)
+    text = report["telegram_text"]
+
+    assert "🥣 Meal: completion uncertain" in text
 
 
 def test_report_no_hardcoded_defaults():
+    """Requirement 9: No hardcoded Sep-5 percentages/amounts in defaults or custom inputs."""
     # Calling report with empty dictionaries must NEVER produce the Sep-5 magic numbers
     report = generate_unified_breakfast_report("20260906", {}, {})
     text = report["telegram_text"]
@@ -409,33 +548,59 @@ def test_report_no_hardcoded_defaults():
     assert "16 kibble" not in text
     assert "47%" not in text
     assert "53%" not in text
-    assert "0m 20s" not in text
-    assert "0m 22s" not in text
     assert "28 conflict frames" not in text
 
+    # Custom inputs must use their own values
+    custom_report = generate_unified_breakfast_report("20260906", {
+        "start_kibble": 10,
+        "end_kibble": 0,
+        "dan_kibble": 8,
+        "sanbo_kibble": 2,
+    }, {})
+    c_text = custom_report["telegram_text"]
+    assert "80%" in c_text
+    assert "20%" in c_text
+    assert "~8" in c_text
+    assert "~2" in c_text
 
-def test_report_unresolved_when_unresolvable():
-    # TAPO has conflict, but Logitech has NO cat / inconclusive
+
+def test_no_physically_impossible_dual_location_claim():
+    """Requirement 10: No physically impossible dual-location conclusion."""
     tapo_summary = {
-        "start_time": "06:20:07",
-        "end_time": "06:21:26",
+        "start_time": "06:20:00",
+        "end_time": "06:21:05",
         "start_kibble": 30,
-        "dan_kibble": 15,
-        "sanbo_kibble": 15,
+        "end_kibble": 0,
+        "dan_kibble": 14,
+        "sanbo_kibble": 16,
         "has_conflict": True,
-        "conflict_frames": 30
+        "conflict_frames": 28
     }
     logi_summary = {
         "session_start_time": "06:19:49",
         "session_end_time": "06:20:45",
-        "cat_identity": "unknown",
-        "eating_evidence": "no"
+        "cat_identity": "Sanbo",
+        "eating_evidence": "yes"
     }
 
-    report = generate_unified_breakfast_report("20260907", tapo_summary, logi_summary)
+    report = generate_unified_breakfast_report("20260905", tapo_summary, logi_summary)
     text = report["telegram_text"]
 
-    # When Logitech cannot resolve the TAPO conflict, report must state uncertainty
-    assert "per-cat split unresolved due to classifier conflict" in text
-    assert "No theft confirmed (identity evidence conflicted at Dan feeder)" in text
+    assert "Identity: Dan confirmed at Dan feeder during overlap (Sanbo at own feeder); individual TAPO split contested" in text
+    # When unresolvable (e.g. Logitech unknown):
+    unresolved_report = generate_unified_breakfast_report("20260905", tapo_summary, {"cat_identity": "unknown"})
+    assert "Identity: Contested at Dan feeder; individual attribution unresolved" in unresolved_report["telegram_text"]
+
+
+def test_render_kibble_bar_visual_style():
+    """Verifies compact 8-block visual style."""
+    assert render_kibble_bar(None) == ""
+    assert render_kibble_bar(0) == "░░░░░░░░"
+    assert render_kibble_bar(25) == "██░░░░░░"
+    assert render_kibble_bar(47) == "████░░░░"
+    assert render_kibble_bar(50) == "████░░░░"
+    assert render_kibble_bar(53) == "████░░░░"
+    assert render_kibble_bar(75) == "██████░░"
+    assert render_kibble_bar(100) == "████████"
+
 

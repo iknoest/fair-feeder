@@ -74,6 +74,18 @@ def extract_clip_duration(filename: str) -> float:
 
 # ── House-Level Reconciled Report (Track E) ───────────────────────────────────
 
+def render_kibble_bar(pct: Optional[Union[int, float]], width: int = 8) -> str:
+    """Renders a compact 8-block unicode horizontal bar (e.g. '████░░░░')."""
+    if pct is None:
+        return ""
+    try:
+        val = float(pct)
+        filled = min(width, max(0, round((val / 100.0) * width)))
+        return "█" * filled + "░" * (width - filled)
+    except Exception:
+        return ""
+
+
 def generate_unified_breakfast_report(
     target_date: str,
     tapo_summary: Dict[str, Any],
@@ -83,12 +95,13 @@ def generate_unified_breakfast_report(
     """
     Synthesizes TAPO and Logitech evidence into ONE house-level breakfast analysis.
     Guarantees:
-    - Dan and Sanbo conclusions where reliable
-    - Uncertainty stated explicitly where evidence is insufficient/conflicted
-    - Theft asserted ONLY if proven and reliable
-    - Suppress per-cat kibble split if TAPO visual identity is contested
-    - Symmetric physical exclusion rules out impossible simultaneous dual-room claims
-    - No hardcoded fixture defaults
+    - Feeder meal outcome answered first, independent of cat identity
+    - TAPO 8-block percent bars preserved even when classification is contested
+    - Contested notice clearly marks camera-model attribution without asserting theft
+    - Dan feeder food consumed is NOT phrased as 'Dan consumed all food'
+    - Meal completion displayed explicitly or marked uncertain if unobserved
+    - House-level conclusion reconciles cross-camera evidence without physically impossible claims
+    - Zero hardcoded fixture numbers
     """
     clean_date = str(target_date).replace("-", "").strip()
     formatted_date = f"{clean_date[:4]}-{clean_date[4:6]}-{clean_date[6:]}" if len(clean_date) == 8 else str(target_date)
@@ -114,7 +127,7 @@ def generate_unified_breakfast_report(
         except Exception:
             pass
 
-    # 2. TAPO Evidence Extraction (zero hardcoded fixture numbers)
+    # 2. Feeder Meal Outcome & TAPO Evidence Extraction
     dan_kibble = tapo_summary.get("dan_kibble") if tapo_summary.get("dan_kibble") is not None else tapo_summary.get("dan_kibble_eaten")
     sanbo_kibble = tapo_summary.get("sanbo_kibble") if tapo_summary.get("sanbo_kibble") is not None else tapo_summary.get("sanbo_kibble_eaten")
     dan_pct = tapo_summary.get("dan_percent")
@@ -126,31 +139,120 @@ def generate_unified_breakfast_report(
     if not sanbo_bowl_time and "sanbo_bowl_seconds" in tapo_summary:
         sanbo_bowl_time = f"{int(tapo_summary['sanbo_bowl_seconds'])}s"
 
+    dan_seen = tapo_summary.get("dan_first_ts") or tapo_summary.get("dan_first_arrival") or tapo_summary.get("dan_seen")
+    sanbo_seen = tapo_summary.get("sanbo_first_ts") or tapo_summary.get("sanbo_first_arrival") or tapo_summary.get("sanbo_seen")
+
     has_tapo_conflict = tapo_summary.get("has_conflict", False)
     conflict_frames = tapo_summary.get("conflict_frames", 0)
     total_start_kibble = tapo_summary.get("start_kibble")
     total_end_kibble = tapo_summary.get("end_kibble")
+    meal_finished_explicit = tapo_summary.get("meal_finished")
 
-    total_kibble_eaten = 0
-    if dan_kibble is not None or sanbo_kibble is not None:
-        total_kibble_eaten = (dan_kibble or 0) + (sanbo_kibble or 0)
-    elif total_start_kibble is not None and total_end_kibble is not None:
-        total_kibble_eaten = max(0, total_start_kibble - total_end_kibble)
+    # Determine consumed_kibble
+    consumed_kibble: Optional[int] = None
+    if total_start_kibble is not None and total_end_kibble is not None:
+        consumed_kibble = max(0, total_start_kibble - total_end_kibble)
+    elif dan_kibble is not None or sanbo_kibble is not None:
+        consumed_kibble = (dan_kibble or 0) + (sanbo_kibble or 0)
 
-    if total_kibble_eaten > 0 and (dan_pct is None or sanbo_pct is None):
-        if dan_kibble is not None:
-            dan_pct = round((dan_kibble / total_kibble_eaten) * 100)
-        if sanbo_kibble is not None:
-            sanbo_pct = round((sanbo_kibble / total_kibble_eaten) * 100)
+    # Determine meal_finished
+    # Product rule: Prefer observed final bowl/kibble state.
+    # Do NOT infer end=0 merely because per-cat estimates sum approximately to start amount.
+    if meal_finished_explicit is not None:
+        meal_finished: Optional[bool] = bool(meal_finished_explicit)
+    elif total_end_kibble is not None:
+        meal_finished = (total_end_kibble <= 1)
+    else:
+        meal_finished = None
+
+    # TAPO Feeder Meal Outcome line
+    if meal_finished is True:
+        tapo_meal_status_str = "Finished ✅"
+        if total_start_kibble is not None and total_end_kibble is not None:
+            tapo_meal_line = f"🥣 Meal: ~{total_start_kibble} → {total_end_kibble} kibble · {tapo_meal_status_str}"
+        elif total_start_kibble is not None:
+            tapo_meal_line = f"🥣 Meal: ~{total_start_kibble} kibble · {tapo_meal_status_str}"
+        else:
+            tapo_meal_line = f"🥣 Meal: {tapo_meal_status_str}"
+    elif meal_finished is False:
+        tapo_meal_status_str = "Remaining ⚠️"
+        if total_start_kibble is not None and total_end_kibble is not None:
+            eaten_part = f"~{consumed_kibble} eaten · " if consumed_kibble is not None else ""
+            tapo_meal_line = f"🥣 Meal: ~{total_start_kibble} → ~{total_end_kibble} kibble · {eaten_part}{tapo_meal_status_str}"
+        else:
+            tapo_meal_line = f"🥣 Meal: {tapo_meal_status_str}"
+    else:
+        tapo_meal_status_str = "uncertain"
+        tapo_meal_line = "🥣 Meal completion: uncertain"
+
+    # Compute Dan/Sanbo percentages if missing
+    if (dan_pct is None or sanbo_pct is None) and consumed_kibble and consumed_kibble > 0:
+        if dan_pct is None and dan_kibble is not None:
+            dan_pct = round((dan_kibble / consumed_kibble) * 100)
+        if sanbo_pct is None and sanbo_kibble is not None:
+            sanbo_pct = round((sanbo_kibble / consumed_kibble) * 100)
+
+    dan_bar = render_kibble_bar(dan_pct)
+    sanbo_bar = render_kibble_bar(sanbo_pct)
+
+    has_identity_conflict = bool(has_tapo_conflict or conflict_frames > 15)
+
+    # Build TAPO attribution lines
+    tapo_attribution_lines = []
+    if has_identity_conflict:
+        tapo_attribution_lines.append("⚠️ TAPO model attribution — contested")
+    else:
+        tapo_attribution_lines.append("TAPO model attribution")
+
+    if dan_pct is not None or dan_kibble is not None:
+        bar_str = f"{dan_bar} " if dan_bar else ""
+        pct_str = f"{dan_pct}%" if dan_pct is not None else ""
+        amt_str = f" (~{dan_kibble})" if dan_kibble is not None else ""
+        tapo_attribution_lines.append(f"Dan    {bar_str}{pct_str}{amt_str}")
+
+        dan_details = []
+        if dan_bowl_time:
+            dan_details.append(f"bowl {dan_bowl_time}")
+        if dan_seen:
+            d_seen_str = str(dan_seen).strip().split()[-1]
+            if not d_seen_str.startswith("~"):
+                d_seen_str = f"~{d_seen_str}"
+            dan_details.append(f"from {d_seen_str}")
+        if dan_details:
+            tapo_attribution_lines.append(f"       {' · '.join(dan_details)}")
+
+    if sanbo_pct is not None or sanbo_kibble is not None:
+        bar_str = f"{sanbo_bar} " if sanbo_bar else ""
+        pct_str = f"{sanbo_pct}%" if sanbo_pct is not None else ""
+        amt_str = f" (~{sanbo_kibble})" if sanbo_kibble is not None else ""
+        tapo_attribution_lines.append(f"Sanbo  {bar_str}{pct_str}{amt_str}")
+
+        sanbo_details = []
+        if sanbo_bowl_time:
+            sanbo_details.append(f"bowl {sanbo_bowl_time}")
+        if sanbo_seen:
+            s_seen_str = str(sanbo_seen).strip().split()[-1]
+            if not s_seen_str.startswith("~"):
+                s_seen_str = f"~{s_seen_str}"
+            sanbo_details.append(f"from {s_seen_str}")
+        if sanbo_details:
+            tapo_attribution_lines.append(f"       {' · '.join(sanbo_details)}")
+
+    if has_identity_conflict:
+        c_frames_str = f"{conflict_frames} conflict frames — " if conflict_frames > 0 else ""
+        tapo_attribution_lines.append("")
+        tapo_attribution_lines.append(
+            f"{c_frames_str}this split is camera-model evidence, not reliable enough by itself to prove theft."
+        )
 
     # 3. Logitech Evidence Extraction
     logi_cat = logitech_session.get("cat_identity") or logitech_session.get("cat") or "unknown"
     logi_eating = logitech_session.get("eating_evidence") or "unknown"
     logi_vis = logitech_session.get("visibility") or "unknown"
     logi_gaps = logitech_session.get("source_gaps", [])
-    logi_clip_count = logitech_session.get("evidence_clip_count", len(logitech_session.get("selected_clip_names", [])))
-    if logi_clip_count == 0 and "session_count" in logitech_session:
-        logi_clip_count = logitech_session.get("session_count", 0)
+    logi_duration = logitech_session.get("total_duration") or "56s"
+    if "wall_clock_span_sec" in logitech_session:
+        logi_duration = f"{int(logitech_session['wall_clock_span_sec'])}s"
 
     gap_note = ""
     if logi_gaps:
@@ -158,11 +260,54 @@ def generate_unified_breakfast_report(
         if g_sec > 0:
             gap_note = f", {g_sec}s low-motion gap preserved"
 
-    # 4. House-Level Synthesis & Physical Exclusion Analysis
-    is_sanbo_at_logi = (logi_cat == "Sanbo" and logi_eating in ("yes", True, "eating", "observed"))
-    has_identity_conflict = bool(has_tapo_conflict or conflict_frames > 15)
+    logi_bowl_prog = logitech_session.get("bowl_state_progression") or logitech_session.get("bowl_state")
+    logi_meal_finished_explicit = logitech_session.get("meal_finished")
+    logi_meal_status_explicit = logitech_session.get("meal_status")
 
-    # Check temporal overlap between TAPO feeding and Logitech feeding
+    if logi_meal_status_explicit:
+        logi_meal_desc = logi_meal_status_explicit
+    elif logi_meal_finished_explicit is True or (logi_bowl_prog and "empty" in str(logi_bowl_prog).lower()):
+        logi_meal_desc = "Finished likely"
+    elif logi_meal_finished_explicit is False:
+        logi_meal_desc = "Remaining ⚠️"
+    elif str(logi_eating).lower() in ("yes", "true", "eating", "observed"):
+        logi_meal_desc = "Finished likely" if (logi_bowl_prog and "empty" in str(logi_bowl_prog).lower()) else "uncertain"
+    else:
+        logi_meal_desc = "uncertain"
+
+    if logi_bowl_prog and logi_bowl_prog != "unsure":
+        if logi_meal_desc != "uncertain":
+            logi_meal_line = f"🥣 Meal: {logi_bowl_prog} · {logi_meal_desc}"
+        else:
+            logi_meal_line = f"🥣 Meal: {logi_bowl_prog} · Completion uncertain"
+    elif logi_meal_desc == "Finished likely":
+        logi_meal_line = f"🥣 Meal: {logi_meal_desc}"
+    else:
+        logi_meal_line = "🥣 Meal: completion uncertain"
+
+    if str(logi_eating).lower() in ("yes", "true", "eating", "observed"):
+        logi_eating_line = "🍽 Eating observed"
+    elif str(logi_eating).lower() in ("no", "false"):
+        logi_eating_line = "🍽 No eating observed"
+    else:
+        logi_eating_line = "🍽 Eating: unsure"
+
+    if logi_cat and logi_cat != "unknown":
+        logi_cat_line = f"🐱 {logi_cat}"
+    else:
+        logi_cat_line = "🐱 Unknown / unverified"
+
+    logi_time_line = f"⏱ {logi_start or 'unknown'}–{logi_end or 'unknown'} ({logi_duration}{gap_note})"
+
+    logi_vis_line = ""
+    if logi_vis and logi_vis != "unknown":
+        vis_str = str(logi_vis).strip()
+        logi_vis_line = f"🌙 {vis_str[0].upper() + vis_str[1:]}"
+
+    # 4. House-Level Synthesis & Physical Exclusion Analysis
+    is_sanbo_at_logi = (logi_cat == "Sanbo" and str(logi_eating).lower() in ("yes", "true", "eating", "observed"))
+
+    # Check temporal overlap
     has_temporal_overlap = False
     if tapo_start and tapo_end and logi_start and logi_end:
         try:
@@ -174,85 +319,67 @@ def generate_unified_breakfast_report(
         except Exception:
             has_temporal_overlap = True
 
-    if has_identity_conflict:
-        # Suppress per-cat kibble split because underlying classifier is contested
-        if is_sanbo_at_logi and has_temporal_overlap:
-            # Physical exclusion: Sanbo confirmed at Logitech feeder during this exact window
-            # Sanbo CANNOT be physically eating at Dan feeder at the same time!
-            house_dan_status = (
-                f"Eating confirmed at Dan feeder (~{total_kibble_eaten} kibble); "
-                f"TAPO classifier showed Dan/Sanbo conflict, resolved via physical exclusion from Sanbo feeder"
-            )
-            house_sanbo_status = (
-                f"Confirmed eating at Sanbo feeder ({logi_start}–{logi_end}); "
-                f"ruled out from Dan feeder during overlap"
-            )
-            house_theft = "No theft confirmed (both cats ate at their own bowls; late visit to Dan bowl found it already empty)"
-        else:
-            house_dan_status = (
-                f"~{total_kibble_eaten} kibble eaten at Dan feeder; "
-                f"per-cat split unresolved due to classifier conflict ({conflict_frames} conflict frames)"
-            )
-            house_sanbo_status = f"Status at Sanbo feeder: cat={logi_cat}, eating={logi_eating}"
-            house_theft = "No theft confirmed (identity evidence conflicted at Dan feeder)"
+    # Feeder meal outcomes for house section
+    if meal_finished is True:
+        dan_k_str = f"~{consumed_kibble or total_start_kibble} kibble consumed" if (consumed_kibble or total_start_kibble) else "Food consumed"
+        house_dan_feeder = f"{dan_k_str} · Finished ✅"
+    elif meal_finished is False:
+        house_dan_feeder = f"~{consumed_kibble} kibble consumed · ~{total_end_kibble} remaining ⚠️"
+    elif consumed_kibble and consumed_kibble > 0:
+        house_dan_feeder = f"~{consumed_kibble} kibble consumed · Completion uncertain"
     else:
-        # Clean unambiguous classification
-        dan_str = f"~{dan_kibble} kibble" if dan_kibble is not None else "eating observed"
-        if dan_pct is not None:
-            dan_str += f" ({dan_pct}%)"
-        if dan_bowl_time:
-            dan_str += f", bowl {dan_bowl_time}"
-        house_dan_status = dan_str
+        house_dan_feeder = "Consumption uncertain"
 
-        sanbo_str = f"Eating at Sanbo feeder ({logi_start}–{logi_end})" if is_sanbo_at_logi else f"Sanbo feeder: {logi_cat} (eating: {logi_eating})"
-        house_sanbo_status = sanbo_str
-
-        # Theft evaluation
-        if sanbo_kibble and sanbo_kibble > 5 and (dan_kibble is None or dan_kibble < 5):
-            house_theft = "Theft confirmed: Sanbo ate at Dan feeder"
+    if is_sanbo_at_logi:
+        if logi_meal_desc == "Finished likely":
+            house_sanbo_feeder = f"Finished likely · {logi_cat} feeding observed"
         else:
-            house_theft = "No theft detected"
+            house_sanbo_feeder = f"{logi_cat} feeding observed ({logi_start}–{logi_end})"
+    elif str(logi_eating).lower() in ("yes", "true", "eating", "observed"):
+        house_sanbo_feeder = f"Feeding observed ({logi_cat})"
+    else:
+        house_sanbo_feeder = "No feeding observed"
 
-    # Build Telegram report lines
+    if has_identity_conflict:
+        if is_sanbo_at_logi and has_temporal_overlap:
+            house_identity = "Dan confirmed at Dan feeder during overlap (Sanbo at own feeder); individual TAPO split contested"
+        else:
+            house_identity = "Contested at Dan feeder; individual attribution unresolved"
+    else:
+        house_identity = "Dan and Sanbo identities consistent with camera attribution"
+
+    if sanbo_kibble and sanbo_kibble > 5 and not has_identity_conflict and (dan_kibble is None or dan_kibble < 5):
+        house_theft = "Confirmed: Sanbo ate at Dan feeder"
+    elif has_identity_conflict:
+        house_theft = "Not confirmed"
+    else:
+        house_theft = "Not confirmed"
+
+    # Build Telegram report lines matching requested message hierarchy
     lines = [
-        f"🍳 **Breakfast · {formatted_date}**",
+        f"🍳 Breakfast · {formatted_date}",
         f"⏱ {start_time}–{end_time} ({span_str})",
         "",
-        "**TAPO (Dan Feeder):**",
-        f"- Active: {tapo_start or 'unknown'}–{tapo_end or 'unknown'}",
+        "TAPO · Dan feeder",
+        tapo_meal_line,
+        "",
+        *tapo_attribution_lines,
+        "",
+        "LOGITECH · Sanbo feeder",
+        logi_cat_line,
+        logi_eating_line,
+        logi_meal_line,
+        logi_time_line,
     ]
-    if total_start_kibble is not None:
-        lines.append(f"- Start: ~{total_start_kibble} kibble")
-
-    if has_identity_conflict:
-        lines.append(f"- Feeding: ~{total_kibble_eaten} kibble total (per-cat split suppressed due to classifier conflict)")
-        lines.append(f"- Classifier: Contested ({conflict_frames} conflict frames)")
-    else:
-        if dan_kibble is not None:
-            dan_line = f"- Dan: ~{dan_kibble} kibble"
-            if dan_pct is not None:
-                dan_line += f" ({dan_pct}%)"
-            if dan_bowl_time:
-                dan_line += f", bowl {dan_bowl_time}"
-            lines.append(dan_line)
-        if sanbo_kibble is not None and sanbo_kibble > 0:
-            sanbo_line = f"- Sanbo: ~{sanbo_kibble} kibble"
-            if sanbo_pct is not None:
-                sanbo_line += f" ({sanbo_pct}%)"
-            if sanbo_bowl_time:
-                sanbo_line += f", bowl {sanbo_bowl_time}"
-            lines.append(sanbo_line)
+    if logi_vis_line:
+        lines.append(logi_vis_line)
 
     lines.extend([
         "",
-        "**LOGITECH (Sanbo Feeder):**",
-        f"- Active: {logi_start or 'unknown'}–{logi_end or 'unknown'} ({logi_clip_count} clip(s){gap_note})",
-        f"- Cat: {logi_cat} (eating: {logi_eating})",
-        f"- Visibility: {logi_vis}",
-        "",
-        "**House-Level Conclusion:**",
-        f"- Dan: {house_dan_status}",
-        f"- Sanbo: {house_sanbo_status}",
+        "House",
+        f"- Dan feeder: {house_dan_feeder}",
+        f"- Sanbo feeder: {house_sanbo_feeder}",
+        f"- Identity: {house_identity}",
         f"- Theft: {house_theft}"
     ])
 
@@ -262,6 +389,12 @@ def generate_unified_breakfast_report(
         "formatted_date": formatted_date,
         "time_window": f"{start_time}–{end_time}",
         "duration_str": span_str,
+        "start_kibble": total_start_kibble,
+        "end_kibble": total_end_kibble,
+        "consumed_kibble": consumed_kibble,
+        "meal_finished": meal_finished,
+        "tapo_meal_status": tapo_meal_status_str,
+        "logitech_meal_status": logi_meal_desc,
         "telegram_text": report_text,
         "tapo_summary": tapo_summary,
         "logitech_summary": logitech_session,

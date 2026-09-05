@@ -25,10 +25,12 @@ class CameraTimelineInterval:
     cat_presence: bool
     identity: str  # "Dan", "Sanbo", "both", "none", "unsure"
     identity_confidence: float  # 0.0 to 1.0
-    identity_evidence_quality: str = "usable"  # "poor", "usable", "good", "high"
+    identity_evidence_quality: str = "usable"  # "poor", "usable", "good", "high", "contested"
     eating_evidence: str = "unsure"  # "yes", "no", "unsure"
     identity_basis: str = ""  # "FeedingTracker accepted phase", "visual", etc.
     source_artifact: str = ""
+    has_conflict: bool = False
+    exclusion_eligible: bool = True
     reconciled: bool = False
     reconciliation_notes: str = ""
 
@@ -80,6 +82,11 @@ def reconcile_cross_camera_intervals(
     for t_int in reconciled_tapo:
         for l_int in reconciled_logitech:
             if not intervals_overlap(t_int.start_timestamp, t_int.end_timestamp, l_int.start_timestamp, l_int.end_timestamp):
+                continue
+
+            # If TAPO has conflict or is not exclusion eligible, it cannot assert physical exclusion
+            if t_int.has_conflict or not t_int.exclusion_eligible or t_int.identity_evidence_quality == "contested":
+                l_int.reconciliation_notes = "Cross-camera exclusion disabled: TAPO interval has cat identity conflict"
                 continue
 
             # Check if TAPO has reliable identity establishing Dan in Room 1
@@ -950,11 +957,19 @@ def format_duration_str(seconds: float) -> str:
         return f"{m}m {s}s"
     return f"{s}s"
 
-def group_clips_into_sessions(selected_files, gap_threshold_sec=10):
+def is_feeding_window_time(dt):
+    """Checks if timestamp falls within the scheduled breakfast feeding window (05:55-06:35 Amsterdam time)."""
+    from datetime import time
+    t = dt.time()
+    return time(5, 55) <= t <= time(6, 35)
+
+
+def group_clips_into_sessions(selected_files, gap_threshold_sec=10, feeding_gap_threshold_sec=15):
     """
     Groups video clips into distinct feeding sessions based on time gaps.
-    If gap between clip[i-1] end and clip[i] start <= gap_threshold_sec, they belong to the same session.
-    Otherwise, they start a new session.
+    If gap between clip[i-1] end and clip[i] start <= threshold, they belong to the same session.
+    Uses feeding_gap_threshold_sec (default 15s) during feeding window (05:55-06:35 Amsterdam time)
+    to accommodate dark RGB pauses, and gap_threshold_sec (default 10s) otherwise.
     """
     if not selected_files:
         return []
@@ -987,7 +1002,8 @@ def group_clips_into_sessions(selected_files, gap_threshold_sec=10):
         curr_start = timed_clips[i]['start']
         gap_sec = (curr_start - prev_end).total_seconds()
 
-        if gap_sec <= gap_threshold_sec:
+        eff_threshold = feeding_gap_threshold_sec if (is_feeding_window_time(curr_start) or is_feeding_window_time(prev_end)) else gap_threshold_sec
+        if gap_sec <= eff_threshold:
             current_session.append(timed_clips[i])
         else:
             sessions.append([item['file'] for item in current_session])
@@ -1020,6 +1036,7 @@ def build_vlm_session_report(selected_files, manifest_data, all_results, all_fai
             except Exception:
                 pass
 
+    source_gaps = []
     if clip_times:
         clip_times.sort(key=lambda x: x[0])
         session_start_dt = clip_times[0][0]
@@ -1028,7 +1045,19 @@ def build_vlm_session_report(selected_files, manifest_data, all_results, all_fai
         start_time_str = session_start_dt.strftime("%H:%M:%S")
         end_time_str = session_end_dt.strftime("%H:%M:%S")
         span_str = format_duration_str(session_span_sec)
+
+        for i in range(1, len(clip_times)):
+            p_end = clip_times[i-1][1]
+            c_start = clip_times[i][0]
+            g_s = max(0.0, (c_start - p_end).total_seconds())
+            if g_s > 0:
+                source_gaps.append({
+                    "gap_start": p_end.strftime("%H:%M:%S"),
+                    "gap_end": c_start.strftime("%H:%M:%S"),
+                    "gap_sec": round(g_s, 1)
+                })
     else:
+        session_span_sec = 0.0
         start_time_str = "unknown"
         end_time_str = "unknown"
         span_str = "0s"
@@ -1134,6 +1163,9 @@ def build_vlm_session_report(selected_files, manifest_data, all_results, all_fai
         "session_start_time": start_time_str,
         "session_end_time": end_time_str,
         "total_duration": span_str,
+        "wall_clock_span_sec": round(session_span_sec, 1),
+        "actual_recorded_footage_sec": round(total_active_video_sec, 1),
+        "source_gaps": source_gaps,
         "cat_identity": cat_identity,
         "identity_basis": all_results[0].get("identity_basis", "unknown") if all_results else "unknown",
         "visibility": all_results[0].get("visibility", "unknown") if all_results else "unknown",
@@ -1749,7 +1781,10 @@ def main():
             record_item_delivered,
             is_camera_fully_delivered,
             commit_camera_completion,
-            load_tapo_timeline
+            load_tapo_timeline,
+            save_durable_artifact,
+            is_breakfast_fully_delivered,
+            commit_breakfast_completion
         )
     except ImportError:
         from delivery_ledger import (
@@ -1759,15 +1794,22 @@ def main():
             record_item_delivered,
             is_camera_fully_delivered,
             commit_camera_completion,
-            load_tapo_timeline
+            load_tapo_timeline,
+            save_durable_artifact,
+            is_breakfast_fully_delivered,
+            commit_breakfast_completion
         )
+
+    out_dir = Path(args.out_dir)
+
+    if is_breakfast_fully_delivered(drive, out_folder_id, args.date, local_fallback_dir=out_dir) and args.date != "REPLAY_TEST":
+        print(f"✅ Preflight: Date {args.date} breakfast already fully delivered according to durable registry. Exiting early.")
+        sys.exit(0)
 
     delivery_ledger = load_delivery_ledger(drive, out_folder_id, args.date, "LOGITECH", local_fallback_dir=out_dir)
     if is_camera_fully_delivered(delivery_ledger) and args.date != "REPLAY_TEST":
         print(f"✅ Preflight: Date {args.date} LOGITECH already fully delivered according to durable ledger. Exiting early.")
         sys.exit(0)
-
-    out_dir = Path(args.out_dir)
 
     if out_dir.exists():
         for summary_file in ["summary.json", "logitech_vlm_shadow_summary.json"]:
@@ -1847,6 +1889,18 @@ def main():
     if tapo_timeline_data and "feeding_phases" in tapo_timeline_data:
         print(f"ℹ️ Ingested TAPO timeline for {args.date} with {len(tapo_timeline_data['feeding_phases'])} feeding phase(s).")
         for ph in tapo_timeline_data["feeding_phases"]:
+            has_conflict = bool(ph.get("has_conflict", False))
+            if ph.get("conflict_frames", 0) > 10:
+                has_conflict = True
+            elif ph.get("dan_bowl_seconds", 0) > 0 and ph.get("sanbo_bowl_seconds", 0) > 0:
+                tot_s = ph.get("dan_bowl_seconds", 0) + ph.get("sanbo_bowl_seconds", 0)
+                diff_s = abs(ph.get("dan_bowl_seconds", 0) - ph.get("sanbo_bowl_seconds", 0))
+                if tot_s > 0 and (diff_s / tot_s) < 0.20:
+                    has_conflict = True
+
+            exclusion_eligible = ph.get("exclusion_eligible", not has_conflict)
+            evidence_quality = "contested" if has_conflict else ph.get("evidence_quality", "usable")
+
             tapo_intervals.append(CameraTimelineInterval(
                 camera="TAPO",
                 start_timestamp=ph.get("start", ""),
@@ -1854,10 +1908,12 @@ def main():
                 cat_presence=True,
                 identity=ph.get("cat", "Dan"),
                 identity_confidence=float(ph.get("confidence", 0.95)),
-                identity_evidence_quality=ph.get("evidence_quality", "usable"),
+                identity_evidence_quality=evidence_quality,
                 identity_basis=ph.get("identity_basis", "FeedingTracker accepted phase"),
                 eating_evidence="yes" if ph.get("dan_bowl_seconds", 0) > 0 else "unsure",
-                source_artifact="tapo_timeline"
+                source_artifact="tapo_timeline",
+                has_conflict=has_conflict,
+                exclusion_eligible=exclusion_eligible
             ))
 
     manifest_data = []

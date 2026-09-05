@@ -39,12 +39,19 @@ This file preserves project-specific lessons that are too large for root context
 | Durable Delivery Ledger on Drive | `delivery_ledger_${DATE}_${CAMERA}.json` prevents duplicate deliveries across parallel/retry runs with item-level idempotency. |
 | Deterministic CI DAG pipeline | `prepare` -> `tapo-report` -> `logitech-report` with target-date concurrency groups. |
 | Cross-Camera Exclusion | Two cats cannot be in two rooms simultaneously; TAPO accepted FeedingTracker phase excludes Dan/Sanbo at Logitech. |
+| Conflict Guard for Exclusion | When TAPO has identity conflict (contested phases, high conflict frames), cross-camera physical exclusion is disabled so incorrect identities are not forced onto the other camera. |
+| Single Durable Authority (`delivery_registry.json`) | Single pre-created file in Drive updated via `update()` to avoid service account `403 storageQuotaExceeded` on `create()`, tracking house-level and camera-level completion. |
+| Logitech Feeding Window Continuity (15s) | Pauses between dark RGB clips during feeding reach 11-15s due to recorder 5s timeout; window-aware grouping (05:55–06:35 AMS) bridges them while preserving separate visits. |
+| Synchronized Side-by-Side Video | TAPO left, LOGITECH right, aligned to shared wall-clock time with neutral placeholders for gaps (no fake frames), 4x speedup, Telegram-safe <45 MB. |
 | Rule D (VLM Failure Preservation) | Motion/differencing alone never forces Dan or Sanbo; cross-camera reconciliation requires VLM-proven cat presence. |
 
 ## Recent Failure Patterns
 
 | Issue | Root cause | Fix |
 |-------|------------|-----|
+| Split breakfast feeding sessions (2026-09-05) | 11s motion pause in dark RGB split breakfast into 2 sessions. | 15s window-aware threshold (05:55–06:35 Amsterdam) unifies feeding pauses while preserving separate visits (>=47s). |
+| False food theft alarm on contested TAPO (2026-09-05) | TAPO had 47% Dan / 53% Sanbo conflict; exclusion blindly trusted Sanbo at TAPO and forced Logitech to Dan. | Conflict Guard marks `has_conflict=True, exclusion_eligible=False` when TAPO is contested, suppressing exclusion. |
+| Service account 403 on file create | GHA service account has zero storage quota in user Drive and cannot call `files().create()`. | Pre-created `delivery_registry.json` updated via Drive `files().update()`. |
 | Duplicate morning deliveries (2026-09-01) | Multiple workflows ran concurrently without durable delivery state; partial runs resent all messages. | Durable Drive delivery ledger with preflight check and item-level HTTP 200 tracking. |
 | Contradictory cat identity claims (2026-08-26) | Logitech visual VLM misclassified Sanbo as Dan while Dan was confirmed eating at Tapo. | Cross-camera physical exclusion reconciles identity using TAPO accepted feeding phases. |
 | `feeding_log.csv` duplicates or wrong counts | Only last event was read; no same-day dedup. | Aggregate all `video_results`; remove today's row before append. |

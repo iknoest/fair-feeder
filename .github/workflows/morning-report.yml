@@ -113,7 +113,7 @@ jobs:
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
           import json
-          from scripts.delivery_ledger import load_delivery_ledger, is_camera_fully_delivered
+          from scripts.delivery_ledger import load_delivery_ledger, is_camera_fully_delivered, is_breakfast_fully_delivered
 
           key_json = os.environ.get("GDRIVE_SERVICE_ACCOUNT_KEY")
           folder_id = os.environ.get("GDRIVE_OUTPUT_FOLDER_ID")
@@ -125,12 +125,16 @@ jobs:
               )
               drive_service = build('drive', 'v3', credentials=creds)
 
-          ledger = load_delivery_ledger(drive_service, folder_id, target_date, "TAPO")
-          if is_camera_fully_delivered(ledger):
+          if is_breakfast_fully_delivered(drive_service, folder_id, target_date):
               print("preflight_status=SKIP")
-              print(f"✅ Preflight: TAPO report for {target_date} already fully delivered. Skipping analysis.")
+              print(f"✅ Preflight: Breakfast for {target_date} already fully delivered according to durable registry. Skipping analysis.")
           else:
-              print("preflight_status=PROCEED")
+              ledger = load_delivery_ledger(drive_service, folder_id, target_date, "TAPO")
+              if is_camera_fully_delivered(ledger):
+                  print("preflight_status=SKIP")
+                  print(f"✅ Preflight: TAPO report for {target_date} already fully delivered. Skipping analysis.")
+              else:
+                  print("preflight_status=PROCEED")
           PY
 
       - name: Run analysis notebook

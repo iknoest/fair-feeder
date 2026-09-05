@@ -21,6 +21,9 @@ except ImportError:
     MediaInMemoryUpload = None
 
 
+DELIVERY_REGISTRY_FILENAME = "delivery_registry.json"
+
+
 def get_ledger_filename(target_date: str, camera: str) -> str:
     clean_date = str(target_date).replace("-", "").strip()
     clean_cam = str(camera).upper().strip()
@@ -38,6 +41,14 @@ def init_ledger_data(target_date: str, camera: str) -> Dict[str, Any]:
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "updated_at_utc": datetime.now(timezone.utc).isoformat(),
         "items": {}
+    }
+
+
+def init_registry_data() -> Dict[str, Any]:
+    return {
+        "version": 2,
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "dates": {}
     }
 
 
@@ -109,8 +120,132 @@ def save_durable_artifact(drive_service: Any, folder_id: str, filename: str, con
     return file_id
 
 
-def load_delivery_ledger(drive_service: Any, folder_id: str, target_date: str, camera: str, local_fallback_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Loads existing delivery ledger for (target_date, camera), or initializes empty template."""
+def load_delivery_registry(
+    drive_service: Any,
+    folder_id: str,
+    local_fallback_dir: Optional[Path] = None
+) -> Dict[str, Any]:
+    """Loads the durable delivery registry from Google Drive or local fallback."""
+    raw_bytes = load_durable_artifact(drive_service, folder_id, DELIVERY_REGISTRY_FILENAME, local_fallback_dir=local_fallback_dir)
+    if raw_bytes:
+        try:
+            data = json.loads(raw_bytes.decode("utf-8"))
+            if isinstance(data, dict) and "dates" in data:
+                return data
+        except Exception as e:
+            print(f"[DeliveryLedger] Error parsing {DELIVERY_REGISTRY_FILENAME}: {e}")
+    return init_registry_data()
+
+
+def save_delivery_registry(
+    drive_service: Any,
+    folder_id: str,
+    registry_data: Dict[str, Any],
+    local_fallback_dir: Optional[Path] = None
+) -> Optional[str]:
+    """Persists the durable delivery registry to Google Drive and optional local fallback."""
+    registry_data["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+    content_bytes = json.dumps(registry_data, indent=2).encode("utf-8")
+    return save_durable_artifact(
+        drive_service,
+        folder_id,
+        DELIVERY_REGISTRY_FILENAME,
+        content_bytes,
+        mime_type="application/json",
+        local_fallback_dir=local_fallback_dir
+    )
+
+
+def is_breakfast_fully_delivered(
+    arg1: Any,
+    arg2: Any,
+    target_date: Optional[str] = None,
+    local_fallback_dir: Optional[Path] = None
+) -> bool:
+    """
+    Returns True if the entire breakfast for target_date is fully delivered.
+    Supports two calling signatures:
+    1. is_breakfast_fully_delivered(registry_data, target_date)
+    2. is_breakfast_fully_delivered(drive_service, folder_id, target_date, local_fallback_dir=...)
+    """
+    if isinstance(arg1, dict):
+        registry_data = arg1
+        clean_date = str(arg2).replace("-", "").strip()
+    else:
+        drive_service = arg1
+        folder_id = arg2
+        clean_date = str(target_date).replace("-", "").strip()
+        registry_data = load_delivery_registry(drive_service, folder_id, local_fallback_dir=local_fallback_dir)
+
+    date_info = registry_data.get("dates", {}).get(clean_date, {})
+    if date_info.get("breakfast_fully_delivered", False):
+        return True
+    unified = date_info.get("unified", {})
+    if unified.get("fully_delivered", False):
+        return True
+    if unified.get("items", {}).get("summary", {}).get("delivered", False):
+        return True
+    cameras = date_info.get("cameras", {})
+    tapo_ok = cameras.get("TAPO", {}).get("camera_fully_delivered", False)
+    logi_ok = cameras.get("LOGITECH", {}).get("camera_fully_delivered", False)
+    return bool(tapo_ok and logi_ok)
+
+
+def commit_breakfast_completion(
+    drive_service: Any,
+    folder_id: str,
+    target_date: str,
+    extra: Optional[Dict[str, Any]] = None,
+    local_fallback_dir: Optional[Path] = None
+) -> bool:
+    """Marks entire breakfast as completed in the registry and commits to Drive."""
+    clean_date = str(target_date).replace("-", "").strip()
+    registry = load_delivery_registry(drive_service, folder_id, local_fallback_dir=local_fallback_dir)
+    if "dates" not in registry:
+        registry["dates"] = {}
+    if clean_date not in registry["dates"]:
+        registry["dates"][clean_date] = {"cameras": {}, "items": {}}
+
+    registry["dates"][clean_date]["breakfast_fully_delivered"] = True
+    registry["dates"][clean_date]["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+    if extra:
+        registry["dates"][clean_date].update(extra)
+
+    save_delivery_registry(drive_service, folder_id, registry, local_fallback_dir=local_fallback_dir)
+    return True
+
+
+def load_delivery_ledger(
+    drive_service: Any,
+    folder_id: str,
+    target_date: str,
+    camera: str,
+    local_fallback_dir: Optional[Path] = None
+) -> Dict[str, Any]:
+    """Loads delivery ledger for (target_date, camera), checking registry first."""
+    clean_date = str(target_date).replace("-", "").strip()
+    clean_cam = str(camera).upper().strip()
+
+    # 1. Check registry
+    registry = load_delivery_registry(drive_service, folder_id, local_fallback_dir=local_fallback_dir)
+    dates = registry.get("dates", {})
+    if clean_date in dates:
+        date_entry = dates[clean_date]
+        if date_entry.get("breakfast_fully_delivered", False):
+            cam_entry = date_entry.get("cameras", {}).get(clean_cam, {})
+            cam_entry.setdefault("date", clean_date)
+            cam_entry.setdefault("camera", clean_cam)
+            cam_entry["camera_fully_delivered"] = True
+            cam_entry["analysis_completed"] = True
+            return cam_entry
+
+        cam_data = date_entry.get("cameras", {}).get(clean_cam)
+        if cam_data and isinstance(cam_data, dict):
+            cam_data.setdefault("date", clean_date)
+            cam_data.setdefault("camera", clean_cam)
+            return cam_data
+
+    # 2. Check local/individual ledger file
     filename = get_ledger_filename(target_date, camera)
     raw_bytes = load_durable_artifact(drive_service, folder_id, filename, local_fallback_dir=local_fallback_dir)
     if raw_bytes:
@@ -124,14 +259,40 @@ def load_delivery_ledger(drive_service: Any, folder_id: str, target_date: str, c
     return init_ledger_data(target_date, camera)
 
 
-def save_delivery_ledger(drive_service: Any, folder_id: str, ledger_data: Dict[str, Any], local_fallback_dir: Optional[Path] = None) -> Optional[str]:
-    """Persists delivery ledger to Google Drive and optional local fallback."""
+def save_delivery_ledger(
+    drive_service: Any,
+    folder_id: str,
+    ledger_data: Dict[str, Any],
+    local_fallback_dir: Optional[Path] = None
+) -> Optional[str]:
+    """Persists delivery ledger into registry and local file."""
     target_date = ledger_data.get("date", "")
     camera = ledger_data.get("camera", "")
+    clean_date = str(target_date).replace("-", "").strip()
+    clean_cam = str(camera).upper().strip()
+
+    # 1. Update registry
+    registry = load_delivery_registry(drive_service, folder_id, local_fallback_dir=local_fallback_dir)
+    if "dates" not in registry:
+        registry["dates"] = {}
+    if clean_date not in registry["dates"]:
+        registry["dates"][clean_date] = {
+            "breakfast_fully_delivered": False,
+            "cameras": {},
+            "items": {}
+        }
+    registry["dates"][clean_date].setdefault("cameras", {})
+    registry["dates"][clean_date]["cameras"][clean_cam] = ledger_data
+
+    res_reg = save_delivery_registry(drive_service, folder_id, registry, local_fallback_dir=local_fallback_dir)
+
+    # 2. Also save individual file locally for backward compatibility
     filename = get_ledger_filename(target_date, camera)
     ledger_data["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
     content_bytes = json.dumps(ledger_data, indent=2).encode("utf-8")
-    return save_durable_artifact(drive_service, folder_id, filename, content_bytes, mime_type="application/json", local_fallback_dir=local_fallback_dir)
+    save_durable_artifact(drive_service, folder_id, filename, content_bytes, mime_type="application/json", local_fallback_dir=local_fallback_dir)
+
+    return res_reg
 
 
 def is_item_delivered(ledger_data: Dict[str, Any], item_key: str) -> bool:
@@ -207,6 +368,7 @@ def export_tapo_timeline(
     """
     Exports durable TAPO feeding timeline using existing accepted FeedingTracker phase semantics.
     Must be persisted BEFORE TAPO reaches terminal delivery completion.
+    Writes to deterministic paths (/tmp/output/, local_dir) and registry.
     """
     clean_date = str(target_date).replace("-", "").strip()
     filename = f"tapo_timeline_{clean_date}.json"
@@ -217,7 +379,39 @@ def export_tapo_timeline(
         "feeding_phases": feeding_phases
     }
     content_bytes = json.dumps(timeline_data, indent=2).encode("utf-8")
-    save_durable_artifact(drive_service, folder_id, filename, content_bytes, mime_type="application/json", local_fallback_dir=local_dir)
+
+    # 1. Update registry
+    registry = load_delivery_registry(drive_service, folder_id, local_fallback_dir=local_dir)
+    if "dates" not in registry:
+        registry["dates"] = {}
+    if clean_date not in registry["dates"]:
+        registry["dates"][clean_date] = {"cameras": {}, "items": {}}
+    registry["dates"][clean_date]["tapo_timeline"] = timeline_data
+    save_delivery_registry(drive_service, folder_id, registry, local_fallback_dir=local_dir)
+
+    # 2. Write to deterministic /tmp/output/ if possible
+    tmp_out = Path("/tmp/output")
+    try:
+        tmp_out.mkdir(parents=True, exist_ok=True)
+        (tmp_out / filename).write_bytes(content_bytes)
+    except Exception:
+        pass
+
+    # 3. Write to local_dir
+    if local_dir:
+        try:
+            p = Path(local_dir)
+            p.mkdir(parents=True, exist_ok=True)
+            (p / filename).write_bytes(content_bytes)
+        except Exception as e:
+            print(f"[DeliveryLedger] Warning writing local timeline: {e}")
+
+    # 4. Also write to repo root (.) for papermill cwd compatibility
+    try:
+        Path(filename).write_bytes(content_bytes)
+    except Exception:
+        pass
+
     return timeline_data
 
 
@@ -227,29 +421,54 @@ def load_tapo_timeline(
     target_date: str,
     local_dir: Optional[Path] = None
 ) -> Optional[Dict[str, Any]]:
-    """Loads durable TAPO timeline from Google Drive or local directory."""
+    """Loads durable TAPO timeline from local artifact paths, registry, or Google Drive."""
     clean_date = str(target_date).replace("-", "").strip()
     filename = f"tapo_timeline_{clean_date}.json"
+
+    # Search paths in order
+    search_dirs = []
+    if local_dir:
+        search_dirs.append(Path(local_dir))
+    search_dirs.extend([
+        Path("/tmp/tapo_timeline_artifact"),
+        Path("/tmp/output"),
+        Path(".")
+    ])
+    for d in search_dirs:
+        candidate = d / filename
+        if candidate.exists():
+            try:
+                return json.loads(candidate.read_text(encoding="utf-8"))
+            except Exception as e:
+                print(f"[DeliveryLedger] Error reading local timeline {candidate}: {e}")
+
+    # Fall back to registry
+    registry = load_delivery_registry(drive_service, folder_id, local_fallback_dir=local_dir)
+    date_info = registry.get("dates", {}).get(clean_date, {})
+    if "tapo_timeline" in date_info:
+        return date_info["tapo_timeline"]
+
+    # Direct Drive download fallback
     raw_bytes = load_durable_artifact(drive_service, folder_id, filename, local_fallback_dir=local_dir)
     if raw_bytes:
         try:
             return json.loads(raw_bytes.decode("utf-8"))
-        except Exception as e:
-            print(f"[DeliveryLedger] Error parsing {filename}: {e}")
+        except Exception:
+            pass
+
     return None
 
 
 def main():
     import argparse
-    import sys
 
-    parser = argparse.ArgumentParser(description="Delivery Ledger CLI & Preflight Guard")
+    parser = argparse.ArgumentParser(description="Delivery Ledger & Registry CLI Preflight Guard")
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
-    # Subcommand: check-preflight
-    p_check = subparsers.add_parser("check-preflight", help="Check if camera is already fully delivered")
+    p_check = subparsers.add_parser("check-preflight", help="Check if delivery is already completed")
     p_check.add_argument("--date", required=True, help="Target date YYYYMMDD")
-    p_check.add_argument("--camera", required=True, choices=["TAPO", "LOGITECH"], help="Camera name")
+    p_check.add_argument("--camera", default=None, choices=["TAPO", "LOGITECH"], help="Camera name")
+    p_check.add_argument("--breakfast", action="store_true", help="Check entire breakfast delivery status")
     p_check.add_argument("--local-dir", default=None, help="Local directory fallback")
 
     args = parser.parse_args()
@@ -269,14 +488,24 @@ def main():
             except Exception as e:
                 print(f"[Preflight] Warning initializing Drive service: {e}")
 
-        ledger = load_delivery_ledger(drive_service, folder_id, args.date, args.camera, local_fallback_dir=Path(args.local_dir) if args.local_dir else None)
-        is_delivered = is_camera_fully_delivered(ledger)
-        print(f"[Preflight] date={args.date} camera={args.camera} fully_delivered={is_delivered}")
+        clean_date = str(args.date).replace("-", "").strip()
+        local_fallback = Path(args.local_dir) if args.local_dir else None
+
+        registry = load_delivery_registry(drive_service, folder_id, local_fallback_dir=local_fallback)
+        is_breakfast_done = is_breakfast_fully_delivered(registry, clean_date)
+
+        if args.breakfast or not args.camera:
+            is_delivered = is_breakfast_done
+        else:
+            ledger = load_delivery_ledger(drive_service, folder_id, clean_date, args.camera, local_fallback_dir=local_fallback)
+            is_delivered = is_breakfast_done or is_camera_fully_delivered(ledger)
+
+        print(f"[Preflight] date={clean_date} camera={args.camera} breakfast_done={is_breakfast_done} is_delivered={is_delivered}")
         if is_delivered:
-            print(f"ALREADY_DELIVERED=true")
+            print("ALREADY_DELIVERED=true")
             sys.exit(0)
         else:
-            print(f"ALREADY_DELIVERED=false")
+            print("ALREADY_DELIVERED=false")
             sys.exit(1)
 
 

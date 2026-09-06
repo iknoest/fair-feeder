@@ -1658,13 +1658,10 @@ if __name__ == "__main__":
         # Ping Telegram once per boot so user knows camera service is running
         send_startup_notification_once_per_boot(CAMERA_TYPE)
 
-        # Start Telegram command listener (two-way health check)
-        cmd_bot_token, cmd_chat_id = get_telegram_credentials()
-        if cmd_bot_token and cmd_chat_id:
-            cmd_listener = TelegramCommandListener(cmd_bot_token, cmd_chat_id, controller, bowl_monitor=bowl_monitor)
-            cmd_listener.start()
-        else:
-            log.info('No Telegram credentials — command listener disabled')
+        # Telegram command polling is managed 24/7 by standalone fair-feeder-telegram.service
+        # to ensure single-authority getUpdates and continuous availability during DAYTIME_IDLE.
+        # motion_recorder.py no longer runs an internal poller to prevent competing update consumers.
+        log.info('Telegram control plane managed by fair-feeder-telegram service (internal poller disabled)')
 
         log.info('')
 

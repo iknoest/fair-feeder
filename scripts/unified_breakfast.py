@@ -17,9 +17,20 @@ import json
 import shutil
 import subprocess
 import numpy as np
+import sys
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional, Tuple, Union
+
+# Ensure repo root and scripts directory are in sys.path so both
+# `from scripts.foo import bar` and `from foo import bar` work
+# when invoked as `python scripts/unified_breakfast.py` or via pytest.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
 try:
     from scripts.telegram_video_guard import compress_video_for_telegram, validate_video_content
@@ -730,13 +741,22 @@ def deliver_unified_breakfast(
     6. Commits terminal breakfast completion (fail closed)
     """
     import requests
-    from scripts.delivery_ledger import (
-        load_delivery_registry,
-        is_breakfast_fully_delivered,
-        is_unified_item_delivered,
-        record_unified_item_delivered,
-        commit_breakfast_completion
-    )
+    try:
+        from scripts.delivery_ledger import (
+            load_delivery_registry,
+            is_breakfast_fully_delivered,
+            is_unified_item_delivered,
+            record_unified_item_delivered,
+            commit_breakfast_completion
+        )
+    except ImportError:
+        from delivery_ledger import (
+            load_delivery_registry,
+            is_breakfast_fully_delivered,
+            is_unified_item_delivered,
+            record_unified_item_delivered,
+            commit_breakfast_completion
+        )
 
     clean_date = str(target_date).replace("-", "").strip()
     out_dir = Path(out_dir) if out_dir else Path(f"/tmp/unified_delivery_{clean_date}")

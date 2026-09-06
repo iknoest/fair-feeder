@@ -1,0 +1,17 @@
+[Unit]
+Description=Fair Feeder Standalone Telegram Control Plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi5
+WorkingDirectory=/home/pi5/Feeder/fair-feeder
+ExecStart=/home/pi5/Feeder/fair-feeder/.venv/bin/python scripts/telegram_control_service.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/pi5/Feeder/fair-feeder/.env
+
+[Install]
+WantedBy=multi-user.target

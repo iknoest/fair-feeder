@@ -1241,32 +1241,43 @@ class TelegramCommandListener:
                 self._handle_dialog(text, sender_id)
 
     def _weight_file(self):
-        return DRIVE_OUTPUT_DIR / 'weight_log.csv'
+        try:
+            from scripts.weight_store import get_canonical_weight_path
+            return get_canonical_weight_path()
+        except ImportError:
+            return DRIVE_OUTPUT_DIR / 'weight_log.csv'
 
     def _load_weights(self):
-        import csv as _csv
-        wf = self._weight_file()
-        if not wf.exists():
-            return []
-        with open(wf, newline='', encoding='utf-8') as f:
-            return list(_csv.DictReader(f))
+        try:
+            from scripts.weight_store import load_weights
+            return load_weights()
+        except ImportError:
+            import csv as _csv
+            wf = self._weight_file()
+            if not wf.exists():
+                return []
+            with open(wf, newline='', encoding='utf-8') as f:
+                return list(_csv.DictReader(f))
 
     def _save_weights(self, rows):
-        import csv as _csv
-        wf = self._weight_file()
-        with open(wf, 'w', newline='', encoding='utf-8') as f:
-            w = _csv.DictWriter(f, fieldnames=['date', 'cat', 'weight_kg'])
-            w.writeheader()
-            w.writerows(rows)
-        # Sync to Drive
         try:
-            import subprocess as _sp
-            _sp.Popen(
-                ['rclone', 'copy', str(wf), 'gdrive-randomdice:'],
-                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL
-            )
-        except Exception as e:
-            log.warning(f'rclone sync weight_log.csv failed: {e}')
+            from scripts.weight_store import save_weights
+            save_weights(rows)
+        except ImportError:
+            import csv as _csv
+            wf = self._weight_file()
+            with open(wf, 'w', newline='', encoding='utf-8') as f:
+                w = _csv.DictWriter(f, fieldnames=['date', 'cat', 'weight_kg'])
+                w.writeheader()
+                w.writerows(rows)
+            try:
+                import subprocess as _sp
+                _sp.Popen(
+                    ['rclone', 'copy', str(wf), 'gdrive-randomdice:'],
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL
+                )
+            except Exception as e:
+                log.warning(f'rclone sync weight_log.csv failed: {e}')
 
     def _handle_dialog(self, text, sender_id):
         state = self._pending.get(sender_id)

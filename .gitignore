@@ -41,5 +41,9 @@ Thumbs.db
 *token*.json
 job-tracker-*.json
 .private_refs/
+# Dynamic runtime data and state
 state.json
+cat_care.json
+weight_log.csv
+*.lock
 scratch/

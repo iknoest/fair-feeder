@@ -33,6 +33,7 @@ from scripts.weight_store import (
     save_weights,
     get_cat_weight_summary,
     get_canonical_weight_path,
+    WeightCorruptError,
 )
 from scripts.care_store import (
     CareStore,
@@ -656,7 +657,12 @@ class TelegramControlService:
         save_weights(rows, path=self.weight_file)
 
     def _cmd_weight_history(self, sender_id: str):
-        rows = load_weights(path=self.weight_file)
+        try:
+            rows = load_weights(path=self.weight_file)
+        except WeightCorruptError as e:
+            log.error(f"Cannot load weight history: {e}")
+            self._send("❌ Error: Weight database is unreadable or corrupt. Preserving file.", sender_id=sender_id)
+            return
         if not rows:
             self._send("No weight entries yet. Use /weight to log.", sender_id=sender_id)
             return
@@ -950,16 +956,22 @@ class TelegramControlService:
                     return
                 cat = state["data"]["cat"]
                 today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                rows = load_weights(path=self.weight_file)
-                found = False
-                for r in rows:
-                    if r["date"] == today and r["cat"] == cat:
-                        r["weight_kg"] = f"{kg:.2f}"
-                        found = True
-                        break
-                if not found:
-                    rows.append({"date": today, "cat": cat, "weight_kg": f"{kg:.2f}"})
-                save_weights(rows, path=self.weight_file)
+                try:
+                    rows = load_weights(path=self.weight_file)
+                    found = False
+                    for r in rows:
+                        if r["date"] == today and r["cat"] == cat:
+                            r["weight_kg"] = f"{kg:.2f}"
+                            found = True
+                            break
+                    if not found:
+                        rows.append({"date": today, "cat": cat, "weight_kg": f"{kg:.2f}"})
+                    save_weights(rows, path=self.weight_file)
+                except WeightCorruptError as e:
+                    log.error(f"Cannot log weight (database corrupt): {e}")
+                    self._pending.pop(sender_id, None)
+                    self._send("❌ Error: Weight database is unreadable or corrupt. Existing history preserved; entry was not saved.", sender_id=sender_id)
+                    return
                 self._pending.pop(sender_id, None)
                 self._send(
                     f"✅ Saved: {cat.capitalize()} = {kg:.2f} kg on {today}",

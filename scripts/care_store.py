@@ -69,6 +69,17 @@ def get_amsterdam_today() -> date:
     return get_amsterdam_now().date()
 
 
+def get_amsterdam_reminder_time(target_date: date) -> datetime:
+    """Returns 21:30 local Amsterdam time on target_date as a timezone-aware datetime."""
+    return datetime(
+        target_date.year,
+        target_date.month,
+        target_date.day,
+        21, 30, 0,
+        tzinfo=AMSTERDAM_TZ
+    )
+
+
 def add_calendar_months(source_date: date, months: int) -> date:
     """
     Computes exact calendar-month addition preserving month-end semantics.
@@ -169,6 +180,7 @@ def get_initial_care_state() -> Dict[str, Any]:
     Creates initial Cat Care state with UNKNOWN BASELINE for all treatments.
     Never invents historical treatment dates.
     """
+    initial_reminder_at = get_amsterdam_reminder_time(date(2026, 9, 6)).isoformat()
     return {
         "version": 1,
         "cats": CAT_CONFIGS,
@@ -181,7 +193,7 @@ def get_initial_care_state() -> Dict[str, Any]:
                     "last_completed_date": None,
                     "reminder_night_count": 0,
                     "last_reminder_at": None,
-                    "next_reminder_at": "2026-09-06T21:30:00+02:00",
+                    "next_reminder_at": initial_reminder_at,
                     "snoozed": False,
                     "terminal_push_suppressed": False,
                 },
@@ -191,7 +203,7 @@ def get_initial_care_state() -> Dict[str, Any]:
                     "last_completed_date": None,
                     "reminder_night_count": 0,
                     "last_reminder_at": None,
-                    "next_reminder_at": "2026-09-06T21:30:00+02:00",
+                    "next_reminder_at": initial_reminder_at,
                     "snoozed": False,
                     "terminal_push_suppressed": False,
                 },
@@ -203,7 +215,7 @@ def get_initial_care_state() -> Dict[str, Any]:
                     "last_completed_date": None,
                     "reminder_night_count": 0,
                     "last_reminder_at": None,
-                    "next_reminder_at": "2026-09-06T21:30:00+02:00",
+                    "next_reminder_at": initial_reminder_at,
                     "snoozed": False,
                     "terminal_push_suppressed": False,
                 },
@@ -213,7 +225,7 @@ def get_initial_care_state() -> Dict[str, Any]:
                     "last_completed_date": None,
                     "reminder_night_count": 0,
                     "last_reminder_at": None,
-                    "next_reminder_at": "2026-09-06T21:30:00+02:00",
+                    "next_reminder_at": initial_reminder_at,
                     "snoozed": False,
                     "terminal_push_suppressed": False,
                 },
@@ -409,7 +421,7 @@ class CareStore:
             rem_state["current_due_date"] = next_due_str
             rem_state["reminder_night_count"] = 0
             rem_state["last_reminder_at"] = None
-            rem_state["next_reminder_at"] = f"{next_due_str}T21:30:00+02:00"
+            rem_state["next_reminder_at"] = get_amsterdam_reminder_time(next_due).isoformat()
             rem_state["snoozed"] = False
             rem_state["terminal_push_suppressed"] = False
 
@@ -480,7 +492,7 @@ class CareStore:
             rem_state["current_due_date"] = next_due_str
             rem_state["reminder_night_count"] = 0
             rem_state["last_reminder_at"] = None
-            rem_state["next_reminder_at"] = f"{next_due_str}T21:30:00+02:00"
+            rem_state["next_reminder_at"] = get_amsterdam_reminder_time(next_due).isoformat()
             rem_state["snoozed"] = False
             rem_state["terminal_push_suppressed"] = False
 
@@ -496,23 +508,24 @@ class CareStore:
         """
         Records 'Not yet' for a due treatment:
         - Does NOT create a completion event
-        - Increments reminder_night_count (capped at 3)
-        - Schedules next reminder for tomorrow 21:30
-        - If count reaches 3: marks terminal_push_suppressed = True
+        - Does NOT increment reminder_night_count (semantic authority is scheduler send)
+        - Schedules next reminder for tomorrow 21:30 local Amsterdam time
+        - If reminder_night_count >= MAX_REMINDER_NIGHTS: marks terminal_push_suppressed = True
         """
         cat = cat.lower()
         treatment = treatment.lower()
         tomorrow = get_amsterdam_today() + timedelta(days=1)
-        next_push_time = f"{tomorrow.strftime('%Y-%m-%d')}T21:30:00+02:00"
+        next_push_time = get_amsterdam_reminder_time(tomorrow).isoformat()
 
         with self._lock():
             data = self.load()
             rem_state = data.setdefault("reminder_state", {}).setdefault(cat, {}).setdefault(treatment, {})
 
-            current_count = rem_state.get("reminder_night_count", 0) + 1
-            rem_state["reminder_night_count"] = current_count
+            current_count = rem_state.get("reminder_night_count", 0)
             rem_state["snoozed"] = True
             rem_state["next_reminder_at"] = next_push_time
+            rem_state["last_action"] = "not_yet"
+            rem_state["last_action_at"] = get_amsterdam_now().isoformat()
 
             if current_count >= MAX_REMINDER_NIGHTS:
                 rem_state["terminal_push_suppressed"] = True
@@ -522,7 +535,7 @@ class CareStore:
                 "status": "snoozed",
                 "night_count": current_count,
                 "max_nights": MAX_REMINDER_NIGHTS,
-                "push_suppressed": rem_state["terminal_push_suppressed"],
+                "push_suppressed": rem_state.get("terminal_push_suppressed", False),
                 "next_reminder": next_push_time,
             }
 
@@ -570,7 +583,7 @@ class CareStore:
             rem_state["current_due_date"] = next_due_str
             rem_state["reminder_night_count"] = 0
             rem_state["last_reminder_at"] = None
-            rem_state["next_reminder_at"] = f"{next_due_str}T21:30:00+02:00"
+            rem_state["next_reminder_at"] = get_amsterdam_reminder_time(next_due).isoformat()
             rem_state["snoozed"] = False
             rem_state["terminal_push_suppressed"] = False
 

@@ -151,34 +151,43 @@ class CareReminderEvaluator:
                         notifications_sent.append(record)
                         actions_taken.append(record)
 
-        # ── 2. Care Treatments Check ──────────────────────────────────
+        # ── 2. Care Treatments Check (Independent Evaluation) ─────────
         rem_state = data.setdefault("reminder_state", {})
 
-        # Determine if any baseline is unknown
-        any_unknown = False
-        unknown_status = {}
-        for cat_id in ["dan", "sanbo"]:
-            unknown_status[cat_id] = {}
+        # A. Baseline Needed Check: evaluate each unknown item with a 3-night cap
+        eligible_unknowns = []
+        unknown_status = {c: {} for c in sorted(CAT_CONFIGS.keys())}
+
+        for cat_id in sorted(CAT_CONFIGS.keys()):
             for t_name in ["deflea", "deworm"]:
                 t_info = rem_state.get(cat_id, {}).get(t_name, {})
-                if t_info.get("baseline_status", "UNKNOWN") == "UNKNOWN":
-                    any_unknown = True
-                    unknown_status[cat_id][t_name] = "last date unknown"
+                is_unknown = (
+                    t_info.get("baseline_status", "UNKNOWN") == "UNKNOWN"
+                    or not t_info.get("current_due_date")
+                )
+                if is_unknown:
+                    count = t_info.get("reminder_night_count", 0)
+                    if count >= 3 or t_info.get("terminal_push_suppressed"):
+                        t_info["terminal_push_suppressed"] = True
+                        unknown_status[cat_id][t_name] = "last date unknown"
+                    else:
+                        eligible_unknowns.append((cat_id, t_name, t_info, count))
+                        unknown_status[cat_id][t_name] = "last date unknown"
 
-        if any_unknown:
-            # Baseline is needed
+        if eligible_unknowns:
             baseline_key = f"care_baseline_needed_{ref_date_str}"
             already_sent = any(n.get("key") == baseline_key for n in notifications_sent)
 
             if not already_sent:
+                night_num = max(cnt for _, _, _, cnt in eligible_unknowns) + 1
                 baseline_text = (
-                    "🐾 Cat Care · Baseline needed\n\n"
+                    f"🐾 Cat Care · Baseline needed (Night {night_num} of 3)\n\n"
                     "Dan\n"
-                    f"🪲 Deflea: {unknown_status['dan'].get('deflea', 'OK')}\n"
-                    f"🪱 Deworm: {unknown_status['dan'].get('deworm', 'OK')}\n\n"
+                    f"🪲 Deflea: {unknown_status.get('dan', {}).get('deflea', 'OK')}\n"
+                    f"🪱 Deworm: {unknown_status.get('dan', {}).get('deworm', 'OK')}\n\n"
                     "Sanbo\n"
-                    f"🪲 Deflea: {unknown_status['sanbo'].get('deflea', 'OK')}\n"
-                    f"🪱 Deworm: {unknown_status['sanbo'].get('deworm', 'OK')}\n\n"
+                    f"🪲 Deflea: {unknown_status.get('sanbo', {}).get('deflea', 'OK')}\n"
+                    f"🪱 Deworm: {unknown_status.get('sanbo', {}).get('deworm', 'OK')}\n\n"
                     "Open a cat profile to set or act on each care item."
                 )
                 markup = {
@@ -189,93 +198,101 @@ class CareReminderEvaluator:
                         ]
                     ]
                 }
-                log.info("Triggering baseline-needed reminder.")
+                log.info(f"Triggering baseline-needed reminder (night {night_num} of 3).")
                 sent = True
                 if not self.dry_run and self.token and self.target_chat:
                     sent = send_telegram_message(self.token, self.target_chat, baseline_text, reply_markup=markup)
 
                 if sent or self.dry_run:
+                    for _, _, t_info, cnt in eligible_unknowns:
+                        new_cnt = cnt + 1
+                        t_info["reminder_night_count"] = new_cnt
+                        t_info["last_reminder_at"] = get_amsterdam_now().isoformat()
+                        if new_cnt >= 3:
+                            t_info["terminal_push_suppressed"] = True
+
                     record = {
                         "key": baseline_key,
                         "type": "care_baseline_needed",
+                        "night_number": night_num,
                         "date": ref_date_str,
                         "sent_at": get_amsterdam_now().isoformat(),
                     }
                     notifications_sent.append(record)
                     actions_taken.append(record)
 
-        else:
-            # All baselines established: evaluate regular recurring reminders
-            for cat_id in ["dan", "sanbo"]:
-                cat_name = CAT_CONFIGS[cat_id]["name"]
-                for t_name in ["deflea", "deworm"]:
-                    t_info = rem_state.get(cat_id, {}).get(t_name, {})
-                    due_date_str = t_info.get("current_due_date")
-                    if not due_date_str:
+        # B. Due Treatments Check: independently evaluate each established item
+        for cat_id in sorted(CAT_CONFIGS.keys()):
+            cat_name = CAT_CONFIGS[cat_id]["name"]
+            for t_name in ["deflea", "deworm"]:
+                t_info = rem_state.get(cat_id, {}).get(t_name, {})
+                if t_info.get("baseline_status", "UNKNOWN") == "UNKNOWN":
+                    continue  # Evaluated independently in baseline check above
+
+                due_date_str = t_info.get("current_due_date")
+                if not due_date_str:
+                    continue
+
+                try:
+                    due_date = datetime.strptime(due_date_str, "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+
+                # Check if due or overdue today
+                if due_date <= ref_date:
+                    count = t_info.get("reminder_night_count", 0)
+
+                    if count >= 3 or t_info.get("terminal_push_suppressed"):
+                        t_info["terminal_push_suppressed"] = True
                         continue
 
-                    try:
-                        due_date = datetime.strptime(due_date_str, "%Y-%m-%d").date()
-                    except ValueError:
-                        continue
+                    # Idempotency for tonight
+                    treatment_key = f"care_due_{cat_id}_{t_name}_{due_date_str}_{ref_date_str}"
+                    already_sent = any(n.get("key") == treatment_key for n in notifications_sent)
 
-                    # Check if due or overdue today
-                    if due_date <= ref_date:
-                        count = t_info.get("reminder_night_count", 0)
+                    if not already_sent:
+                        emoji = "🪲" if t_name == "deflea" else "🪱"
+                        t_title = "Deflea" if t_name == "deflea" else "Deworm"
+                        night_num = count + 1
 
-                        if count >= 3 or t_info.get("terminal_push_suppressed"):
-                            # Max 3 reminder nights reached; suppress further pushes
-                            t_info["terminal_push_suppressed"] = True
-                            continue
-
-                        # Idempotency for tonight
-                        treatment_key = f"care_due_{cat_id}_{t_name}_{due_date_str}_{ref_date_str}"
-                        already_sent = any(n.get("key") == treatment_key for n in notifications_sent)
-
-                        if not already_sent:
-                            emoji = "🪲" if t_name == "deflea" else "🪱"
-                            t_title = "Deflea" if t_name == "deflea" else "Deworm"
-                            night_num = count + 1
-
-                            rem_msg = (
-                                f"🐾 Cat Care Reminder · Night {night_num} of 3\n\n"
-                                f"🐱 {cat_name} is due for {emoji} {t_title}.\n"
-                                f"Scheduled due: {due_date_str}"
-                            )
-                            # Buttons: Done, Not yet, Skip
-                            # Keep callback data short and stable (<64 bytes)
-                            markup = {
-                                "inline_keyboard": [
-                                    [
-                                        {"text": "✅ Done", "callback_data": f"care_act:done:{cat_id}:{t_name}:{due_date_str}"},
-                                        {"text": "🌙 Not yet", "callback_data": f"care_act:notyet:{cat_id}:{t_name}:{due_date_str}"},
-                                        {"text": "⏭ Skip this cycle", "callback_data": f"care_act:skip:{cat_id}:{t_name}:{due_date_str}"},
-                                    ]
+                        rem_msg = (
+                            f"🐾 Cat Care Reminder · Night {night_num} of 3\n\n"
+                            f"🐱 {cat_name} is due for {emoji} {t_title}.\n"
+                            f"Scheduled due: {due_date_str}"
+                        )
+                        markup = {
+                            "inline_keyboard": [
+                                [
+                                    {"text": "✅ Done", "callback_data": f"care_act:done:{cat_id}:{t_name}:{due_date_str}"},
+                                    {"text": "🌙 Not yet", "callback_data": f"care_act:notyet:{cat_id}:{t_name}:{due_date_str}"},
+                                    {"text": "⏭ Skip this cycle", "callback_data": f"care_act:skip:{cat_id}:{t_name}:{due_date_str}"},
                                 ]
+                            ]
+                        }
+                        log.info(f"Triggering care reminder: {cat_name} {t_name} (night {night_num})")
+                        sent = True
+                        if not self.dry_run and self.token and self.target_chat:
+                            sent = send_telegram_message(self.token, self.target_chat, rem_msg, reply_markup=markup)
+
+                        if sent or self.dry_run:
+                            t_info["reminder_night_count"] = night_num
+                            t_info["last_reminder_at"] = get_amsterdam_now().isoformat()
+                            t_info["snoozed"] = False
+                            if night_num >= 3:
+                                t_info["terminal_push_suppressed"] = True
+
+                            record = {
+                                "key": treatment_key,
+                                "type": "care_due_reminder",
+                                "cat": cat_id,
+                                "treatment": t_name,
+                                "due_date": due_date_str,
+                                "night_number": night_num,
+                                "date": ref_date_str,
+                                "sent_at": get_amsterdam_now().isoformat(),
                             }
-                            log.info(f"Triggering care reminder: {cat_name} {t_name} (night {night_num})")
-                            sent = True
-                            if not self.dry_run and self.token and self.target_chat:
-                                sent = send_telegram_message(self.token, self.target_chat, rem_msg, reply_markup=markup)
-
-                            if sent or self.dry_run:
-                                t_info["reminder_night_count"] = night_num
-                                t_info["last_reminder_at"] = get_amsterdam_now().isoformat()
-                                if night_num >= 3:
-                                    t_info["terminal_push_suppressed"] = True
-
-                                record = {
-                                    "key": treatment_key,
-                                    "type": "care_due_reminder",
-                                    "cat": cat_id,
-                                    "treatment": t_name,
-                                    "due_date": due_date_str,
-                                    "night_number": night_num,
-                                    "date": ref_date_str,
-                                    "sent_at": get_amsterdam_now().isoformat(),
-                                }
-                                notifications_sent.append(record)
-                                actions_taken.append(record)
+                            notifications_sent.append(record)
+                            actions_taken.append(record)
 
         # Save updated care state if any action occurred
         if actions_taken and not self.dry_run:

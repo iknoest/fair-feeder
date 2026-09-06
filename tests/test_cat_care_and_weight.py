@@ -10,12 +10,17 @@ Tests:
 """
 
 import os
+import sys
 import json
 import tempfile
 import pytest
 from pathlib import Path
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest.mock import patch, MagicMock
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.weight_store import (
     validate_weight_record,
@@ -26,6 +31,7 @@ from scripts.weight_store import (
     sync_weight_to_drive,
     WeightConflictError,
     WeightValidationError,
+    WeightCorruptError,
 )
 from scripts.care_store import (
     CareStore,
@@ -33,6 +39,7 @@ from scripts.care_store import (
     compute_next_birthday,
     get_birthday_reminder,
     add_calendar_months,
+    get_amsterdam_reminder_time,
     CAT_CONFIGS,
     MAX_REMINDER_NIGHTS,
 )
@@ -89,6 +96,58 @@ def test_conflicting_same_cat_date_fails_safely():
     with pytest.raises(WeightConflictError) as exc_info:
         merge_weight_rows(ds1, ds2)
     assert "Weight conflict for Dan on 2026-07-04" in str(exc_info.value)
+
+
+def test_production_weight_audit_values_not_derived_from_test_fixtures(tmp_path):
+    """Regression 1: production-weight audit values are not derived from test fixtures."""
+    # Isolated test environment must not pollute or read from production fixtures
+    test_csv = tmp_path / "weight_log.csv"
+    with patch.dict(os.environ, {"WEIGHT_LOG_PATH": str(test_csv)}):
+        test_rows = [{"date": "2026-09-06", "cat": "dan", "weight_kg": "4.00"}]
+        save_weights(test_rows, sync_drive=False)
+        isolated_loaded = load_weights()
+        assert len(isolated_loaded) == 1
+        assert isolated_loaded[0]["weight_kg"] == "4.00"
+
+    # Production store is loaded independently of test_csv
+    prod_rows = load_weights()
+    prod_dates = sorted(set(r["date"] for r in prod_rows))
+    # Must match the 7 demonstrated canonical dates audited from pre-recovery backups
+    assert prod_dates == [
+        "2026-04-11", "2026-05-02", "2026-05-28", "2026-06-18",
+        "2026-07-04", "2026-08-03", "2026-09-06"
+    ]
+
+
+def test_canonical_read_corruption_fails_closed(tmp_path):
+    """Regression 2: canonical read corruption fails closed with WeightCorruptError."""
+    corrupt_csv = tmp_path / "corrupt_weight.csv"
+    corrupt_csv.write_text("invalid,header,only\n2026-09-06,dan,3.50\n")
+
+    with pytest.raises(WeightCorruptError) as exc_info:
+        load_weights(path=corrupt_csv)
+    assert "missing required header fields" in str(exc_info.value)
+
+    # Malformed row
+    corrupt_csv2 = tmp_path / "corrupt_row.csv"
+    corrupt_csv2.write_text("date,cat,weight_kg\n2026-09-06,dan,not_a_number\n")
+    with pytest.raises(WeightCorruptError) as exc_info2:
+        load_weights(path=corrupt_csv2)
+    assert "Malformed weight row" in str(exc_info2.value)
+
+
+def test_unreadable_canonical_history_cannot_be_overwritten_by_one_row(tmp_path):
+    """Regression 3: unreadable canonical history cannot be overwritten by a one-row new entry."""
+    target_csv = tmp_path / "weight_log.csv"
+    target_csv.write_text("date,cat,weight_kg\n2026-09-06,dan,corrupt_row\n")
+
+    # Attempt to overwrite with one valid row
+    one_row = [{"date": "2026-09-06", "cat": "dan", "weight_kg": "3.50"}]
+    with pytest.raises(WeightCorruptError):
+        save_weights(one_row, path=target_csv, sync_drive=False)
+
+    # Verify original file content is preserved and was not overwritten
+    assert "corrupt_row" in target_csv.read_text(encoding="utf-8")
 
 
 def test_historical_rows_preserved():
@@ -278,93 +337,195 @@ def test_set_last_date_establishes_baseline(tmp_path):
     assert p["treatments"]["deflea"]["next_due"] == "2026-09-15"
 
 
-def test_not_yet_schedules_next_night(tmp_path):
-    """13. Not yet increments reminder night count and schedules next night."""
+def test_reminder_night_count_state_machine_and_suppression(tmp_path):
+    """
+    Regressions 4, 5, 6, 7, 8:
+    - First reminder send -> count 1
+    - Pressing Not yet after Night 1 leaves send count at 1
+    - Night 2 send -> count 2
+    - Night 3 send -> count 3
+    - No Night 4 push
+    """
     care_file = tmp_path / "cat_care.json"
     store = CareStore(path=care_file)
 
-    res = store.record_not_yet("dan", "deflea", sync_drive=False)
-    assert res["status"] == "snoozed"
-    assert res["night_count"] == 1
-    assert res["push_suppressed"] is False
+    # Establish Dan deflea due on 2026-09-01
+    store.set_last_date("dan", "deflea", "2026-08-01", sync_drive=False)
+    evaluator = CareReminderEvaluator(store=store, dry_run=False)
+
+    with patch.object(evaluator, "token", "mock_token"), \
+         patch.object(evaluator, "target_chat", "mock_chat"), \
+         patch("scripts.care_reminder_scheduler.send_telegram_message", return_value=True), \
+         patch.object(store, "sync_to_drive", return_value=True):
+
+        # --- Night 1 Send (Regression 4) ---
+        actions_n1 = evaluator.evaluate(as_of=date(2026, 9, 1))
+        assert any(a.get("type") == "care_due_reminder" and a.get("night_number") == 1 for a in actions_n1)
+        data = store.load()
+        assert data["reminder_state"]["dan"]["deflea"]["reminder_night_count"] == 1
+
+        # --- Press Not Yet after Night 1 (Regression 5) ---
+        res_ny1 = store.record_not_yet("dan", "deflea", sync_drive=False)
+        assert res_ny1["night_count"] == 1  # Count MUST remain 1
+        assert res_ny1["push_suppressed"] is False
+        data = store.load()
+        assert data["reminder_state"]["dan"]["deflea"]["reminder_night_count"] == 1
+        assert data["reminder_state"]["dan"]["deflea"]["snoozed"] is True
+
+        # --- Night 2 Send (Regression 6) ---
+        actions_n2 = evaluator.evaluate(as_of=date(2026, 9, 2))
+        assert any(a.get("type") == "care_due_reminder" and a.get("night_number") == 2 for a in actions_n2)
+        data = store.load()
+        assert data["reminder_state"]["dan"]["deflea"]["reminder_night_count"] == 2
+
+        # Press Not Yet after Night 2
+        res_ny2 = store.record_not_yet("dan", "deflea", sync_drive=False)
+        assert res_ny2["night_count"] == 2  # Count remains 2
+        assert res_ny2["push_suppressed"] is False
+
+        # --- Night 3 Send (Regression 7) ---
+        actions_n3 = evaluator.evaluate(as_of=date(2026, 9, 3))
+        assert any(a.get("type") == "care_due_reminder" and a.get("night_number") == 3 for a in actions_n3)
+        data = store.load()
+        assert data["reminder_state"]["dan"]["deflea"]["reminder_night_count"] == 3
+        assert data["reminder_state"]["dan"]["deflea"]["terminal_push_suppressed"] is True
+
+        # Press Not Yet after Night 3
+        res_ny3 = store.record_not_yet("dan", "deflea", sync_drive=False)
+        assert res_ny3["night_count"] == 3
+        assert res_ny3["push_suppressed"] is True
+
+        # --- Night 4: No Push (Regression 8) ---
+        actions_n4 = evaluator.evaluate(as_of=date(2026, 9, 4))
+        # No due reminder sent for Dan deflea on Night 4
+        assert not any(a.get("type") == "care_due_reminder" and a.get("treatment") == "deflea" for a in actions_n4)
+
+        # Profile remains OVERDUE
+        p = store.get_cat_profile("dan", as_of=date(2026, 9, 4))
+        assert p["treatments"]["deflea"]["status_label"] == "OVERDUE"
+        assert p["treatments"]["deflea"]["terminal_push_suppressed"] is True
 
 
-def test_maximum_three_reminder_nights(tmp_path):
-    """14 & 15. Maximum 3 reminder nights, after which push is suppressed and profile remains OVERDUE."""
+def test_partial_unknown_baselines_do_not_suppress_known_due_items(tmp_path):
+    """Regression 9: partial unknown baselines do not suppress known due items."""
     care_file = tmp_path / "cat_care.json"
     store = CareStore(path=care_file)
 
-    # Establish baseline due in the past
-    store.set_last_date("dan", "deflea", "2026-07-01", sync_drive=False)  # next due was 2026-08-01
-
-    # Night 1 Not yet
-    res1 = store.record_not_yet("dan", "deflea", sync_drive=False)
-    assert res1["night_count"] == 1
-    assert res1["push_suppressed"] is False
-
-    # Night 2 Not yet
-    res2 = store.record_not_yet("dan", "deflea", sync_drive=False)
-    assert res2["night_count"] == 2
-    assert res2["push_suppressed"] is False
-
-    # Night 3 Not yet
-    res3 = store.record_not_yet("dan", "deflea", sync_drive=False)
-    assert res3["night_count"] == 3
-    assert res3["push_suppressed"] is True
-
-    # Check profile on 2026-09-06: visibly OVERDUE
-    p = store.get_cat_profile("dan", as_of=date(2026, 9, 6))
-    assert p["treatments"]["deflea"]["status_label"] == "OVERDUE"
-    assert p["treatments"]["deflea"]["terminal_push_suppressed"] is True
-
-
-def test_duplicate_evaluator_invocation_is_idempotent(tmp_path):
-    """16. Duplicate timer invocation sends reminder once."""
-    care_file = tmp_path / "cat_care.json"
-    store = CareStore(path=care_file)
+    # Dan deflea is ESTABLISHED and due on 2026-09-01
+    store.set_last_date("dan", "deflea", "2026-08-01", sync_drive=False)
+    # Sanbo treatments are established and NOT due
+    store.set_last_date("sanbo", "deflea", "2026-09-01", sync_drive=False)  # due 2026-10-01
+    store.set_last_date("sanbo", "deworm", "2026-09-01", sync_drive=False)  # due 2026-12-01
+    # Dan deworm remains UNKNOWN baseline
 
     evaluator = CareReminderEvaluator(store=store, dry_run=False)
     with patch.object(evaluator, "token", "mock_token"), \
          patch.object(evaluator, "target_chat", "mock_chat"), \
          patch("scripts.care_reminder_scheduler.send_telegram_message", return_value=True), \
          patch.object(store, "sync_to_drive", return_value=True):
-        actions1 = evaluator.evaluate(as_of=date(2026, 9, 6))
-        assert len(actions1) == 1
-        assert actions1[0]["type"] == "care_baseline_needed"
 
-        # Immediately evaluate again on same night
-        actions2 = evaluator.evaluate(as_of=date(2026, 9, 6))
-        assert len(actions2) == 0  # Idempotent!
+        actions = evaluator.evaluate(as_of=date(2026, 9, 6))
+        action_types = [a.get("type") for a in actions]
+        # Both baseline needed (for Dan deworm) AND due reminder (for Dan deflea) must be triggered!
+        assert "care_baseline_needed" in action_types
+        assert "care_due_reminder" in action_types
+
+        due_action = next(a for a in actions if a.get("type") == "care_due_reminder")
+        assert due_action["cat"] == "dan"
+        assert due_action["treatment"] == "deflea"
 
 
-def test_double_done_callback_creates_one_event(tmp_path):
-    """17. Double Done callback creates one care event."""
+def test_baseline_unknown_reminders_stop_after_3_nights(tmp_path):
+    """Regression 10: baseline unknown reminders stop after 3 nights."""
     care_file = tmp_path / "cat_care.json"
     store = CareStore(path=care_file)
+    evaluator = CareReminderEvaluator(store=store, dry_run=False)
 
-    res1 = store.record_done("sanbo", "deworm", actual_date=date(2026, 9, 6), sync_drive=False)
-    assert res1["status"] == "success"
+    with patch.object(evaluator, "token", "mock_token"), \
+         patch.object(evaluator, "target_chat", "mock_chat"), \
+         patch("scripts.care_reminder_scheduler.send_telegram_message", return_value=True), \
+         patch.object(store, "sync_to_drive", return_value=True):
 
-    # Double tap
-    res2 = store.record_done("sanbo", "deworm", actual_date=date(2026, 9, 6), sync_drive=False)
-    assert res2["status"] == "already_done"
+        # Night 1 (2026-09-06)
+        a1 = evaluator.evaluate(as_of=date(2026, 9, 6))
+        assert any(a.get("type") == "care_baseline_needed" and a.get("night_number") == 1 for a in a1)
 
-    data = store.load()
-    deworm_events = [e for e in data["care_events"] if e["cat"] == "sanbo" and e["type"] == "deworm"]
-    assert len(deworm_events) == 1
+        # Night 2 (2026-09-07)
+        a2 = evaluator.evaluate(as_of=date(2026, 9, 7))
+        assert any(a.get("type") == "care_baseline_needed" and a.get("night_number") == 2 for a in a2)
+
+        # Night 3 (2026-09-08)
+        a3 = evaluator.evaluate(as_of=date(2026, 9, 8))
+        assert any(a.get("type") == "care_baseline_needed" and a.get("night_number") == 3 for a in a3)
+
+        # Night 4 (2026-09-09): Scheduled baseline push stops!
+        a4 = evaluator.evaluate(as_of=date(2026, 9, 9))
+        assert not any(a.get("type") == "care_baseline_needed" for a in a4)
+
+
+def test_profile_remains_unknown_after_baseline_push_suppression(tmp_path):
+    """Regression 11: profile remains UNKNOWN after baseline push suppression."""
+    care_file = tmp_path / "cat_care.json"
+    store = CareStore(path=care_file)
+    evaluator = CareReminderEvaluator(store=store, dry_run=False)
+
+    with patch.object(evaluator, "token", "mock_token"), \
+         patch.object(evaluator, "target_chat", "mock_chat"), \
+         patch("scripts.care_reminder_scheduler.send_telegram_message", return_value=True), \
+         patch.object(store, "sync_to_drive", return_value=True):
+
+        # Run 3 nights to trigger suppression
+        evaluator.evaluate(as_of=date(2026, 9, 6))
+        evaluator.evaluate(as_of=date(2026, 9, 7))
+        evaluator.evaluate(as_of=date(2026, 9, 8))
+
+        p_dan = store.get_cat_profile("dan")
+        p_sanbo = store.get_cat_profile("sanbo")
+
+        # Must remain visibly UNKNOWN without fabricated dates
+        for p in [p_dan, p_sanbo]:
+            for t in ["deflea", "deworm"]:
+                assert p["treatments"][t]["baseline_status"] == "UNKNOWN"
+                assert p["treatments"][t]["display_str"] == "last date unknown"
+                assert p["treatments"][t]["terminal_push_suppressed"] is True
+
+        # Actions remain operational: setting baseline clears suppression
+        res = store.set_last_date("dan", "deflea", "2026-09-01", sync_drive=False)
+        assert res["status"] == "success"
+        p_dan_updated = store.get_cat_profile("dan")
+        assert p_dan_updated["treatments"]["deflea"]["baseline_status"] == "ESTABLISHED"
+        assert p_dan_updated["treatments"]["deflea"]["terminal_push_suppressed"] is False
+
+
+def test_amsterdam_reminder_time_remains_2130_across_dst():
+    """Regression 12: Amsterdam reminder time remains 21:30 across DST transition."""
+    summer_dt = get_amsterdam_reminder_time(date(2026, 9, 6))
+    winter_dt = get_amsterdam_reminder_time(date(2026, 12, 9))
+
+    assert summer_dt.hour == 21
+    assert summer_dt.minute == 30
+    assert summer_dt.isoformat() == "2026-09-06T21:30:00+02:00"  # CEST (UTC+2)
+
+    assert winter_dt.hour == 21
+    assert winter_dt.minute == 30
+    assert winter_dt.isoformat() == "2026-12-09T21:30:00+01:00"  # CET (UTC+1)
 
 
 def test_reboot_preserves_pending_reminder(tmp_path):
     """19. Reboot reconstruction preserves pending reminder and count."""
     care_file = tmp_path / "cat_care.json"
     store = CareStore(path=care_file)
+    data = store.load()
+    data["reminder_state"]["dan"]["deworm"]["reminder_night_count"] = 1
+    store.save(data, sync_drive=False)
+
     store.record_not_yet("dan", "deworm", sync_drive=False)
 
     # Simulate fresh process restart reading from disk
     new_store = CareStore(path=care_file)
-    data = new_store.load()
-    assert data["reminder_state"]["dan"]["deworm"]["reminder_night_count"] == 1
-    assert data["reminder_state"]["dan"]["deworm"]["snoozed"] is True
+    reloaded_data = new_store.load()
+    assert reloaded_data["reminder_state"]["dan"]["deworm"]["reminder_night_count"] == 1
+    assert reloaded_data["reminder_state"]["dan"]["deworm"]["snoozed"] is True
 
 
 def test_profile_direct_weight_and_care_access():

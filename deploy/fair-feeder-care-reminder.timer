@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily 21:30 Amsterdam Fair Feeder Cat Care Reminder Timer
+
+[Timer]
+OnCalendar=*-*-* 21:30:00 Europe/Amsterdam
+Persistent=true
+Unit=fair-feeder-care-reminder.service
+
+[Install]
+WantedBy=timers.target

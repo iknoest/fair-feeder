@@ -3,10 +3,12 @@
 scripts/telegram_control_service.py - Fair Feeder Standalone Telegram Control Plane
 
 Runs 24/7 as a lightweight daemon (fair-feeder-telegram.service) on the Raspberry Pi:
-1. Responds to /help, /start, /status, /weight, /lastclip, /streaming_logitech, /streaming_tapo.
+1. Responds to /help, /start, /status, /profile, /weight, /lastclip, /streaming_logitech, /streaming_tapo.
 2. Continues running uninterrupted during DAYTIME_IDLE when heavy recorder processes are stopped.
 3. Enforces single-consumer authority via file lock: exactly ONE poller consumes getUpdates on Pi.
 4. Uses minimal RAM (~15-25 MB RSS) by avoiding heavy continuous video capture or YOLO models.
+5. Provides rich interactive Cat Care dashboard, treatment actions (Done, Not yet, Skip),
+   weight history, and charts backed by canonical data stores.
 """
 
 import os
@@ -26,6 +28,21 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.weight_store import (
+    load_weights,
+    save_weights,
+    get_cat_weight_summary,
+    get_canonical_weight_path,
+)
+from scripts.care_store import (
+    CareStore,
+    CAT_CONFIGS,
+    get_amsterdam_today,
+    get_amsterdam_now,
+    compute_age,
+    compute_next_birthday,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] %(levelname)s [%(name)s] %(message)s',
@@ -34,9 +51,6 @@ logging.basicConfig(
 log = logging.getLogger('TelegramControl')
 
 LOCK_FILE_PATH = "/tmp/fair_feeder_telegram.lock"
-WEIGHT_FILE_PATH = REPO_ROOT / "weight_log.csv"
-RCLONE_REMOTE = os.environ.get("RCLONE_REMOTE", "gdrive-randomdice:")
-
 START_TIME = time.time()
 
 
@@ -135,12 +149,14 @@ class TelegramControlService:
         chat_id: str,
         allowed_group_id: Optional[str] = None,
         weight_file: Optional[Path] = None,
+        care_store: Optional[CareStore] = None,
         state_file: Optional[Path] = None,
     ):
         self.bot_token = bot_token
         self.chat_id = str(chat_id)
         self.allowed_group_id = allowed_group_id or os.environ.get("ALLOWED_GROUP_ID")
-        self.weight_file = weight_file or WEIGHT_FILE_PATH
+        self.weight_file = weight_file or get_canonical_weight_path()
+        self.care_store = care_store or CareStore()
         self.state_file = state_file
         self.running = False
         self._last_update_id = 0
@@ -199,7 +215,9 @@ class TelegramControlService:
         if cq:
             cq_id = cq["id"]
             cq_data = cq.get("data", "")
-            cq_chat_id = str(cq.get("message", {}).get("chat", {}).get("id", ""))
+            cq_msg = cq.get("message", {})
+            cq_chat_id = str(cq_msg.get("chat", {}).get("id", ""))
+            cq_msg_id = cq_msg.get("message_id")
 
             # Always acknowledge callback query to dismiss spinner
             try:
@@ -212,7 +230,7 @@ class TelegramControlService:
                 pass
 
             if cq_chat_id in self.allowed_chats:
-                self._handle_callback_query(cq_data, cq_chat_id)
+                self._handle_callback_query(cq_data, cq_chat_id, message_id=cq_msg_id)
             return
 
         # 2. Regular message
@@ -245,6 +263,7 @@ class TelegramControlService:
             "/help": self._cmd_help,
             "/start": self._cmd_help,
             "/status": self._cmd_status,
+            "/profile": self._cmd_profile,
             "/weight": self._cmd_weight,
             "/lastclip": self._cmd_lastclip,
             "/streaming_logitech": self._cmd_streaming_logitech,
@@ -261,11 +280,12 @@ class TelegramControlService:
     def _cmd_help(self, sender_id: str):
         self._send(
             "🐾 Fair Feeder Commands\n"
+            "/profile — View cat care status, treatments, and profiles\n"
+            "/weight — Log, view history, or edit cat weights\n"
             "/status — View system state, uptime, memory, and sync status\n"
             "/lastclip — Send most recent cat video from staging\n"
             "/streaming_logitech — See a 5s live look from Logitech 🎥\n"
             "/streaming_tapo — See a 5s live look from Tapo 🏠\n"
-            "/weight — Log, view history, or edit cat weights\n"
             "/help — This message",
             sender_id=sender_id
         )
@@ -320,8 +340,9 @@ class TelegramControlService:
         try:
             import subprocess
             import json as _json
+            remote = os.environ.get("RCLONE_REMOTE", "gdrive-randomdice:")
             res = subprocess.run(
-                ["rclone", "size", RCLONE_REMOTE, "--json"],
+                ["rclone", "size", remote, "--json"],
                 capture_output=True,
                 text=True,
                 timeout=15
@@ -396,6 +417,225 @@ class TelegramControlService:
         except Exception as e:
             self._send(f"❌ Tapo streaming error: {e}", sender_id=sender_id)
 
+    # ── Cat Care Profile & Dashboard ──────────────────────────────────
+
+    def _cmd_profile(self, sender_id: str, message_id: Optional[int] = None):
+        """Displays the Cat Care Status Dashboard."""
+        dan_p = self.care_store.get_cat_profile("dan")
+        sanbo_p = self.care_store.get_cat_profile("sanbo")
+
+        dan_w = get_cat_weight_summary("dan")
+        sanbo_w = get_cat_weight_summary("sanbo")
+
+        dan_w_str = f"{dan_w['latest_weight']:.2f} kg · {dan_w['latest_date']}" if dan_w["latest_weight"] else "No weight logged"
+        sanbo_w_str = f"{sanbo_w['latest_weight']:.2f} kg · {sanbo_w['latest_date']}" if sanbo_w["latest_weight"] else "No weight logged"
+
+        dashboard_text = (
+            "🐾 Cat Care\n\n"
+            "Dan\n"
+            f"⚖️ {dan_w_str}\n"
+            f"🪲 Deflea: {dan_p['treatments']['deflea']['display_str']}\n"
+            f"🪱 Deworm: {dan_p['treatments']['deworm']['display_str']}\n"
+            f"🎂 Birthday: {dan_p['next_birthday']} ({dan_p['days_to_birthday']} days)\n\n"
+            "Sanbo\n"
+            f"⚖️ {sanbo_w_str}\n"
+            f"🪲 Deflea: {sanbo_p['treatments']['deflea']['display_str']}\n"
+            f"🪱 Deworm: {sanbo_p['treatments']['deworm']['display_str']}\n"
+            f"🎂 Birthday: {sanbo_p['next_birthday']} ({sanbo_p['days_to_birthday']} days)"
+        )
+
+        markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🐱 Dan", "callback_data": "care_view:dan"},
+                    {"text": "🐱 Sanbo", "callback_data": "care_view:sanbo"},
+                ]
+            ]
+        }
+
+        if message_id:
+            self._edit_message(dashboard_text, chat_id=sender_id, message_id=message_id, reply_markup=markup)
+        else:
+            self._send(dashboard_text, sender_id=sender_id, reply_markup=markup)
+
+    def _show_cat_profile(self, cat: str, sender_id: str, message_id: Optional[int] = None):
+        """Displays detailed profile for an individual cat."""
+        p = self.care_store.get_cat_profile(cat)
+        w = get_cat_weight_summary(cat)
+
+        latest_w = f"{w['latest_weight']:.2f} kg ({w['latest_date']})" if w["latest_weight"] else "None"
+        prev_w = f"{w['previous_weight']:.2f} kg ({w['previous_date']})" if w["previous_weight"] else "None"
+        if w["change"] is not None:
+            sign = "+" if w["change"] > 0 else ""
+            delta_str = f"{sign}{w['change']:.2f} kg"
+        else:
+            delta_str = "N/A"
+
+        trend_emoji = {"gaining": "↗️ gaining", "losing": "↘️ losing", "stable": "➡️ stable"}.get(w["trend"], "N/A")
+
+        deflea = p["treatments"]["deflea"]
+        deworm = p["treatments"]["deworm"]
+
+        recent_lines = []
+        for e in p["recent_events"][:3]:
+            recent_lines.append(f"• {e.get('actual_date')} {e.get('type').capitalize()} {e.get('status')}")
+        recent_str = "\n".join(recent_lines) if recent_lines else "(none recorded yet)"
+
+        text = (
+            f"🐱 {p['name']}\n\n"
+            f"🎂 Birthday\n"
+            f"DOB: {p['dob']}\n"
+            f"Age: {p['age']} years\n"
+            f"Next birthday: {p['next_birthday']}\n"
+            f"Turns: {p['turns_age']} (in {p['days_to_birthday']} days)\n\n"
+            f"⚖️ Weight\n"
+            f"Latest: {latest_w}\n"
+            f"Previous: {prev_w}\n"
+            f"Change: {delta_str}\n"
+            f"Trend: {trend_emoji}\n\n"
+            f"🪲 Deflea\n"
+            f"Last completed: {deflea['last_completed']}\n"
+            f"Next due: {deflea['next_due']}\n"
+            f"Status: {deflea['status_label']}\n\n"
+            f"🪱 Deworm\n"
+            f"Last completed: {deworm['last_completed']}\n"
+            f"Next due: {deworm['next_due']}\n"
+            f"Status: {deworm['status_label']}\n\n"
+            f"Recent care history:\n"
+            f"{recent_str}"
+        )
+
+        markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "⚖️ Weight History", "callback_data": f"care_weighthist:{cat}"},
+                    {"text": "📋 Care History", "callback_data": f"care_hist:{cat}"},
+                ],
+                [
+                    {"text": "🪲 Deflea", "callback_data": f"care_treat:{cat}:deflea"},
+                    {"text": "🪱 Deworm", "callback_data": f"care_treat:{cat}:deworm"},
+                ],
+                [
+                    {"text": "⬅️ Back to Dashboard", "callback_data": "care_dashboard"},
+                ]
+            ]
+        }
+
+        if message_id:
+            self._edit_message(text, chat_id=sender_id, message_id=message_id, reply_markup=markup)
+        else:
+            self._send(text, sender_id=sender_id, reply_markup=markup)
+
+    def _show_treatment_view(self, cat: str, treatment: str, sender_id: str, message_id: Optional[int] = None):
+        """Displays treatment status and action buttons."""
+        p = self.care_store.get_cat_profile(cat)
+        t_info = p["treatments"].get(treatment)
+        if not t_info:
+            return
+
+        cat_name = p["name"]
+        emoji = "🪲" if treatment == "deflea" else "🪱"
+        t_title = "Deflea" if treatment == "deflea" else "Deworm"
+
+        text = (
+            f"🐱 {cat_name} · {emoji} {t_title}\n\n"
+            f"Cadence: every {t_info['cadence_months']} month(s)\n"
+            f"Last completed: {t_info['last_completed']}\n"
+            f"Next due: {t_info['next_due']}\n"
+            f"Status: {t_info['display_str']}\n"
+            f"Reminder attempts: {t_info['reminder_night_count']} of 3"
+        )
+
+        due_tag = t_info["next_due"] if t_info["next_due"] != "Unknown" else "baseline"
+
+        if t_info["baseline_status"] == "UNKNOWN":
+            markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "✅ Done today", "callback_data": f"care_act:done:{cat}:{treatment}:baseline"},
+                        {"text": "📅 Set last date", "callback_data": f"care_act:setdate:{cat}:{treatment}"},
+                    ],
+                    [
+                        {"text": "🌙 Not yet", "callback_data": f"care_act:notyet:{cat}:{treatment}:baseline"},
+                        {"text": "⏭ Skip this cycle", "callback_data": f"care_act:skip:{cat}:{treatment}:baseline"},
+                    ],
+                    [
+                        {"text": f"⬅️ Back to {cat_name}", "callback_data": f"care_view:{cat}"},
+                    ]
+                ]
+            }
+        else:
+            markup = {
+                "inline_keyboard": [
+                    [
+                        {"text": "✅ Done", "callback_data": f"care_act:done:{cat}:{treatment}:{due_tag}"},
+                        {"text": "🌙 Not yet", "callback_data": f"care_act:notyet:{cat}:{treatment}:{due_tag}"},
+                    ],
+                    [
+                        {"text": "⏭ Skip this cycle", "callback_data": f"care_act:skip:{cat}:{treatment}:{due_tag}"},
+                    ],
+                    [
+                        {"text": f"⬅️ Back to {cat_name}", "callback_data": f"care_view:{cat}"},
+                    ]
+                ]
+            }
+
+        if message_id:
+            self._edit_message(text, chat_id=sender_id, message_id=message_id, reply_markup=markup)
+        else:
+            self._send(text, sender_id=sender_id, reply_markup=markup)
+
+    def _show_care_history(self, cat: str, sender_id: str, message_id: Optional[int] = None):
+        """Displays complete care history for a cat."""
+        p = self.care_store.get_cat_profile(cat)
+        cat_name = p["name"]
+        events = p["all_events"]
+
+        lines = [f"📋 Complete Care History — {cat_name}:"]
+        if not events:
+            lines.append("(no care events recorded yet)")
+        else:
+            for e in events:
+                status_icon = "✅" if e.get("status") == "DONE" else "⏭"
+                lines.append(f"{status_icon} {e.get('actual_date')}  {e.get('type').capitalize()}  {e.get('status')}")
+
+        markup = {
+            "inline_keyboard": [
+                [{"text": f"⬅️ Back to {cat_name}", "callback_data": f"care_view:{cat}"}]
+            ]
+        }
+        text = "\n".join(lines)
+        if message_id:
+            self._edit_message(text, chat_id=sender_id, message_id=message_id, reply_markup=markup)
+        else:
+            self._send(text, sender_id=sender_id, reply_markup=markup)
+
+    def _show_cat_weight_history(self, cat: str, sender_id: str, message_id: Optional[int] = None):
+        """Displays complete recovered weight history for a cat."""
+        summary = get_cat_weight_summary(cat)
+        cat_name = CAT_CONFIGS[cat]["name"]
+        history = summary["history"]
+
+        lines = [f"⚖️ Complete Weight History — {cat_name}:"]
+        if not history:
+            lines.append("(no weight records found)")
+        else:
+            for r in sorted(history, key=lambda x: x["date"], reverse=True):
+                lines.append(f"• {r['date']}  {r['weight_kg']} kg")
+
+        markup = {
+            "inline_keyboard": [
+                [{"text": f"⬅️ Back to {cat_name}", "callback_data": f"care_view:{cat}"}]
+            ]
+        }
+        text = "\n".join(lines)
+        if message_id:
+            self._edit_message(text, chat_id=sender_id, message_id=message_id, reply_markup=markup)
+        else:
+            self._send(text, sender_id=sender_id, reply_markup=markup)
+
+    # ── Weight Command ────────────────────────────────────────────────
+
     def _cmd_weight(self, sender_id: str):
         self._send(
             "Weight menu:",
@@ -409,139 +649,14 @@ class TelegramControlService:
             }
         )
 
-    # ── Weight Management ─────────────────────────────────────────────
-
     def _load_weights(self) -> List[Dict[str, Any]]:
-        import csv
-        if not self.weight_file.exists():
-            return []
-        with open(self.weight_file, newline="", encoding="utf-8") as f:
-            return list(csv.DictReader(f))
+        return load_weights(path=self.weight_file)
 
     def _save_weights(self, rows: List[Dict[str, Any]]):
-        import csv
-        import subprocess
-        self.weight_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.weight_file, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["date", "cat", "weight_kg"])
-            writer.writeheader()
-            writer.writerows(rows)
-
-        # Async background sync to Google Drive
-        try:
-            subprocess.Popen(
-                ["rclone", "copy", str(self.weight_file), RCLONE_REMOTE],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-        except Exception as e:
-            log.warning(f"rclone sync weight_log.csv failed: {e}")
-
-    def _handle_callback_query(self, data: str, sender_id: str):
-        if data == "weight_menu_log":
-            self._pending[sender_id] = {"cmd": "/weight", "step": "cat", "data": {}}
-            self._send(
-                "Which cat?",
-                sender_id=sender_id,
-                reply_markup={
-                    "inline_keyboard": [[
-                        {"text": "Dan", "callback_data": "dan"},
-                        {"text": "Sanbo", "callback_data": "sanbo"},
-                    ]]
-                }
-            )
-        elif data == "weight_menu_history":
-            self._cmd_weight_history(sender_id=sender_id)
-        elif data == "weight_menu_edit":
-            self._cmd_weight_edit(sender_id=sender_id)
-        elif sender_id in self._pending:
-            self.handle_dialog_reply(data, sender_id)
-
-    def handle_dialog_reply(self, text: str, sender_id: str):
-        state = self._pending.get(sender_id)
-        if not state:
-            return
-
-        cmd = state.get("cmd")
-        step = state.get("step")
-
-        if cmd == "/weight":
-            if step == "cat":
-                cat = text.strip().lower()
-                if cat not in ("dan", "sanbo"):
-                    self._send("Please reply with dan or sanbo.", sender_id=sender_id)
-                    return
-                state["data"]["cat"] = cat
-                state["step"] = "value"
-                self._send(f"Enter {cat.capitalize()} weight in kg (e.g. 5.2):", sender_id=sender_id)
-            elif step == "value":
-                try:
-                    kg = float(text.strip().replace(",", "."))
-                    if not (0.5 <= kg <= 20.0):
-                        raise ValueError("out of range")
-                except ValueError:
-                    self._send("Invalid number. Enter kg as a decimal (e.g. 5.2):", sender_id=sender_id)
-                    return
-                cat = state["data"]["cat"]
-                today = datetime.now().date().isoformat()
-                rows = self._load_weights()
-                rows.append({"date": today, "cat": cat, "weight_kg": f"{kg:.2f}"})
-                self._save_weights(rows)
-                self._pending.pop(sender_id, None)
-                self._send(f"✅ Saved: {cat.capitalize()} = {kg:.2f} kg on {today}", sender_id=sender_id)
-
-        elif cmd == "/weight_edit":
-            if step == "select":
-                try:
-                    idx = int(text.strip()) - 1
-                    entries = state["data"]["entries"]
-                    if not (0 <= idx < len(entries)):
-                        raise ValueError
-                except ValueError:
-                    self._send("Enter a number from the list:", sender_id=sender_id)
-                    return
-                state["data"]["idx"] = idx
-                e = entries[idx]
-                state["step"] = "value"
-                self._send(
-                    f"Current: {e['cat'].capitalize()} {e['weight_kg']} kg on {e['date']}\n"
-                    f"Enter new weight in kg (or 'delete' to remove):",
-                    sender_id=sender_id
-                )
-            elif step == "value":
-                entries = state["data"]["entries"]
-                idx = state["data"]["idx"]
-                entry = entries[idx]
-                rows = self._load_weights()
-
-                if text.strip().lower() == "delete":
-                    rows = [
-                        r for r in rows
-                        if not (r["date"] == entry["date"] and r["cat"] == entry["cat"])
-                    ]
-                    self._save_weights(rows)
-                    self._pending.pop(sender_id, None)
-                    self._send(f"Deleted {entry['cat'].capitalize()} entry for {entry['date']}.", sender_id=sender_id)
-                    return
-
-                try:
-                    kg = float(text.strip().replace(",", "."))
-                    if not (0.5 <= kg <= 20.0):
-                        raise ValueError
-                except ValueError:
-                    self._send("Invalid number. Enter kg or 'delete':", sender_id=sender_id)
-                    return
-
-                for r in rows:
-                    if r["date"] == entry["date"] and r["cat"] == entry["cat"]:
-                        r["weight_kg"] = f"{kg:.2f}"
-                        break
-                self._save_weights(rows)
-                self._pending.pop(sender_id, None)
-                self._send(f"Updated {entry['cat'].capitalize()} on {entry['date']} to {kg:.2f} kg.", sender_id=sender_id)
+        save_weights(rows, path=self.weight_file)
 
     def _cmd_weight_history(self, sender_id: str):
-        rows = self._load_weights()
+        rows = load_weights(path=self.weight_file)
         if not rows:
             self._send("No weight entries yet. Use /weight to log.", sender_id=sender_id)
             return
@@ -559,7 +674,7 @@ class TelegramControlService:
 
         self._send("\n".join(lines), sender_id=sender_id)
 
-        # Matplotlib chart if available
+        # Matplotlib chart
         try:
             import matplotlib
             matplotlib.use("Agg")
@@ -619,7 +734,7 @@ class TelegramControlService:
             log.warning(f"Weight chart generation error: {e}")
 
     def _cmd_weight_edit(self, sender_id: str):
-        rows = self._load_weights()
+        rows = load_weights(path=self.weight_file)
         if not rows:
             self._send("No weight entries to edit.", sender_id=sender_id)
             return
@@ -631,6 +746,282 @@ class TelegramControlService:
         self._pending[sender_id] = {
             "cmd": "/weight_edit", "step": "select", "data": {"entries": recent}
         }
+
+    # ── Callback Dispatcher ───────────────────────────────────────────
+
+    def _handle_callback_query(self, data: str, sender_id: str, message_id: Optional[int] = None):
+        # 1. Weight menu callbacks
+        if data == "weight_menu_log":
+            self._pending[sender_id] = {"cmd": "/weight", "step": "cat", "data": {}}
+            self._send(
+                "Which cat?",
+                sender_id=sender_id,
+                reply_markup={
+                    "inline_keyboard": [[
+                        {"text": "Dan", "callback_data": "dan"},
+                        {"text": "Sanbo", "callback_data": "sanbo"},
+                    ]]
+                }
+            )
+            return
+        elif data == "weight_menu_history":
+            self._cmd_weight_history(sender_id=sender_id)
+            return
+        elif data == "weight_menu_edit":
+            self._cmd_weight_edit(sender_id=sender_id)
+            return
+
+        # 2. Cat care navigation callbacks
+        if data == "care_dashboard":
+            self._cmd_profile(sender_id, message_id=message_id)
+            return
+        elif data.startswith("care_view:"):
+            cat = data.split(":", 1)[1]
+            self._show_cat_profile(cat, sender_id, message_id=message_id)
+            return
+        elif data.startswith("care_treat:"):
+            parts = data.split(":")
+            if len(parts) >= 3:
+                cat, treatment = parts[1], parts[2]
+                self._show_treatment_view(cat, treatment, sender_id, message_id=message_id)
+            return
+        elif data.startswith("care_hist:"):
+            cat = data.split(":", 1)[1]
+            self._show_care_history(cat, sender_id, message_id=message_id)
+            return
+        elif data.startswith("care_weighthist:"):
+            cat = data.split(":", 1)[1]
+            self._show_cat_weight_history(cat, sender_id, message_id=message_id)
+            return
+
+        # 3. Treatment action callbacks
+        elif data.startswith("care_act:"):
+            self._handle_care_action(data, sender_id, message_id=message_id)
+            return
+
+        # 4. Fallback to dialog reply
+        if sender_id in self._pending:
+            self.handle_dialog_reply(data, sender_id)
+
+    def _handle_care_action(self, data: str, sender_id: str, message_id: Optional[int] = None):
+        """
+        Handles treatment inline buttons:
+        care_act:done:<cat>:<treatment>:<due>
+        care_act:notyet:<cat>:<treatment>:<due>
+        care_act:skip:<cat>:<treatment>:<due>
+        care_act:setdate:<cat>:<treatment>
+        """
+        parts = data.split(":")
+        if len(parts) < 4:
+            return
+        action, cat, treatment = parts[1], parts[2], parts[3]
+        due_tag = parts[4] if len(parts) > 4 else None
+
+        cat_name = CAT_CONFIGS.get(cat, {}).get("name", cat.capitalize())
+        t_title = "Deflea" if treatment == "deflea" else "Deworm"
+
+        if action == "done":
+            res = self.care_store.record_done(
+                cat=cat,
+                treatment=treatment,
+                originating_due=due_tag if due_tag != "baseline" else None,
+                source="telegram_button"
+            )
+            next_due = res.get("next_due", "scheduled")
+            today_str = get_amsterdam_today().strftime("%Y-%m-%d")
+            resp_text = (
+                f"✅ Recorded: {cat_name} {t_title} · {today_str}\n"
+                f"Next due: {next_due}"
+            )
+            markup = {
+                "inline_keyboard": [
+                    [{"text": f"⬅️ Back to {cat_name}", "callback_data": f"care_view:{cat}"}]
+                ]
+            }
+            if message_id:
+                self._edit_message(resp_text, chat_id=sender_id, message_id=message_id, reply_markup=markup)
+            else:
+                self._send(resp_text, sender_id=sender_id, reply_markup=markup)
+
+        elif action == "notyet":
+            res = self.care_store.record_not_yet(cat=cat, treatment=treatment)
+            night_cnt = res.get("night_count", 1)
+            resp_text = (
+                f"🌙 Not yet\n"
+                f"Next reminder: tomorrow 21:30\n"
+                f"Night {night_cnt} of 3"
+            )
+            markup = {
+                "inline_keyboard": [
+                    [{"text": f"⬅️ Back to {cat_name}", "callback_data": f"care_view:{cat}"}]
+                ]
+            }
+            if message_id:
+                self._edit_message(resp_text, chat_id=sender_id, message_id=message_id, reply_markup=markup)
+            else:
+                self._send(resp_text, sender_id=sender_id, reply_markup=markup)
+
+        elif action == "skip":
+            res = self.care_store.record_skip(
+                cat=cat,
+                treatment=treatment,
+                planned_due=due_tag if due_tag != "baseline" else None,
+                source="telegram_button"
+            )
+            next_due = res.get("next_due", "scheduled")
+            resp_text = (
+                f"⏭ Skipped this cycle\n"
+                f"Next due: {next_due}"
+            )
+            markup = {
+                "inline_keyboard": [
+                    [{"text": f"⬅️ Back to {cat_name}", "callback_data": f"care_view:{cat}"}]
+                ]
+            }
+            if message_id:
+                self._edit_message(resp_text, chat_id=sender_id, message_id=message_id, reply_markup=markup)
+            else:
+                self._send(resp_text, sender_id=sender_id, reply_markup=markup)
+
+        elif action == "setdate":
+            self._pending[sender_id] = {
+                "cmd": "/care_setdate",
+                "cat": cat,
+                "treatment": treatment,
+            }
+            self._send(
+                f"Enter last completed date for {cat_name} {t_title} (YYYY-MM-DD):\n"
+                f"Example: 2026-08-15",
+                sender_id=sender_id
+            )
+
+    # ── Dialog Replies ────────────────────────────────────────────────
+
+    def handle_dialog_reply(self, text: str, sender_id: str):
+        state = self._pending.get(sender_id)
+        if not state:
+            return
+
+        cmd = state.get("cmd")
+
+        # 1. Setting historical care date
+        if cmd == "/care_setdate":
+            cat = state["cat"]
+            treatment = state["treatment"]
+            raw_date = text.strip()
+            cat_name = CAT_CONFIGS.get(cat, {}).get("name", cat.capitalize())
+            t_title = "Deflea" if treatment == "deflea" else "Deworm"
+            try:
+                res = self.care_store.set_last_date(cat, treatment, raw_date)
+                self._pending.pop(sender_id, None)
+                self._send(
+                    f"✅ Baseline established for {cat_name} {t_title}!\n"
+                    f"Last completed: {raw_date}\n"
+                    f"Next due: {res.get('next_due')}",
+                    sender_id=sender_id,
+                    reply_markup={
+                        "inline_keyboard": [
+                            [{"text": f"🐱 {cat_name} Profile", "callback_data": f"care_view:{cat}"}]
+                        ]
+                    }
+                )
+            except Exception as e:
+                self._send(f"Invalid date format: {e}. Please enter YYYY-MM-DD (e.g. 2026-08-15):", sender_id=sender_id)
+            return
+
+        # 2. Logging weight
+        elif cmd == "/weight":
+            step = state.get("step")
+            if step == "cat":
+                cat = text.strip().lower()
+                if cat not in ("dan", "sanbo"):
+                    self._send("Please choose Dan or Sanbo:", sender_id=sender_id)
+                    return
+                state["data"]["cat"] = cat
+                state["step"] = "weight"
+                self._send(f"Enter {cat.capitalize()} weight in kg (e.g. 3.45):", sender_id=sender_id)
+            elif step == "weight":
+                try:
+                    kg = float(text.strip().replace(",", "."))
+                    if not (0.5 <= kg <= 20.0):
+                        raise ValueError
+                except ValueError:
+                    self._send("Invalid weight. Enter a number between 0.5 and 20.0:", sender_id=sender_id)
+                    return
+                cat = state["data"]["cat"]
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                rows = load_weights(path=self.weight_file)
+                found = False
+                for r in rows:
+                    if r["date"] == today and r["cat"] == cat:
+                        r["weight_kg"] = f"{kg:.2f}"
+                        found = True
+                        break
+                if not found:
+                    rows.append({"date": today, "cat": cat, "weight_kg": f"{kg:.2f}"})
+                save_weights(rows, path=self.weight_file)
+                self._pending.pop(sender_id, None)
+                self._send(
+                    f"✅ Saved: {cat.capitalize()} = {kg:.2f} kg on {today}",
+                    sender_id=sender_id,
+                    reply_markup={
+                        "inline_keyboard": [[
+                            {"text": "View History", "callback_data": "weight_menu_history"},
+                        ]]
+                    }
+                )
+
+        # 3. Editing weight
+        elif cmd == "/weight_edit":
+            step = state.get("step")
+            if step == "select":
+                entries = state["data"]["entries"]
+                try:
+                    idx = int(text.strip()) - 1
+                    if not (0 <= idx < len(entries)):
+                        raise ValueError
+                except ValueError:
+                    self._send("Enter a number from the list:", sender_id=sender_id)
+                    return
+                state["data"]["idx"] = idx
+                e = entries[idx]
+                state["step"] = "value"
+                self._send(
+                    f"Current: {e['cat'].capitalize()} {e['weight_kg']} kg on {e['date']}\n"
+                    f"Enter new weight in kg (or 'delete' to remove):",
+                    sender_id=sender_id
+                )
+            elif step == "value":
+                entries = state["data"]["entries"]
+                idx = state["data"]["idx"]
+                entry = entries[idx]
+                rows = load_weights(path=self.weight_file)
+
+                if text.strip().lower() == "delete":
+                    rows = [
+                        r for r in rows
+                        if not (r["date"] == entry["date"] and r["cat"] == entry["cat"])
+                    ]
+                    save_weights(rows, path=self.weight_file)
+                    self._pending.pop(sender_id, None)
+                    self._send(f"Deleted {entry['cat'].capitalize()} entry for {entry['date']}.", sender_id=sender_id)
+                    return
+
+                try:
+                    kg = float(text.strip().replace(",", "."))
+                    if not (0.5 <= kg <= 20.0):
+                        raise ValueError
+                except ValueError:
+                    self._send("Invalid number. Enter kg or 'delete':", sender_id=sender_id)
+                    return
+
+                for r in rows:
+                    if r["date"] == entry["date"] and r["cat"] == entry["cat"]:
+                        r["weight_kg"] = f"{kg:.2f}"
+                        break
+                save_weights(rows, path=self.weight_file)
+                self._pending.pop(sender_id, None)
+                self._send(f"Updated {entry['cat'].capitalize()} on {entry['date']} to {kg:.2f} kg.", sender_id=sender_id)
 
     # ── Telegram API Helpers ──────────────────────────────────────────
 
@@ -645,6 +1036,22 @@ class TelegramControlService:
             requests.post(url, json=payload, timeout=10)
         except Exception as e:
             log.warning(f"Telegram sendMessage failed: {e}")
+
+    def _edit_message(self, text: str, chat_id: str, message_id: int, reply_markup: Optional[Dict[str, Any]] = None):
+        """Updates an existing message in-place to avoid clutter."""
+        import requests
+        url = f"https://api.telegram.org/bot{self.bot_token}/editMessageText"
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        try:
+            requests.post(url, json=payload, timeout=10)
+        except Exception as e:
+            log.warning(f"Telegram editMessageText failed: {e}")
 
     def _send_video_file(self, video_path: Path, sender_id: Optional[str] = None):
         import requests

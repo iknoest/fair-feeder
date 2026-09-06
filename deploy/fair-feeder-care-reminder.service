@@ -1,0 +1,12 @@
+[Unit]
+Description=Fair Feeder Cat Care & Birthday Reminder Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi5
+WorkingDirectory=/home/pi5/Feeder/fair-feeder
+ExecStart=/home/pi5/Feeder/fair-feeder/.venv/bin/python scripts/care_reminder_scheduler.py --evaluate
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/home/pi5/Feeder/fair-feeder/.env

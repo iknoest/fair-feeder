@@ -65,13 +65,17 @@ def get_telegram_config() -> Tuple[Optional[str], Optional[str]]:
     Never exposes credentials or IDs.
     """
     load_env_safe()
-    token = (
-        os.environ.get("TELEGRAM_BOT_TOKEN")
-        or os.environ.get("TelegramBotToken")
-    )
+    try:
+        from scripts.telegram_control_service import _resolve_credentials
+        token, chat_id = _resolve_credentials()
+    except Exception as e:
+        log.warning(f"Error resolving credentials from telegram_control_service: {e}")
+        token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TelegramBotToken")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID") or os.environ.get("TelegramChatId")
+
     group_id = (
         os.environ.get("ALLOWED_GROUP_ID")
-        or os.environ.get("TELEGRAM_CHAT_ID")
+        or chat_id
     )
     return token, group_id
 

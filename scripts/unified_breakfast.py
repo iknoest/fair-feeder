@@ -32,6 +32,22 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+# Load .env file if present
+_env_path = _REPO_ROOT / ".env"
+if _env_path.exists():
+    try:
+        with open(_env_path, "r", encoding="utf-8") as _ef:
+            for _line in _ef:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _v = _line.split("=", 1)
+                    _k = _k.strip()
+                    _v = _v.strip().strip("'\"")
+                    if _k not in os.environ:
+                        os.environ[_k] = _v
+    except Exception:
+        pass
+
 try:
     from scripts.telegram_video_guard import compress_video_for_telegram, validate_video_content
 except ImportError:
@@ -117,13 +133,17 @@ def generate_unified_breakfast_report(
     clean_date = str(target_date).replace("-", "").strip()
     formatted_date = f"{clean_date[:4]}-{clean_date[4:6]}-{clean_date[6:]}" if len(clean_date) == 8 else str(target_date)
 
+    # Unwrap multi-session container if full shadow summary was passed
+    if "sessions" in logitech_session and isinstance(logitech_session["sessions"], list) and logitech_session["sessions"]:
+        logitech_session = logitech_session["sessions"][0]
+
     # 1. Timeline Window Span (strictly from evidence)
     tapo_start = tapo_summary.get("start_time") or tapo_summary.get("start_ts")
     tapo_end = tapo_summary.get("end_time") or tapo_summary.get("end_ts")
     logi_start = logitech_session.get("session_start_time") or logitech_session.get("start_time")
     logi_end = logitech_session.get("session_end_time") or logitech_session.get("end_time")
 
-    times = [t for t in [tapo_start, tapo_end, logi_start, logi_end] if t and isinstance(t, str) and ":" in t]
+    times = [t.strip()[-8:] for t in [tapo_start, tapo_end, logi_start, logi_end] if t and isinstance(t, str) and ":" in t]
     start_time = min(times) if times else "unknown"
     end_time = max(times) if times else "unknown"
 
@@ -765,6 +785,23 @@ def deliver_unified_breakfast(
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
+    if folder_id is None:
+        folder_id = os.environ.get("GDRIVE_OUTPUT_FOLDER_ID") or os.environ.get("GDRIVE_FOLDER_ID")
+
+    if drive_service is None:
+        key_json = os.environ.get("GDRIVE_SERVICE_ACCOUNT_KEY")
+        if key_json:
+            try:
+                from google.oauth2 import service_account
+                from googleapiclient.discovery import build
+                key_dict = json.loads(key_json)
+                creds = service_account.Credentials.from_service_account_info(
+                    key_dict, scopes=['https://www.googleapis.com/auth/drive']
+                )
+                drive_service = build('drive', 'v3', credentials=creds)
+            except Exception as e:
+                print(f"[UnifiedBreakfast] Warning initializing Drive service: {e}")
+
     # Step 1: Preflight Check
     registry = load_delivery_registry(drive_service, folder_id, local_fallback_dir=out_dir)
     if not force and is_breakfast_fully_delivered(registry, clean_date):
@@ -806,15 +843,16 @@ def deliver_unified_breakfast(
     logi_search_dirs = [d for d in [logitech_dir, Path(f"/tmp/logitech_vlm_shadow_{clean_date}"), Path("scratch/replay_sep5"), Path(".")] if d and Path(d).exists()]
 
     for d in logi_search_dirs:
-        l_sum_p = Path(d) / "logitech_vlm_shadow_summary.json"
-        if not l_sum_p.exists():
-            l_sum_p = Path(d) / "summary.json"
-        if l_sum_p.exists():
-            try:
-                logitech_summary = json.loads(l_sum_p.read_text(encoding="utf-8"))
-                break
-            except Exception:
-                pass
+        for candidate_name in ["logitech_vlm_session_summary.json", "logitech_vlm_shadow_summary.json", "summary.json"]:
+            l_sum_p = Path(d) / candidate_name
+            if l_sum_p.exists():
+                try:
+                    logitech_summary = json.loads(l_sum_p.read_text(encoding="utf-8"))
+                    break
+                except Exception:
+                    pass
+        if logitech_summary:
+            break
 
     for d in logi_search_dirs:
         for vid in sorted(Path(d).glob(f"*{clean_date}*.mp4")):
@@ -858,18 +896,31 @@ def deliver_unified_breakfast(
     # Item 2: Combined Video
     combined_video_path = out_dir / f"{clean_date}_combined_breakfast.mp4"
     if not is_unified_item_delivered(registry, clean_date, "combined_video"):
-        print(f"🎥 Rendering unified vertical video for {clean_date}...")
-        if not tapo_clips or not logi_clips:
-            print(f"⚠️ Missing clips for video render (tapo={len(tapo_clips)}, logi={len(logi_clips)}). Cannot deliver video.")
-            return False
+        print(f"🎥 Preparing unified vertical video for {clean_date}...")
+        if not combined_video_path.exists() or combined_video_path.stat().st_size == 0:
+            # Check if alternate named file exists in out_dir
+            alt_candidates = [
+                out_dir / "sep6_combined_breakfast.mp4",
+                out_dir / "sep5_combined_breakfast.mp4"
+            ]
+            found_alt = False
+            for alt_cand in alt_candidates:
+                if alt_cand.exists() and alt_cand.stat().st_size > 0:
+                    shutil.copy2(alt_cand, combined_video_path)
+                    found_alt = True
+                    break
+            if not found_alt:
+                if not tapo_clips or not logi_clips:
+                    print(f"⚠️ Missing clips for video render (tapo={len(tapo_clips)}, logi={len(logi_clips)}). Cannot deliver video.")
+                    return False
 
-        generate_combined_breakfast_video(
-            tapo_clips=tapo_clips,
-            logitech_clips=logi_clips,
-            output_path=combined_video_path,
-            target_date=clean_date,
-            speedup_factor=4.0
-        )
+                generate_combined_breakfast_video(
+                    tapo_clips=tapo_clips,
+                    logitech_clips=logi_clips,
+                    output_path=combined_video_path,
+                    target_date=clean_date,
+                    speedup_factor=4.0
+                )
 
         # Validate video size and content
         vid_size_mb = combined_video_path.stat().st_size / (1024 * 1024)
@@ -877,7 +928,8 @@ def deliver_unified_breakfast(
             print(f"❌ Video size {vid_size_mb:.2f} MB exceeds 45 MB Telegram limit")
             return False
 
-        caption = "TAPO top · LOGITECH bottom · synchronized 4x · full-frame"
+        formatted_date = f"{clean_date[:4]}-{clean_date[4:6]}-{clean_date[6:]}" if len(clean_date) == 8 else str(clean_date)
+        caption = f"🍳 {formatted_date} Combined Breakfast · TAPO top · LOGITECH bottom"
         if preview:
             caption = f"[TEST][PREVIEW] {caption}"
 

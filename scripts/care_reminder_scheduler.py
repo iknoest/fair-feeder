@@ -66,8 +66,8 @@ def get_telegram_config() -> Tuple[Optional[str], Optional[str]]:
     """
     load_env_safe()
     try:
-        from scripts.telegram_control_service import _resolve_credentials
-        token, chat_id = _resolve_credentials()
+        from scripts.telegram_control_service import get_telegram_credentials
+        token, chat_id = get_telegram_credentials()
     except Exception as e:
         log.warning(f"Error resolving credentials from telegram_control_service: {e}")
         token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TelegramBotToken")

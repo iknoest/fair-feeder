@@ -46,6 +46,11 @@ class WeightValidationError(Exception):
     pass
 
 
+class WeightCorruptError(Exception):
+    """Raised when canonical weight file is unreadable, corrupt, or contains malformed data."""
+    pass
+
+
 def get_canonical_weight_path() -> Path:
     """
     Resolves the single canonical path for weight_log.csv.
@@ -151,7 +156,11 @@ def merge_weight_rows(*datasets: List[Dict[str, Any]]) -> List[Dict[str, str]]:
 
 
 def load_weights(path: Optional[Path] = None) -> List[Dict[str, str]]:
-    """Reads all weight rows from the canonical or specified file."""
+    """
+    Reads all weight rows from the canonical or specified file.
+    Fails closed: raises WeightCorruptError if the file exists but is unreadable,
+    has missing/invalid headers, or contains malformed rows.
+    """
     if path is not None:
         target = path
         if not target.exists():
@@ -165,19 +174,29 @@ def load_weights(path: Optional[Path] = None) -> List[Dict[str, str]]:
             else:
                 return []
 
+    if target.stat().st_size == 0:
+        return []
+
     try:
         with open(target, mode="r", newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
+            if not reader.fieldnames or not {"date", "cat", "weight_kg"}.issubset(set(reader.fieldnames)):
+                raise WeightCorruptError(
+                    f"Weight file {target} missing required header fields: date, cat, weight_kg (found: {reader.fieldnames})"
+                )
             rows = []
-            for r in reader:
+            for line_idx, r in enumerate(reader, start=2):
                 try:
                     rows.append(validate_weight_record(r))
                 except WeightValidationError as e:
-                    log.warning(f"Skipping malformed row {r} in {target}: {e}")
+                    raise WeightCorruptError(
+                        f"Malformed weight row at line {line_idx} in {target}: {r}. Error: {e}. Preserving file and failing closed."
+                    )
             return sorted(rows, key=lambda r: (r["date"], 0 if r["cat"] == "dan" else 1))
+    except WeightCorruptError:
+        raise
     except Exception as e:
-        log.error(f"Failed to read weight file {target}: {e}")
-        return []
+        raise WeightCorruptError(f"Failed to read weight file {target}: {e}")
 
 
 def save_weights(
@@ -189,9 +208,18 @@ def save_weights(
     """
     Atomically writes rows to the canonical weight file with file locking,
     replicates to secondary paths, and executes verified sync to Google Drive.
+    Fails closed: refuses to overwrite an existing non-empty file if it is corrupt,
+    and refuses to overwrite an existing non-empty file with empty rows.
     """
     target = path or get_canonical_weight_path()
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    # Fail closed: if target exists and has data, verify it is healthy before overwriting
+    if target.exists() and target.stat().st_size > 0:
+        # load_weights will raise WeightCorruptError if existing target is unreadable or malformed
+        load_weights(target)
+        if not rows:
+            raise WeightCorruptError(f"Refusing to overwrite existing non-empty weight file {target} with empty data.")
 
     # Validate and deduplicate all rows before writing
     clean_rows = merge_weight_rows(rows)

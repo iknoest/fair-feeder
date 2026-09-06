@@ -1306,9 +1306,15 @@ class TelegramCommandListener:
                     return
                 cat = state['data']['cat']
                 today = __import__('datetime').date.today().isoformat()
-                rows = self._load_weights()
-                rows.append({'date': today, 'cat': cat, 'weight_kg': f'{kg:.2f}'})
-                self._save_weights(rows)
+                try:
+                    rows = self._load_weights()
+                    rows.append({'date': today, 'cat': cat, 'weight_kg': f'{kg:.2f}'})
+                    self._save_weights(rows)
+                except Exception as e:
+                    log.error(f'Failed to save weight: {e}')
+                    self._pending.pop(sender_id, None)
+                    self._send('Error: Weight database is unreadable or corrupt. Preserving history.', sender_id=sender_id)
+                    return
                 self._pending.pop(sender_id, None)
                 self._send(
                     f'Saved: {cat.capitalize()} = {kg} kg on {today}',

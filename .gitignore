@@ -45,5 +45,9 @@ job-tracker-*.json
 state.json
 cat_care.json
 weight_log.csv
+delivery_registry.json
+*_summary_*.json
+*_timeline_*.json
 *.lock
 scratch/
+

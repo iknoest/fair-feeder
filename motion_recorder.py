@@ -50,6 +50,7 @@ For more detailed guide, see: MOTION_RECORDER_GUIDE.ipynb
 """
 
 import os
+import re
 import sys
 import time
 import threading
@@ -530,6 +531,12 @@ class RecordingController:
             except Exception as e:
                 log.warning(f"⚠️ Upload queue initialization failed: {e}")
 
+        # Recover any orphaned recordings from prior crash/reboot
+        try:
+            self.recover_orphaned_recordings()
+        except Exception as e:
+            log.error(f"⚠️ Error during startup orphan recovery: {e}")
+
     def _finalization_worker(self):
         """Processes completed recordings sequentially in the background."""
         while True:
@@ -542,6 +549,108 @@ class RecordingController:
                 log.error(f"⚠️ Finalization worker error: {e}")
             finally:
                 self._finalization_queue.task_done()
+
+    def recover_orphaned_recordings(self):
+        """
+        Inspects LOCAL_TEMP_DIR for orphaned recordings left from a prior process/host crash.
+        Preserves healthy source clips, cleans up corrupt/partial remux targets,
+        and idempotently enqueues valid recordings for finalization and durable upload.
+        """
+        if not LOCAL_TEMP_DIR.exists():
+            return
+
+        # 1. First pass: Handle any _fixed.mp4 artifacts
+        for fixed_p in list(LOCAL_TEMP_DIR.glob("*_fixed.mp4")):
+            try:
+                sz = fixed_p.stat().st_size
+                is_valid = False
+                if sz >= 1024:
+                    cap = cv2.VideoCapture(str(fixed_p))
+                    if cap.isOpened() and cap.get(cv2.CAP_PROP_FRAME_COUNT) > 0:
+                        is_valid = True
+                    cap.release()
+                if not is_valid:
+                    log.warning(f"🧹 Removing invalid/interrupted remux artifact: {fixed_p.name} ({sz} bytes)")
+                    fixed_p.unlink(missing_ok=True)
+                else:
+                    source_name = fixed_p.name.replace("_fixed.mp4", ".mp4")
+                    source_p = LOCAL_TEMP_DIR / source_name
+                    if source_p.exists():
+                        log.info(f"🔄 Promoting completed remux {fixed_p.name} over {source_name}")
+                        os.replace(str(fixed_p), str(source_p))
+            except Exception as e:
+                log.warning(f"⚠️ Error checking remux artifact {fixed_p.name}: {e}")
+
+        # 2. Second pass: Process candidate recording files
+        current_recording_path = getattr(self, "temp_path", None)
+        for temp_p in sorted(LOCAL_TEMP_DIR.glob("motion_*.mp4")):
+            if temp_p.name.endswith("_fixed.mp4"):
+                continue
+            if current_recording_path and temp_p.resolve() == current_recording_path.resolve():
+                continue
+
+            try:
+                sz = temp_p.stat().st_size
+                if sz == 0:
+                    log.warning(f"🧹 Removing 0-byte orphan temp file: {temp_p.name}")
+                    temp_p.unlink(missing_ok=True)
+                    continue
+
+                cap = cv2.VideoCapture(str(temp_p))
+                if not cap.isOpened():
+                    cap.release()
+                    log.warning(f"⚠️ Unreadable orphan temp file: {temp_p.name} ({sz} bytes)")
+                    continue
+
+                fc = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                fps = cap.get(cv2.CAP_PROP_FPS) or getattr(self.reader, 'stream_fps', VIDEO_FPS)
+                if fps <= 0:
+                    fps = VIDEO_FPS
+                duration = (fc / fps) if fc > 0 else 0.0
+                cap.release()
+
+                if fc <= 0 or duration <= 0:
+                    log.warning(f"⚠️ Orphan temp file has no frames: {temp_p.name}")
+                    continue
+
+                dur_str = self._duration_str(duration)
+                m = re.search(r'_\d+m_\d+s\.mp4$|_\d+s\.mp4$', temp_p.name)
+                if m:
+                    final_name = temp_p.name
+                else:
+                    final_name = f"{temp_p.stem}_{dur_str}.mp4"
+
+                # Check idempotency against DRIVE_OUTPUT_DIR
+                dest_file = DRIVE_OUTPUT_DIR / final_name
+                if dest_file.exists() and dest_file.stat().st_size >= sz:
+                    log.info(f"ℹ️ Orphan temp file {temp_p.name} already in {DRIVE_OUTPUT_DIR.name}/{final_name}; cleaning temp.")
+                    temp_p.unlink(missing_ok=True)
+                    continue
+
+                # Check idempotency against durable upload queue
+                if self.upload_queue:
+                    try:
+                        from config import get_camera_target_for_path
+                        target = get_camera_target_for_path(dest_file)
+                        cam_type = target["camera_type"]
+                        key = f"{cam_type}:{final_name}"
+                        items = self.upload_queue._read_ledger_unlocked().get("items", {})
+                        existing_item = items.get(key)
+                        if existing_item and existing_item.get("state") == "UPLOADED" and existing_item.get("remote_verified"):
+                            log.info(f"ℹ️ Orphan clip {final_name} already UPLOADED in ledger; cleaning temp.")
+                            temp_p.unlink(missing_ok=True)
+                            continue
+                    except Exception as le:
+                        log.warning(f"⚠️ Error checking ledger for {final_name}: {le}")
+
+                # Valid unfinalized recording: preserve evidence and resume finalization & upload
+                log.info(f"🛡️ Recovered orphaned recording from prior crash: {temp_p.name} ({sz / (1024*1024):.1f} MB, {fc} frames, {duration:.1f}s)")
+                self._finalization_queue.put(
+                    (temp_p, final_name, dur_str, duration, True, fps, fc)
+                )
+                log.info(f"📦 Enqueued orphan {temp_p.name} -> {final_name} for finalization & durable upload.")
+            except Exception as e:
+                log.error(f"⚠️ Error recovering orphan recording {temp_p}: {e}")
 
     def _find_last_cat_time(self):
         """Scans the output directory for the most recent cat clip timestamp."""
@@ -883,7 +992,8 @@ class RecordingController:
         # 3. Rename with duration and move to Drive
         final_temp = LOCAL_TEMP_DIR / final_name
         if temp_path.exists():
-            temp_path.rename(final_temp)
+            if temp_path.resolve() != final_temp.resolve():
+                temp_path.rename(final_temp)
             dest = DRIVE_OUTPUT_DIR / final_name
             shutil.move(str(final_temp), str(dest))
             with self._clips_lock:

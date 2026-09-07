@@ -189,6 +189,16 @@ def generate_unified_breakfast_report(
     # Determine meal_finished
     # Product rule: Prefer observed final bowl/kibble state.
     # Do NOT infer end=0 merely because per-cat estimates sum approximately to start amount.
+    tapo_has_evidence = bool(
+        tapo_summary and any(
+            tapo_summary.get(k) is not None for k in [
+                "start_kibble", "end_kibble", "dan_kibble", "sanbo_kibble",
+                "dan_percent", "sanbo_percent", "meal_finished",
+                "start_time", "end_time", "start_ts", "end_ts", "raw_summary_text"
+            ]
+        )
+    )
+
     if meal_finished_explicit is not None:
         meal_finished: Optional[bool] = bool(meal_finished_explicit)
     elif total_end_kibble is not None:
@@ -197,7 +207,10 @@ def generate_unified_breakfast_report(
         meal_finished = None
 
     # TAPO Feeder Meal Outcome line
-    if meal_finished is True:
+    if not tapo_has_evidence:
+        tapo_meal_status_str = "unavailable"
+        tapo_meal_line = "🥣 Meal: evidence unavailable (no TAPO footage or analysis)"
+    elif meal_finished is True:
         tapo_meal_status_str = "Finished ✅"
         if total_start_kibble is not None and total_end_kibble is not None:
             tapo_meal_line = f"🥣 Meal: ~{total_start_kibble} → {total_end_kibble} kibble · {tapo_meal_status_str}"
@@ -227,54 +240,62 @@ def generate_unified_breakfast_report(
     sanbo_bar = render_kibble_bar(sanbo_pct)
 
     has_identity_conflict = bool(has_tapo_conflict or conflict_frames > 15)
+    has_attribution = bool(
+        dan_pct is not None or dan_kibble is not None or
+        sanbo_pct is not None or sanbo_kibble is not None or
+        has_identity_conflict
+    )
 
     # Build TAPO attribution lines
     tapo_attribution_lines = []
-    if has_identity_conflict:
-        tapo_attribution_lines.append("⚠️ TAPO model attribution — contested")
+    if has_attribution:
+        if has_identity_conflict:
+            tapo_attribution_lines.append("⚠️ TAPO model attribution — contested")
+        else:
+            tapo_attribution_lines.append("TAPO model attribution")
+
+        if dan_pct is not None or dan_kibble is not None:
+            bar_str = f"{dan_bar} " if dan_bar else ""
+            pct_str = f"{dan_pct}%" if dan_pct is not None else ""
+            amt_str = f" (~{dan_kibble})" if dan_kibble is not None else ""
+            tapo_attribution_lines.append(f"Dan    {bar_str}{pct_str}{amt_str}")
+
+            dan_details = []
+            if dan_bowl_time:
+                dan_details.append(f"bowl {dan_bowl_time}")
+            if dan_seen:
+                d_seen_str = str(dan_seen).strip().split()[-1]
+                if not d_seen_str.startswith("~"):
+                    d_seen_str = f"~{d_seen_str}"
+                dan_details.append(f"from {d_seen_str}")
+            if dan_details:
+                tapo_attribution_lines.append(f"       {' · '.join(dan_details)}")
+
+        if sanbo_pct is not None or sanbo_kibble is not None:
+            bar_str = f"{sanbo_bar} " if sanbo_bar else ""
+            pct_str = f"{sanbo_pct}%" if sanbo_pct is not None else ""
+            amt_str = f" (~{sanbo_kibble})" if sanbo_kibble is not None else ""
+            tapo_attribution_lines.append(f"Sanbo  {bar_str}{pct_str}{amt_str}")
+
+            sanbo_details = []
+            if sanbo_bowl_time:
+                sanbo_details.append(f"bowl {sanbo_bowl_time}")
+            if sanbo_seen:
+                s_seen_str = str(sanbo_seen).strip().split()[-1]
+                if not s_seen_str.startswith("~"):
+                    s_seen_str = f"~{s_seen_str}"
+                sanbo_details.append(f"from {s_seen_str}")
+            if sanbo_details:
+                tapo_attribution_lines.append(f"       {' · '.join(sanbo_details)}")
+
+        if has_identity_conflict:
+            c_frames_str = f"{conflict_frames} conflict frames — " if conflict_frames > 0 else ""
+            tapo_attribution_lines.append("")
+            tapo_attribution_lines.append(
+                f"{c_frames_str}this split is camera-model evidence, not reliable enough by itself to prove theft."
+            )
     else:
-        tapo_attribution_lines.append("TAPO model attribution")
-
-    if dan_pct is not None or dan_kibble is not None:
-        bar_str = f"{dan_bar} " if dan_bar else ""
-        pct_str = f"{dan_pct}%" if dan_pct is not None else ""
-        amt_str = f" (~{dan_kibble})" if dan_kibble is not None else ""
-        tapo_attribution_lines.append(f"Dan    {bar_str}{pct_str}{amt_str}")
-
-        dan_details = []
-        if dan_bowl_time:
-            dan_details.append(f"bowl {dan_bowl_time}")
-        if dan_seen:
-            d_seen_str = str(dan_seen).strip().split()[-1]
-            if not d_seen_str.startswith("~"):
-                d_seen_str = f"~{d_seen_str}"
-            dan_details.append(f"from {d_seen_str}")
-        if dan_details:
-            tapo_attribution_lines.append(f"       {' · '.join(dan_details)}")
-
-    if sanbo_pct is not None or sanbo_kibble is not None:
-        bar_str = f"{sanbo_bar} " if sanbo_bar else ""
-        pct_str = f"{sanbo_pct}%" if sanbo_pct is not None else ""
-        amt_str = f" (~{sanbo_kibble})" if sanbo_kibble is not None else ""
-        tapo_attribution_lines.append(f"Sanbo  {bar_str}{pct_str}{amt_str}")
-
-        sanbo_details = []
-        if sanbo_bowl_time:
-            sanbo_details.append(f"bowl {sanbo_bowl_time}")
-        if sanbo_seen:
-            s_seen_str = str(sanbo_seen).strip().split()[-1]
-            if not s_seen_str.startswith("~"):
-                s_seen_str = f"~{s_seen_str}"
-            sanbo_details.append(f"from {s_seen_str}")
-        if sanbo_details:
-            tapo_attribution_lines.append(f"       {' · '.join(sanbo_details)}")
-
-    if has_identity_conflict:
-        c_frames_str = f"{conflict_frames} conflict frames — " if conflict_frames > 0 else ""
-        tapo_attribution_lines.append("")
-        tapo_attribution_lines.append(
-            f"{c_frames_str}this split is camera-model evidence, not reliable enough by itself to prove theft."
-        )
+        tapo_attribution_lines.append("⚠️ TAPO model attribution: unavailable (no source footage/inference)")
 
     # 3. Logitech Evidence Extraction
     logi_cat = logitech_session.get("cat_identity") or logitech_session.get("cat") or "unknown"
@@ -351,7 +372,9 @@ def generate_unified_breakfast_report(
             has_temporal_overlap = True
 
     # Feeder meal outcomes for house section
-    if meal_finished is True:
+    if not tapo_has_evidence:
+        house_dan_feeder = "Unobserved (no TAPO footage)"
+    elif meal_finished is True:
         dan_k_str = f"~{consumed_kibble or total_start_kibble} kibble consumed" if (consumed_kibble or total_start_kibble) else "Food consumed"
         house_dan_feeder = f"{dan_k_str} · Finished ✅"
     elif meal_finished is False:
@@ -371,7 +394,14 @@ def generate_unified_breakfast_report(
     else:
         house_sanbo_feeder = "No feeding observed"
 
-    if has_identity_conflict:
+    if not tapo_has_evidence:
+        if is_sanbo_at_logi:
+            house_identity = f"Unverified at Dan feeder (no TAPO evidence); {logi_cat} verified at Sanbo feeder"
+        elif logi_cat and logi_cat != "unknown":
+            house_identity = f"Unverified at Dan feeder (no TAPO evidence); {logi_cat} observed at Sanbo feeder"
+        else:
+            house_identity = "Unverified (no camera evidence)"
+    elif has_identity_conflict:
         if is_sanbo_at_logi and has_temporal_overlap:
             house_identity = "Dan confirmed at Dan feeder during overlap (Sanbo at own feeder); individual TAPO split contested"
         else:
@@ -379,7 +409,9 @@ def generate_unified_breakfast_report(
     else:
         house_identity = "Dan and Sanbo identities consistent with camera attribution"
 
-    if sanbo_kibble and sanbo_kibble > 5 and not has_identity_conflict and (dan_kibble is None or dan_kibble < 5):
+    if not tapo_has_evidence:
+        house_theft = "Unknown (Dan feeder unobserved)"
+    elif sanbo_kibble and sanbo_kibble > 5 and not has_identity_conflict and (dan_kibble is None or dan_kibble < 5):
         house_theft = "Confirmed: Sanbo ate at Dan feeder"
     elif has_identity_conflict:
         house_theft = "Not confirmed"
@@ -910,8 +942,8 @@ def deliver_unified_breakfast(
                     found_alt = True
                     break
             if not found_alt:
-                if not tapo_clips or not logi_clips:
-                    print(f"⚠️ Missing clips for video render (tapo={len(tapo_clips)}, logi={len(logi_clips)}). Cannot deliver video.")
+                if not tapo_clips and not logi_clips:
+                    print("⚠️ No clips from either camera for video render (tapo=0, logi=0). Cannot deliver video.")
                     return False
 
                 generate_combined_breakfast_video(
@@ -929,7 +961,13 @@ def deliver_unified_breakfast(
             return False
 
         formatted_date = f"{clean_date[:4]}-{clean_date[4:6]}-{clean_date[6:]}" if len(clean_date) == 8 else str(clean_date)
-        caption = f"🍳 {formatted_date} Combined Breakfast · TAPO top · LOGITECH bottom"
+        if tapo_clips and logi_clips:
+            cam_note = "TAPO top · LOGITECH bottom"
+        elif tapo_clips:
+            cam_note = "TAPO top · LOGITECH (No footage)"
+        else:
+            cam_note = "TAPO (No footage) · LOGITECH bottom"
+        caption = f"🍳 {formatted_date} Combined Breakfast · {cam_note}"
         if preview:
             caption = f"[TEST][PREVIEW] {caption}"
 

@@ -92,8 +92,21 @@ def load_durable_artifact(drive_service: Any, folder_id: str, filename: str, loc
     return None
 
 
-def save_durable_artifact(drive_service: Any, folder_id: str, filename: str, content_bytes: bytes, mime_type: str = "application/json", local_fallback_dir: Optional[Path] = None) -> Optional[str]:
-    """Saves or updates a file in Google Drive, and saves to local directory if provided."""
+def save_durable_artifact(
+    drive_service: Any,
+    folder_id: str,
+    filename: str,
+    content_bytes: bytes,
+    mime_type: str = "application/json",
+    local_fallback_dir: Optional[Path] = None,
+    allow_create: bool = False
+) -> Optional[str]:
+    """
+    Saves or updates a file in Google Drive, and saves to local directory if provided.
+    Adheres to project policy: never call Drive create() from CI / Service Accounts,
+    as Service Accounts have 0 byte storage quota. Files must be pre-created by folder owner
+    and updated via Drive update().
+    """
     file_id = None
     if drive_service and folder_id and MediaInMemoryUpload:
         try:
@@ -102,10 +115,16 @@ def save_durable_artifact(drive_service: Any, folder_id: str, filename: str, con
             if existing_id:
                 res = drive_service.files().update(fileId=existing_id, media_body=media, fields="id").execute()
                 file_id = res.get("id")
-            else:
+            elif allow_create:
                 body = {"name": filename, "parents": [folder_id]}
                 res = drive_service.files().create(body=body, media_body=media, fields="id").execute()
                 file_id = res.get("id")
+            else:
+                print(
+                    f"[DeliveryLedger] Notice: '{filename}' not found in Drive folder '{folder_id}'. "
+                    f"CI service accounts cannot create new files in personal Drive folders without storage quota. "
+                    f"Pre-create '{filename}' in Drive to enable cloud persistence. Local fallback preserved."
+                )
         except Exception as e:
             print(f"[DeliveryLedger] Warning saving {filename} to Drive: {e}")
 

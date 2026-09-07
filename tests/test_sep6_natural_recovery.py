@@ -102,6 +102,7 @@ def test_tapo_notebook_produces_structured_summary_and_artifacts(tmp_path):
         "video_results": video_results,
         "Path": Path,
         "OUTPUT_DIR": str(out_dir),
+        "TARGET_DATE": "20260906",
         "_target_date_str": "20260906",
         "_drive_ledger": None,
         "_out_folder_id": "dummy_folder",

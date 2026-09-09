@@ -117,7 +117,8 @@ def generate_unified_breakfast_report(
     target_date: str,
     tapo_summary: Dict[str, Any],
     logitech_session: Dict[str, Any],
-    tapo_raw_text: Optional[str] = None
+    tapo_raw_text: Optional[str] = None,
+    pipeline_artifact_incomplete: bool = False
 ) -> Dict[str, Any]:
     """
     Synthesizes TAPO and Logitech evidence into ONE house-level breakfast analysis.
@@ -132,6 +133,9 @@ def generate_unified_breakfast_report(
     """
     clean_date = str(target_date).replace("-", "").strip()
     formatted_date = f"{clean_date[:4]}-{clean_date[4:6]}-{clean_date[6:]}" if len(clean_date) == 8 else str(target_date)
+
+    if tapo_summary.get("pipeline_artifact_incomplete"):
+        pipeline_artifact_incomplete = True
 
     # Unwrap multi-session container if full shadow summary was passed
     if "sessions" in logitech_session and isinstance(logitech_session["sessions"], list) and logitech_session["sessions"]:
@@ -150,15 +154,16 @@ def generate_unified_breakfast_report(
     span_str = "unknown"
     if start_time != "unknown" and end_time != "unknown":
         try:
-            t0 = datetime.strptime(start_time.strip()[-8:], "%H:%M:%S")
-            t1 = datetime.strptime(end_time.strip()[-8:], "%H:%M:%S")
-            span_sec = max(0, int((t1 - t0).total_seconds()))
-            m, s = divmod(span_sec, 60)
-            span_str = f"{m}m {s}s" if m > 0 else f"{s}s"
+            t0 = datetime.strptime(start_time, "%H:%M:%S")
+            t1 = datetime.strptime(end_time, "%H:%M:%S")
+            sec = int((t1 - t0).total_seconds())
+            if sec >= 0:
+                span_str = f"{sec // 60}m {sec % 60}s" if sec >= 60 else f"{sec}s"
         except Exception:
-            pass
+            span_str = "unknown"
 
-    # 2. Feeder Meal Outcome & TAPO Evidence Extraction
+    # 2. Feeder Meal Outcomes (Independent of Cat Identity)
+    # Extract TAPO metrics directly
     dan_kibble = tapo_summary.get("dan_kibble") if tapo_summary.get("dan_kibble") is not None else tapo_summary.get("dan_kibble_eaten")
     sanbo_kibble = tapo_summary.get("sanbo_kibble") if tapo_summary.get("sanbo_kibble") is not None else tapo_summary.get("sanbo_kibble_eaten")
     dan_pct = tapo_summary.get("dan_percent")
@@ -208,8 +213,12 @@ def generate_unified_breakfast_report(
 
     # TAPO Feeder Meal Outcome line
     if not tapo_has_evidence:
-        tapo_meal_status_str = "unavailable"
-        tapo_meal_line = "🥣 Meal: evidence unavailable (no TAPO footage or analysis)"
+        if pipeline_artifact_incomplete:
+            tapo_meal_status_str = "artifact incomplete"
+            tapo_meal_line = "🥣 Meal: evidence unavailable (pipeline artifact incomplete)"
+        else:
+            tapo_meal_status_str = "unavailable"
+            tapo_meal_line = "🥣 Meal: evidence unavailable (no TAPO footage or analysis)"
     elif meal_finished is True:
         tapo_meal_status_str = "Finished ✅"
         if total_start_kibble is not None and total_end_kibble is not None:
@@ -295,7 +304,12 @@ def generate_unified_breakfast_report(
                 f"{c_frames_str}this split is camera-model evidence, not reliable enough by itself to prove theft."
             )
     else:
-        tapo_attribution_lines.append("⚠️ TAPO model attribution: unavailable (no source footage/inference)")
+        if pipeline_artifact_incomplete:
+            tapo_attribution_lines.append(
+                "⚠️ TAPO model attribution: pipeline artifact incomplete (upstream analysis succeeded but clips/summary missing from artifact)"
+            )
+        else:
+            tapo_attribution_lines.append("⚠️ TAPO model attribution: unavailable (no source footage/inference)")
 
     # 3. Logitech Evidence Extraction
     logi_cat = logitech_session.get("cat_identity") or logitech_session.get("cat") or "unknown"
@@ -373,7 +387,10 @@ def generate_unified_breakfast_report(
 
     # Feeder meal outcomes for house section
     if not tapo_has_evidence:
-        house_dan_feeder = "Unobserved (no TAPO footage)"
+        if pipeline_artifact_incomplete:
+            house_dan_feeder = "Unobserved (artifact incomplete)"
+        else:
+            house_dan_feeder = "Unobserved (no TAPO footage)"
     elif meal_finished is True:
         dan_k_str = f"~{consumed_kibble or total_start_kibble} kibble consumed" if (consumed_kibble or total_start_kibble) else "Food consumed"
         house_dan_feeder = f"{dan_k_str} · Finished ✅"
@@ -395,12 +412,20 @@ def generate_unified_breakfast_report(
         house_sanbo_feeder = "No feeding observed"
 
     if not tapo_has_evidence:
-        if is_sanbo_at_logi:
-            house_identity = f"Unverified at Dan feeder (no TAPO evidence); {logi_cat} verified at Sanbo feeder"
-        elif logi_cat and logi_cat != "unknown":
-            house_identity = f"Unverified at Dan feeder (no TAPO evidence); {logi_cat} observed at Sanbo feeder"
+        if pipeline_artifact_incomplete:
+            if is_sanbo_at_logi:
+                house_identity = f"Unverified at Dan feeder (artifact incomplete); {logi_cat} verified at Sanbo feeder"
+            elif logi_cat and logi_cat != "unknown":
+                house_identity = f"Unverified at Dan feeder (artifact incomplete); {logi_cat} observed at Sanbo feeder"
+            else:
+                house_identity = "Unverified (artifact incomplete)"
         else:
-            house_identity = "Unverified (no camera evidence)"
+            if is_sanbo_at_logi:
+                house_identity = f"Unverified at Dan feeder (no TAPO evidence); {logi_cat} verified at Sanbo feeder"
+            elif logi_cat and logi_cat != "unknown":
+                house_identity = f"Unverified at Dan feeder (no TAPO evidence); {logi_cat} observed at Sanbo feeder"
+            else:
+                house_identity = "Unverified (no camera evidence)"
     elif has_identity_conflict:
         if is_sanbo_at_logi and has_temporal_overlap:
             house_identity = "Dan confirmed at Dan feeder during overlap (Sanbo at own feeder); individual TAPO split contested"
@@ -410,7 +435,10 @@ def generate_unified_breakfast_report(
         house_identity = "Dan and Sanbo identities consistent with camera attribution"
 
     if not tapo_has_evidence:
-        house_theft = "Unknown (Dan feeder unobserved)"
+        if pipeline_artifact_incomplete:
+            house_theft = "Unknown (Dan feeder artifact incomplete)"
+        else:
+            house_theft = "Unknown (Dan feeder unobserved)"
     elif sanbo_kibble and sanbo_kibble > 5 and not has_identity_conflict and (dan_kibble is None or dan_kibble < 5):
         house_theft = "Confirmed: Sanbo ate at Dan feeder"
     elif has_identity_conflict:
@@ -843,7 +871,11 @@ def deliver_unified_breakfast(
     # Step 2: Ingest TAPO Artifacts
     tapo_summary = {}
     tapo_clips = []
-    tapo_search_dirs = [d for d in [tapo_dir, Path("/tmp/output"), Path("scratch/replay_sep5"), Path(".")] if d and Path(d).exists()]
+    tapo_timeline = {}
+    if tapo_dir and Path(tapo_dir).exists():
+        tapo_search_dirs = [Path(tapo_dir)]
+    else:
+        tapo_search_dirs = [d for d in [Path("/tmp/output"), Path("scratch/replay_sep5"), Path(".")] if d.exists()]
 
     for d in tapo_search_dirs:
         sum_p = Path(d) / f"tapo_summary_{clean_date}.json"
@@ -863,16 +895,43 @@ def deliver_unified_breakfast(
             if "raw_summary_text" in tapo_summary:
                 break
 
+    for d in tapo_search_dirs:
+        tl_p = Path(d) / f"tapo_timeline_{clean_date}.json"
+        if tl_p.exists():
+            try:
+                tapo_timeline = json.loads(tl_p.read_text(encoding="utf-8"))
+                break
+            except Exception:
+                pass
+
+    if not tapo_timeline and registry and "dates" in registry and clean_date in registry["dates"]:
+        tapo_timeline = registry["dates"][clean_date].get("tapo_timeline", {})
+
     # Collect TAPO video clips
     for d in tapo_search_dirs:
         for vid in sorted(Path(d).glob(f"*{clean_date}*.mp4")):
             if "combined" not in vid.name and "annotated" not in vid.name and vid not in tapo_clips:
                 tapo_clips.append(vid)
 
+    # Check for pipeline integrity omission:
+    # If tapo_timeline recorded feeding phases upstream, but summary or clips are missing from artifact bundle:
+    upstream_feeding = bool(tapo_timeline and tapo_timeline.get("feeding_phases") and len(tapo_timeline["feeding_phases"]) > 0)
+    pipeline_artifact_incomplete = False
+    if upstream_feeding:
+        if not tapo_summary or len(tapo_clips) == 0:
+            pipeline_artifact_incomplete = True
+            print(
+                f"[Pipeline Integrity Error] Upstream TAPO evidence was detected in timeline but omitted from delivery artifact bundle "
+                f"(summary_present={bool(tapo_summary)}, clips_count={len(tapo_clips)})"
+            )
+
     # Step 3: Ingest Logitech Artifacts
     logitech_summary = {}
     logi_clips = []
-    logi_search_dirs = [d for d in [logitech_dir, Path(f"/tmp/logitech_vlm_shadow_{clean_date}"), Path("scratch/replay_sep5"), Path(".")] if d and Path(d).exists()]
+    if logitech_dir and Path(logitech_dir).exists():
+        logi_search_dirs = [Path(logitech_dir)]
+    else:
+        logi_search_dirs = [d for d in [Path(f"/tmp/logitech_vlm_shadow_{clean_date}"), Path("scratch/replay_sep5"), Path(".")] if d.exists()]
 
     for d in logi_search_dirs:
         for candidate_name in ["logitech_vlm_session_summary.json", "logitech_vlm_shadow_summary.json", "summary.json"]:
@@ -892,10 +951,21 @@ def deliver_unified_breakfast(
                 logi_clips.append(vid)
 
     # Step 4: Generate House-Level Report
-    report = generate_unified_breakfast_report(clean_date, tapo_summary, logitech_summary)
+    report = generate_unified_breakfast_report(
+        clean_date,
+        tapo_summary,
+        logitech_summary,
+        pipeline_artifact_incomplete=pipeline_artifact_incomplete
+    )
     summary_text = report["telegram_text"]
     if preview:
         summary_text = f"[TEST][PREVIEW] Unified Breakfast UX · Sep-5 fixture\n\n{summary_text}"
+
+    # Save structured unified report JSON to out_dir for inspection and CI artifact upload
+    try:
+        (out_dir / f"unified_report_{clean_date}.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[UnifiedBreakfast] Warning saving unified report JSON: {e}")
 
     # Step 5: Item-Level Delivery
     base_tg = f"https://api.telegram.org/bot{bot_token}" if bot_token else None

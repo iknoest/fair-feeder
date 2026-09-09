@@ -164,9 +164,15 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
           GDRIVE_UPLOAD_FOLDER_ID: ${{ secrets.GDRIVE_UPLOAD_FOLDER_ID }}
-          GDRIVE_OUTPUT_FOLDER_ID: ${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}
         run: |
           python scripts/send_tapo_replay_test.py
+
+      - name: Validate TAPO evidence artifact bundle
+        if: env.preflight_status != 'SKIP' && needs.prepare.outputs.target_date != 'REPLAY_TEST'
+        run: |
+          python scripts/validate_tapo_artifact.py \
+            --evidence-dir /tmp/output \
+            --date "${{ needs.prepare.outputs.target_date }}"
 
       - name: Upload TAPO evidence artifact
         if: always()

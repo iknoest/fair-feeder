@@ -455,11 +455,13 @@ from typing import Union, List, Optional, Tuple, Dict, Any
 
 def select_identity_keyframes(
     session_clip_paths: Any,
-    max_keyframes: int = 2
+    max_keyframes: int = 3,
+    min_sep: float = 10.0
 ) -> List[Dict[str, Any]]:
     """
     Deterministically selects up to `max_keyframes` sharp, high-contrast frames where
-    the cat's body and coat pattern are substantially visible (avoiding extreme bowl occlusion / head-in-bowl).
+    the cat's body and coat pattern are substantially visible (avoiding empty feeder hardware,
+    bowl rim reflections, and extreme bowl occlusion / head-in-bowl).
     """
     paths = []
     if isinstance(session_clip_paths, (str, Path)):
@@ -478,6 +480,9 @@ def select_identity_keyframes(
     session_clip_paths.sort(key=lambda p: p.name)
 
     candidates = []
+    fallback_candidates = []
+    total_session_seconds = 0.0
+
     for clip_p in session_clip_paths:
         cap = cv2.VideoCapture(str(clip_p))
         if hasattr(cap, "isOpened") and not cap.isOpened():
@@ -488,6 +493,8 @@ def select_identity_keyframes(
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1000
         if total_frames <= 0 or total_frames > 20000:
             total_frames = 20000
+        total_session_seconds += total_frames / fps
+
         f_idx = 0
         while f_idx < total_frames:
             ret, frame = cap.read()
@@ -496,45 +503,75 @@ def select_identity_keyframes(
             if f_idx % 5 == 0:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 h, w = gray.shape
-                # Body region below bowl (roughly y: 35%-95%, x: 15%-85%)
-                body_roi = gray[int(h * 0.35):int(h * 0.95), int(w * 0.15):int(w * 0.85)]
-                lap = float(cv2.Laplacian(body_roi, cv2.CV_64F).var())
-                var_val = float(np.var(body_roi))
-                mean_val = float(np.mean(body_roi))
-                # Only consider frames with non-trivial body presence
-                if mean_val > 4.5 and var_val > 15.0:
-                    score = lap * (var_val ** 0.5)
-                    sec = round(f_idx / fps, 1)
-                    candidates.append({
-                        "clip_name": clip_p.name,
-                        "frame_index": f_idx,
-                        "seconds_from_start": sec,
-                        "score": score,
-                        "laplacian_var": lap,
-                        "body_var": var_val,
-                        "frame_raw": frame,
-                    })
+
+                # Upper body ROI (y: 0% to 60%, x: 10% to 90%)
+                upper_roi = gray[0:int(h * 0.60), int(w * 0.10):int(w * 0.90)]
+                # Bowl ROI (y: 45% to 85%, x: 30% to 70%)
+                bowl_roi = gray[int(h * 0.45):int(h * 0.85), int(w * 0.30):int(w * 0.70)]
+
+                u_mean = float(np.mean(upper_roi))
+                b_mean = float(np.mean(bowl_roi))
+                ratio = b_mean / (u_mean + 1e-5)
+                u_var = float(np.var(upper_roi))
+                lap = float(cv2.Laplacian(upper_roi, cv2.CV_64F).var())
+
+                sec = round(f_idx / fps, 1)
+                score = u_var * (u_mean ** 0.5)
+
+                candidate_obj = {
+                    "clip_name": clip_p.name,
+                    "frame_index": f_idx,
+                    "seconds_from_start": sec,
+                    "score": score,
+                    "laplacian_var": lap,
+                    "body_var": u_var,
+                    "u_mean": u_mean,
+                    "bowl_mean": b_mean,
+                    "ratio": ratio,
+                    "frame_raw": frame,
+                }
+                fallback_candidates.append(candidate_obj)
+
+                # Empty feeder rejection:
+                # 1. Empty bowl is bright plastic (ratio > 2.2) and upper background is dark (u_mean < 3.8)
+                if ratio > 2.2 and u_mean < 3.8:
+                    f_idx += 1
+                    continue
+                # 2. Insufficient cat presence in upper ROI (very dark and high ratio)
+                if u_mean < 3.2 and ratio >= 1.8:
+                    f_idx += 1
+                    continue
+
+                if score > 5.0:
+                    candidates.append(candidate_obj)
+
             f_idx += 1
         cap.release()
 
-    if not candidates:
+    pool = candidates if candidates else fallback_candidates
+    if not pool:
         return []
 
-    # Sort descending by composite clarity/texture score
-    candidates.sort(key=lambda x: x["score"], reverse=True)
+    # Sort descending by composite score
+    pool.sort(key=lambda x: x["score"], reverse=True)
 
-    # Select top keyframes separated by at least 5 seconds
+    # Dynamic temporal separation for short clips vs long sessions
+    effective_sep = min(min_sep, max(1.5, total_session_seconds / (max_keyframes + 1)))
+
     selected = []
-    for c in candidates:
+    for c in pool:
         if not selected:
             selected.append(c)
         else:
-            if all(abs(c["seconds_from_start"] - s["seconds_from_start"]) >= 5.0 or c["clip_name"] != s["clip_name"] for s in selected):
+            if all(abs(c["seconds_from_start"] - s["seconds_from_start"]) >= effective_sep or c["clip_name"] != s["clip_name"] for s in selected):
                 selected.append(c)
                 if len(selected) >= max_keyframes:
                     break
 
-    # Apply enhancement to selected keyframes
+    # Sort chronologically
+    selected.sort(key=lambda x: x["seconds_from_start"])
+
+    # Enhance selected frames
     for s in selected:
         s["frame_enhanced"] = enhance_image_gamma_clahe(s["frame_raw"], gamma=2.5)
 
@@ -2029,7 +2066,7 @@ def main():
 
         # Extract dedicated identity keyframes (body/coat pattern)
         session_raw_clips = [out_dir / f['name'] for f in session_clips if (out_dir / f['name']).exists()]
-        id_keyframes = select_identity_keyframes(session_raw_clips, max_keyframes=2)
+        id_keyframes = select_identity_keyframes(session_raw_clips, max_keyframes=3)
         for k_idx, kf in enumerate(id_keyframes, 1):
             kf_path = out_dir / f"logitech_vlm_identity_{s_name}_{k_idx}_enhanced.jpg"
             cv2.imwrite(str(kf_path), kf["frame_enhanced"])
@@ -2156,7 +2193,7 @@ def main():
                                         h = hashlib.sha256(f.read()).hexdigest()
                                     ref_metadata.append({"cat": cat, "basename": img.name, "sha256": h})
                     # 1. Add dedicated Identity Evidence keyframes (high-res body/coat features)
-                    for k_idx in [1, 2]:
+                    for k_idx in range(1, 6):
                         kf_p = out_dir / f"logitech_vlm_identity_{s_name}_{k_idx}_enhanced.jpg"
                         if not kf_p.exists():
                             kf_p = out_dir / f"logitech_vlm_identity_session_{k_idx}_enhanced.jpg"

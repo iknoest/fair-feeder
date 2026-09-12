@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       target_date: ${{ steps.set-date.outputs.target_date }}
+      already_delivered: ${{ steps.check-delivered.outputs.already_delivered }}
     steps:
       - name: Determine Target Date
         id: set-date
@@ -28,8 +29,56 @@ jobs:
           echo "target_date=${TARGET_DATE}" >> "$GITHUB_OUTPUT"
           echo "Determined Target Date: ${TARGET_DATE}"
 
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Check Breakfast Delivery Status
+        id: check-delivered
+        env:
+          TARGET_DATE: ${{ steps.set-date.outputs.target_date }}
+          GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
+          GDRIVE_OUTPUT_FOLDER_ID: ${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}
+        run: |
+          if [ "${TARGET_DATE}" = "REPLAY_TEST" ]; then
+            echo "already_delivered=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pip install --no-cache-dir google-auth google-api-python-client
+          python - <<'PY'
+          import os, json
+          target_date = os.environ.get("TARGET_DATE")
+          key_json = os.environ.get("GDRIVE_SERVICE_ACCOUNT_KEY")
+          folder_id = os.environ.get("GDRIVE_OUTPUT_FOLDER_ID")
+          gh_output = os.environ.get("GITHUB_OUTPUT")
+
+          already_delivered = "false"
+          if key_json and folder_id and target_date:
+              try:
+                  from google.oauth2 import service_account
+                  from googleapiclient.discovery import build
+                  from scripts.delivery_ledger import is_breakfast_fully_delivered
+
+                  creds = service_account.Credentials.from_service_account_info(
+                      json.loads(key_json), scopes=['https://www.googleapis.com/auth/drive']
+                  )
+                  drive_service = build('drive', 'v3', credentials=creds)
+                  if is_breakfast_fully_delivered(drive_service, folder_id, target_date):
+                      already_delivered = "true"
+                      print(f"✅ Preflight: Breakfast for {target_date} is already fully delivered according to durable registry.")
+                  else:
+                      print(f"ℹ️ Preflight: Breakfast for {target_date} is not yet delivered.")
+              except Exception as e:
+                  print(f"⚠️ Preflight check encountered error (failing open): {e}")
+
+          if gh_output:
+              with open(gh_output, "a") as f:
+                  f.write(f"already_delivered={already_delivered}\n")
+          print(f"already_delivered={already_delivered}")
+          PY
+
   tapo-report:
     needs: prepare
+    if: needs.prepare.outputs.already_delivered != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:
@@ -107,7 +156,7 @@ jobs:
             echo "preflight_status=PROCEED" >> "$GITHUB_ENV"
             exit 0
           fi
-          python - <<'PY' >> "$GITHUB_ENV"
+          python - <<'PY'
           import os
           from pathlib import Path
           from google.oauth2 import service_account
@@ -118,23 +167,33 @@ jobs:
           key_json = os.environ.get("GDRIVE_SERVICE_ACCOUNT_KEY")
           folder_id = os.environ.get("GDRIVE_OUTPUT_FOLDER_ID")
           target_date = os.environ.get("TARGET_DATE")
-          drive_service = None
-          if key_json:
-              creds = service_account.Credentials.from_service_account_info(
-                  json.loads(key_json), scopes=['https://www.googleapis.com/auth/drive']
-              )
-              drive_service = build('drive', 'v3', credentials=creds)
+          gh_env = os.environ.get("GITHUB_ENV")
+          status = "PROCEED"
 
-          if is_breakfast_fully_delivered(drive_service, folder_id, target_date):
-              print("preflight_status=SKIP")
-              print(f"✅ Preflight: Breakfast for {target_date} already fully delivered according to durable registry. Skipping analysis.")
-          else:
-              ledger = load_delivery_ledger(drive_service, folder_id, target_date, "TAPO")
-              if is_camera_fully_delivered(ledger):
-                  print("preflight_status=SKIP")
-                  print(f"✅ Preflight: TAPO report for {target_date} already fully delivered. Skipping analysis.")
+          try:
+              drive_service = None
+              if key_json:
+                  creds = service_account.Credentials.from_service_account_info(
+                      json.loads(key_json), scopes=['https://www.googleapis.com/auth/drive']
+                  )
+                  drive_service = build('drive', 'v3', credentials=creds)
+
+              if is_breakfast_fully_delivered(drive_service, folder_id, target_date):
+                  status = "SKIP"
+                  print(f"✅ Preflight: Breakfast for {target_date} already fully delivered according to durable registry. Skipping analysis.")
               else:
-                  print("preflight_status=PROCEED")
+                  ledger = load_delivery_ledger(drive_service, folder_id, target_date, "TAPO")
+                  if is_camera_fully_delivered(ledger):
+                      status = "SKIP"
+                      print(f"✅ Preflight: TAPO report for {target_date} already fully delivered. Skipping analysis.")
+                  else:
+                      print(f"ℹ️ Preflight: TAPO analysis needed for {target_date}.")
+          except Exception as e:
+              print(f"⚠️ Preflight error (failing open): {e}")
+
+          if gh_env:
+              with open(gh_env, "a") as f:
+                  f.write(f"preflight_status={status}\n")
           PY
 
       - name: Run analysis notebook
@@ -219,7 +278,7 @@ jobs:
 
   logitech-report:
     needs: [prepare, tapo-report]
-    if: always() && !cancelled()
+    if: needs.prepare.outputs.already_delivered != 'true' && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 45
     concurrency:
@@ -287,6 +346,47 @@ jobs:
           echo "GDRIVE_OUTPUT_FOLDER_ID=${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}" >> "$GITHUB_ENV"
           echo "TARGET_DATE=${{ needs.prepare.outputs.target_date }}" >> "$GITHUB_ENV"
 
+      - name: Check Logitech Delivery Ledger Preflight
+        id: preflight
+        env:
+          GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
+          GDRIVE_OUTPUT_FOLDER_ID: ${{ secrets.GDRIVE_OUTPUT_FOLDER_ID }}
+        run: |
+          if [ "${{ needs.prepare.outputs.target_date }}" == "REPLAY_TEST" ]; then
+            echo "preflight_status=PROCEED" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          python - <<'PY'
+          import os, json
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from scripts.delivery_ledger import is_breakfast_fully_delivered
+
+          key_json = os.environ.get("GDRIVE_SERVICE_ACCOUNT_KEY")
+          folder_id = os.environ.get("GDRIVE_OUTPUT_FOLDER_ID")
+          target_date = os.environ.get("TARGET_DATE")
+          gh_env = os.environ.get("GITHUB_ENV")
+          status = "PROCEED"
+
+          try:
+              if key_json and folder_id and target_date:
+                  creds = service_account.Credentials.from_service_account_info(
+                      json.loads(key_json), scopes=['https://www.googleapis.com/auth/drive']
+                  )
+                  drive_service = build('drive', 'v3', credentials=creds)
+                  if is_breakfast_fully_delivered(drive_service, folder_id, target_date):
+                      status = "SKIP"
+                      print(f"✅ Preflight: Breakfast for {target_date} already fully delivered. Skipping Logitech VLM.")
+                  else:
+                      print(f"ℹ️ Preflight: Logitech processing needed for {target_date}.")
+          except Exception as e:
+              print(f"⚠️ Preflight check encountered error (failing open): {e}")
+
+          if gh_env:
+              with open(gh_env, "a") as f:
+                  f.write(f"preflight_status={status}\n")
+          PY
+
       - name: Download TAPO evidence artifact
         continue-on-error: true
         uses: actions/download-artifact@v6
@@ -295,6 +395,7 @@ jobs:
           path: /tmp/output
 
       - name: Run Logitech Gemini VLM Shadow Report
+        if: env.preflight_status != 'SKIP'
         env:
           GDRIVE_SERVICE_ACCOUNT_KEY: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_KEY }}
           GDRIVE_LOGITECH_FOLDER_ID: ${{ secrets.GDRIVE_LOGITECH_FOLDER_ID }}
@@ -339,7 +440,7 @@ jobs:
           rm -rf "$REF_DIR"
 
       - name: Upload Logitech evidence artifact
-        if: always()
+        if: always() && env.preflight_status != 'SKIP'
         continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
@@ -383,7 +484,7 @@ jobs:
 
   unified-delivery:
     needs: [prepare, tapo-report, logitech-report]
-    if: always() && !cancelled() && needs.prepare.result == 'success'
+    if: needs.prepare.outputs.already_delivered != 'true' && !cancelled() && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:

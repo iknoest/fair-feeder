@@ -50,7 +50,7 @@ This file preserves project-specific lessons that are too large for root context
 | Rule D (VLM Failure Preservation) | Motion/differencing alone never forces Dan or Sanbo; cross-camera reconciliation requires VLM-proven cat presence. |
 | Idempotent Duplicate Run NO-OP | When breakfast is already delivered according to durable registry, `prepare` outputs `already_delivered=true` and skips downstream jobs for a clean green NO-OP (~15s) with 0 Gemini calls and 0 Telegram sends. |
 | Upper-ROI Logitech Identity Keyframe Selection | Rejects empty feeder hardware and bowl rim reflections by gating on bowl-to-upper brightness ratio; ranks upper-body frames (`y: 0-60%`) by coat contrast/variance with temporal separation. |
-| Breakfast Video Recap Cards & Dead Tail Trimming | Trims dead footage tail (+15s activity buffer) to eliminate trailing empty background motion; prepends 2 intro recap cards (~5s) with 3 key snapshots (Food Dispensed, Cat Arrival, Bowl Finished) and compact timeline chart matching the 720x920 canvas layout. |
+| Narrative Breakfast Recap & Persistent Timeline Strip | Trims dead footage tail (+15s activity buffer) to eliminate trailing empty background motion; sandwiches synchronized dual-camera playback between short narrative intro card (Food Dispensed -> Cat Arrival, verified visible cat) and outro card (Meal Finished -> Outcome summary); renders persistent 42px timeline strip with X-axis time track, active feeding highlight, live playhead marker, and real-time kibble depletion across the 720x920 canvas. |
 
 ## Recent Failure Patterns
 

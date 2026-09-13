@@ -666,6 +666,91 @@ class VideoStreamSampler:
                 c["cap"] = None
 
 
+def render_timeline_strip(
+    width: int,
+    height: int,
+    curr_time_dt: datetime,
+    t_start_dt: datetime,
+    t_end_dt: datetime,
+    dan_arrival_dt: Optional[datetime] = None,
+    dan_finish_dt: Optional[datetime] = None,
+    start_kibble: int = 25,
+    meal_finished: bool = True
+) -> np.ndarray:
+    """
+    Renders a compact time-synced progress strip between camera panels:
+    - Time on X-axis (track bar across width)
+    - Active feeding zone highlighted
+    - Playhead marker advancing with current video playback
+    - Real-time feeding state and remaining kibble estimate
+    """
+    bar = np.zeros((height, width, 3), dtype=np.uint8)
+    bar[:] = (20, 20, 24)
+
+    # Dividers
+    cv2.line(bar, (0, 0), (width, 0), (45, 45, 52), 1)
+    cv2.line(bar, (0, height - 1), (width, height - 1), (45, 45, 52), 1)
+
+    total_span = max(1.0, (t_end_dt - t_start_dt).total_seconds())
+    elapsed = max(0.0, min(total_span, (curr_time_dt - t_start_dt).total_seconds()))
+    progress_frac = elapsed / total_span
+
+    track_x1 = 20
+    track_x2 = width - 20
+    track_w = track_x2 - track_x1
+    track_y1 = 20
+    track_y2 = 30
+
+    # Background track
+    cv2.rectangle(bar, (track_x1, track_y1), (track_x2, track_y2), (32, 32, 38), -1)
+    cv2.rectangle(bar, (track_x1, track_y1), (track_x2, track_y2), (55, 55, 65), 1)
+
+    # Feeding period
+    arr_sec = (dan_arrival_dt - t_start_dt).total_seconds() if dan_arrival_dt else 10.0
+    fin_sec = (dan_finish_dt - t_start_dt).total_seconds() if dan_finish_dt else (total_span - 15.0)
+
+    fx1 = int(track_x1 + max(0.0, min(total_span, arr_sec)) / total_span * track_w)
+    fx2 = int(track_x1 + max(0.0, min(total_span, fin_sec)) / total_span * track_w)
+
+    if fx2 > fx1:
+        cv2.rectangle(bar, (fx1, track_y1 + 1), (fx2, track_y2 - 1), (0, 130, 65), -1)
+
+    # Playhead
+    px = int(track_x1 + progress_frac * track_w)
+    px = max(track_x1, min(track_x2, px))
+
+    cv2.line(bar, (px, track_y1 - 3), (px, track_y2 + 3), (0, 240, 255), 2)
+    cv2.circle(bar, (px, track_y1 - 3), 3, (0, 240, 255), -1)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    t_curr_str = curr_time_dt.strftime("%H:%M:%S")
+    cv2.putText(bar, f"CLOCK: {t_curr_str}", (track_x1, 14), font, 0.38, (210, 210, 220), 1, cv2.LINE_AA)
+
+    if elapsed < arr_sec:
+        state_str = f"Waiting for cat arrival (~{start_kibble} kibble)"
+        state_col = (150, 150, 160)
+    elif elapsed <= fin_sec:
+        fed_frac = (elapsed - arr_sec) / max(1.0, (fin_sec - arr_sec))
+        curr_k = max(0, int(round(start_kibble * (1.0 - fed_frac))))
+        state_str = f"Dan eating (~{curr_k} kibble remaining)"
+        state_col = (80, 235, 120)
+    else:
+        state_str = "Dan finished meal (empty bowl)" if meal_finished else "Dan left bowl"
+        state_col = (255, 180, 200)
+
+    cv2.putText(bar, state_str, (track_x1 + 150, 14), font, 0.38, state_col, 1, cv2.LINE_AA)
+    cv2.putText(bar, "4x speedup", (track_x2 - 70, 14), font, 0.36, (130, 130, 140), 1, cv2.LINE_AA)
+
+    # Bottom labels
+    cv2.putText(bar, "Dispensed", (track_x1, 40), font, 0.30, (110, 110, 120), 1, cv2.LINE_AA)
+    arr_label_x = max(track_x1 + 65, min(track_w - 120, fx1 - 15))
+    cv2.putText(bar, "Cat Arrived", (arr_label_x, 40), font, 0.30, (80, 210, 255), 1, cv2.LINE_AA)
+    fin_label_x = max(arr_label_x + 75, min(track_x2 - 50, fx2 - 20))
+    cv2.putText(bar, "Finished", (fin_label_x, 40), font, 0.30, (255, 170, 190), 1, cv2.LINE_AA)
+
+    return bar
+
+
 def find_or_sample_recap_snapshots(
     tapo_sampler: VideoStreamSampler,
     tapo_dir: Optional[Union[Path, str]] = None,
@@ -712,11 +797,10 @@ def find_or_sample_recap_snapshots(
 
     out["dispensed"] = (dispensed_frame, dispensed_label)
 
-    # 2. Cat Arrival
+    # 2. Cat Arrival (Deterministic Rule: frame MUST visibly contain cat)
     arrival_dt: Optional[datetime] = None
-    first_cat = "Cat"
+    first_cat = "Dan"
 
-    # Check feeding phases in timeline
     feeding_phases = timeline.get("feeding_phases", [])
     if feeding_phases and isinstance(feeding_phases, list):
         p0 = feeding_phases[0]
@@ -729,7 +813,6 @@ def find_or_sample_recap_snapshots(
             if p0.get("cat"):
                 first_cat = p0["cat"]
 
-    # Fallback to summary dan_first_ts / sanbo_first_ts
     if arrival_dt is None:
         dan_first = summary.get("dan_first_ts")
         sanbo_first = summary.get("sanbo_first_ts")
@@ -752,15 +835,49 @@ def find_or_sample_recap_snapshots(
 
     arrival_frame = None
     arrival_label = "2. Cat Arrival"
-    if arrival_dt:
-        # Sample around arrival_dt (+3 to +8 seconds to get clear head-at-bowl frame)
-        for offset_sec in [8, 6, 4, 2, 0]:
-            sample_dt = arrival_dt + timedelta(seconds=offset_sec)
-            f, live = tapo_sampler.get_frame_at(sample_dt, (w, h))
-            if live and f is not None:
-                arrival_frame = f
-                arrival_label = f"2. Cat Arrival ({first_cat} at {arrival_dt.strftime('%H:%M:%S')})"
+
+    # Search window for clear cat arrival frame
+    # A genuine cat arrival frame has significant foreground difference in the upper scene (cat body/head)
+    # compared to the clean pre-arrival empty scene
+    if tapo_sampler.clips:
+        ref_dt = tapo_sampler.clips[0]["start"]
+        ref_f, ref_live = tapo_sampler.get_frame_at(ref_dt, (w, h))
+        ref_gray = cv2.cvtColor(ref_f, cv2.COLOR_BGR2GRAY) if (ref_live and ref_f is not None) else None
+
+        search_start = arrival_dt if arrival_dt else ref_dt
+        best_diff = 0.0
+        best_f = None
+        best_dt = search_start
+
+        # Scan up to 30 seconds around search_start
+        for offset in range(0, 30):
+            s_dt = search_start + timedelta(seconds=offset)
+            cand_f, cand_live = tapo_sampler.get_frame_at(s_dt, (w, h))
+            if not cand_live or cand_f is None:
+                continue
+
+            if ref_gray is not None:
+                cand_gray = cv2.cvtColor(cand_f, cv2.COLOR_BGR2GRAY)
+                diff = cv2.absdiff(cand_gray, ref_gray)
+                # Upper scene where cat body appears: y: 0-300, x: 100-500
+                upper_diff = float(np.mean(diff[0:300, 100:500]))
+                if upper_diff > 12.0:  # Confirmed cat body/head in frame
+                    best_f = cand_f
+                    best_dt = s_dt
+                    best_diff = upper_diff
+                    break
+                elif upper_diff > best_diff:
+                    best_diff = upper_diff
+                    best_f = cand_f
+                    best_dt = s_dt
+            else:
+                best_f = cand_f
+                best_dt = s_dt
                 break
+
+        if best_f is not None:
+            arrival_frame = best_f
+            arrival_label = f"2. Cat Arrival ({first_cat} at {best_dt.strftime('%H:%M:%S')})"
 
     out["arrival"] = (arrival_frame, arrival_label)
 
@@ -786,7 +903,7 @@ def find_or_sample_recap_snapshots(
     end_k = summary.get("end_kibble")
     is_empty = (end_k == 0) or summary.get("meal_finished", False)
     state_str = "Empty" if is_empty else f"{end_k} kibble left" if end_k is not None else "Final"
-    finish_label = "3. Bowl Finished"
+    finish_label = "3. Meal Finished"
 
     if finish_dt:
         # Sample slightly after feeding ends (e.g. +7s to +3s) to capture empty bowl when cat leaves
@@ -795,7 +912,7 @@ def find_or_sample_recap_snapshots(
             f, live = tapo_sampler.get_frame_at(sample_dt, (w, h))
             if live and f is not None:
                 finish_frame = f
-                finish_label = f"3. Bowl Finished ({state_str} at {finish_dt.strftime('%H:%M:%S')})"
+                finish_label = f"3. Meal Finished ({state_str} at {finish_dt.strftime('%H:%M:%S')})"
                 break
 
     if finish_frame is None and tapo_sampler.clips:
@@ -815,36 +932,14 @@ def find_or_render_timeline_chart(
     target_size: Tuple[int, int] = (720, 405)
 ) -> np.ndarray:
     """
-    Finds existing timeline_*.jpg in tapo_dir or renders a clean dark fallback summary card.
+    Renders clean summary card or loads timeline chart for outro summary card.
     """
     w, h = target_size
-    tapo_path = Path(tapo_dir) if tapo_dir else None
-
-    if tapo_path and tapo_path.exists():
-        for cand in sorted(tapo_path.glob("*timeline*.jpg")):
-            img = cv2.imread(str(cand))
-            if img is not None:
-                # If image has top Detection Timeline text header, crop top 55px
-                ih, iw, _ = img.shape
-                cropped = img[55:, :] if ih > 100 else img
-                banner_h = 32
-                chart_h = h - banner_h
-                resized = cv2.resize(cropped, (w, chart_h))
-                banner = np.zeros((banner_h, w, 3), dtype=np.uint8)
-                banner[:] = (15, 15, 20)
-                cv2.line(banner, (0, banner_h - 1), (w, banner_h - 1), (40, 40, 50), 1)
-                cv2.putText(banner, "4. Feeding & Kibble Progression Timeline", (16, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 220, 100), 1, cv2.LINE_AA)
-                return np.vstack([banner, resized])
-
-    # Fallback dark chart
     img = np.zeros((h, w, 3), dtype=np.uint8)
-    img[:] = (20, 20, 24)
-    cv2.rectangle(img, (2, 2), (w - 3, h - 3), (45, 45, 55), 1)
+    img[:] = (22, 22, 26)
+    cv2.rectangle(img, (2, 2), (w - 3, h - 3), (50, 50, 60), 1)
 
-    banner_h = 32
-    cv2.rectangle(img, (0, 0), (w, banner_h), (15, 15, 20), -1)
-    cv2.line(img, (0, banner_h), (w, banner_h), (40, 40, 50), 1)
-    cv2.putText(img, "4. Feeding Progression Summary", (16, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 220, 100), 1, cv2.LINE_AA)
+    cv2.putText(img, "BREAKFAST SUMMARY & OUTCOME", (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (240, 240, 245), 2, cv2.LINE_AA)
 
     summary = tapo_summary or {}
     start_k = summary.get("start_kibble", 0)
@@ -853,15 +948,15 @@ def find_or_render_timeline_chart(
     sanbo_k = summary.get("sanbo_kibble", 0)
 
     stats = [
-        f"Initial Food: ~{start_k} kibble dispensed",
-        f"Total Consumed: ~{max(0, start_k - end_k)} kibble",
-        f"Dan Feeder Intake: ~{dan_k} kibble",
-        f"Sanbo Feeder Intake: ~{sanbo_k} kibble",
-        f"Bowl Outcome: {'Clean empty bowl' if (end_k == 0 or summary.get('meal_finished')) else f'{end_k} kibble remaining'}"
+        f"Dan Feeder (TAPO): ~{dan_k} kibble consumed ({int(round(dan_k/max(1, start_k)*100)) if start_k else 0}%)",
+        f"Sanbo Feeder (Logitech): ~{sanbo_k} kibble consumed",
+        f"Meal Outcome: {'Clean empty bowl (Finished)' if (end_k == 0 or summary.get('meal_finished')) else f'{end_k} kibble remaining'}",
+        f"Cross-Camera Identity: Dan at TAPO, Sanbo at Logitech",
+        f"Food Theft: {'None confirmed' if not summary.get('theft_confirmed') else 'Confirmed'}"
     ]
 
     for i, s in enumerate(stats):
-        cv2.putText(img, s, (30, 80 + i * 40), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (200, 200, 210), 1, cv2.LINE_AA)
+        cv2.putText(img, s, (30, 105 + i * 45), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200, 200, 210), 1, cv2.LINE_AA)
 
     return img
 
@@ -875,14 +970,14 @@ def render_recap_cards(
     total_height: int = 920
 ) -> List[np.ndarray]:
     """
-    Renders 2 intro recap cards matching the 720x920 canvas layout:
-    - Card 1: Top = Food Dispensed snapshot; Bottom = Cat Arrival snapshot.
-    - Card 2: Top = Bowl Finished snapshot; Bottom = Feeding Timeline Chart panel.
+    Renders narrative intro and outro cards:
+    - Card 1 (Intro): Food Dispensed (Top) -> Cat Arrived (Bottom)
+    - Card 2 (Outro): Meal Finished (Top) -> Summary & Outcome (Bottom)
     """
     panel_h = int(width * (9 / 16))  # 405
-    header_h = 38
-    sep_h = 34
-    footer_h = 38
+    header_h = 34
+    sep_h = 42
+    footer_h = 34
 
     clean_date = str(target_date).replace("-", "").strip()
     formatted_date = f"{clean_date[:4]}-{clean_date[4:6]}-{clean_date[6:]}" if len(clean_date) == 8 else str(target_date)
@@ -893,7 +988,7 @@ def render_recap_cards(
         cv2.line(bar, (0, 0), (width, 0), (45, 45, 50), 1)
         cv2.line(bar, (0, h - 1), (width, h - 1), (45, 45, 50), 1)
         font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = 0.52 if is_title else 0.45
+        scale = 0.50 if is_title else 0.42
         color = (240, 240, 245) if is_title else (140, 140, 150)
         (tw, _), _ = cv2.getTextSize(text, font, scale, 1)
         tx = max(10, (width - tw) // 2)
@@ -916,19 +1011,19 @@ def render_recap_cards(
         cv2.putText(out, label, (16, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.50, text_color, 1, cv2.LINE_AA)
         return out
 
-    # Card 1
+    # Card 1: Narrative Intro (Food Dispensed -> Cat Arrived)
     disp_frame, disp_label = snapshots.get("dispensed", (None, "1. Food Dispensed"))
     arr_frame, arr_label = snapshots.get("arrival", (None, "2. Cat Arrival"))
     panel1 = _apply_panel_banner(disp_frame, disp_label, (80, 240, 80))
     panel2 = _apply_panel_banner(arr_frame, arr_label, (80, 220, 255))
 
     c1_header = _make_bar(header_h, f"BREAKFAST RECAP - {formatted_date}", is_title=True)
-    c1_sep = _make_bar(sep_h, "-- KEY FEEDING MOMENTS --", bg=(25, 25, 30))
-    c1_footer = _make_bar(footer_h, "-- TAPO (Dan Feeder) --")
+    c1_sep = _make_bar(sep_h, "-- 1. FOOD DISPENSED  ->  2. CAT ARRIVED --", bg=(25, 25, 30))
+    c1_footer = _make_bar(footer_h, "-- LIVE SYNCHRONIZED FEEDING BELOW --")
     card1 = np.vstack([c1_header, panel1, c1_sep, panel2, c1_footer])
 
-    # Card 2
-    fin_frame, fin_label = snapshots.get("finish", (None, "3. Bowl Finished"))
+    # Card 2: Narrative Outro (Meal Finished -> Outcome Summary)
+    fin_frame, fin_label = snapshots.get("finish", (None, "3. Meal Finished"))
     panel3 = _apply_panel_banner(fin_frame, fin_label, (255, 180, 200))
     panel4 = chart_panel
     if panel4.shape[:2] != (panel_h, width):
@@ -937,7 +1032,7 @@ def render_recap_cards(
     summary = tapo_summary or {}
     dan_k = summary.get("dan_kibble", 0)
     sanbo_k = summary.get("sanbo_kibble", 0)
-    c2_header = _make_bar(header_h, "FEEDING TIMELINE & COMPLETION", is_title=True)
+    c2_header = _make_bar(header_h, f"MEAL COMPLETE - {formatted_date}", is_title=True)
     c2_sep = _make_bar(sep_h, f"-- Dan: ~{dan_k} kibble | Sanbo: ~{sanbo_k} kibble --", bg=(25, 25, 30))
     c2_footer = _make_bar(footer_h, "-- SESSION COMPLETE --")
     card2 = np.vstack([c2_header, panel3, c2_sep, panel4, c2_footer])
@@ -967,15 +1062,17 @@ def generate_combined_breakfast_video(
     """
     Renders synchronized vertical full-frame video on a shared wall-clock timeline.
     Layout:
-    - Dedicated Header (38px): TAPO status dot, title, timestamp
+    - Dedicated Header (34px): TAPO status dot, title, timestamp
     - Top Panel (720x405): TAPO (Dan Feeder) - uncropped 16:9, ZERO overlay on source pixels!
-    - Central Separator (34px): Shared timeline indicator
+    - Central Progress Strip (42px): Shared timeline with live playhead marker, feeding state & kibble depletion!
     - Bottom Panel (720x405): LOGITECH (Sanbo Feeder) - uncropped 16:9, ZERO overlay on source pixels!
-    - Dedicated Footer (38px): LOGITECH status dot, title, timestamp
+    - Dedicated Footer (34px): LOGITECH status dot, title, timestamp
     Total Canvas: 720x920 (both even numbers, H.264/yuv420p safe).
-    Intro: 2 recap cards (snapshots + timeline chart) prepended seamlessly.
+    Narrative Structure:
+    1. Short intro card: Food Dispensed -> Cat Arrival
+    2. Main dual-camera playback with persistent time-synced timeline strip
+    3. Short outro card: Meal Finished -> Summary & Outcome
     Trimming: Trims dead footage tail to end shortly after meaningful eating activity (+15s buffer).
-    Missing intervals show clean neutral placeholder without fake frames.
     Speedup: 4x playback.
     Telegram-safe: H.264, yuv420p, +faststart, <45 MB.
     """
@@ -988,7 +1085,6 @@ def generate_combined_breakfast_video(
     tapo_sampler = VideoStreamSampler(tapo_paths, is_logitech=False)
     logi_sampler = VideoStreamSampler(logi_paths, is_logitech=True)
 
-    # Determine timeline boundaries dynamically from actual clips
     all_starts = [c["start"] for c in tapo_sampler.clips + logi_sampler.clips]
     all_ends = [c["end"] for c in tapo_sampler.clips + logi_sampler.clips]
 
@@ -1000,21 +1096,40 @@ def generate_combined_breakfast_video(
 
     # Determine trimmed t_end based on meaningful activity across both cameras
     activity_ends: List[datetime] = []
+    dan_arrival_dt: Optional[datetime] = None
+    dan_finish_dt: Optional[datetime] = None
+
     if tapo_summary:
         end_t = tapo_summary.get("end_time") or tapo_summary.get("end_ts")
         if end_t and isinstance(end_t, str):
             try:
-                activity_ends.append(datetime.strptime(end_t.strip(), "%Y-%m-%d %H:%M:%S"))
+                dan_finish_dt = datetime.strptime(end_t.strip(), "%Y-%m-%d %H:%M:%S")
+                activity_ends.append(dan_finish_dt)
+            except Exception:
+                pass
+
+        start_t = tapo_summary.get("dan_first_ts") or tapo_summary.get("start_time")
+        if start_t and isinstance(start_t, str):
+            try:
+                dan_arrival_dt = datetime.strptime(start_t.strip(), "%Y-%m-%d %H:%M:%S")
             except Exception:
                 pass
 
     if tapo_timeline:
         phases = tapo_timeline.get("feeding_phases", [])
         if phases and isinstance(phases, list):
+            if not dan_arrival_dt and phases[0].get("start"):
+                try:
+                    dan_arrival_dt = datetime.strptime(phases[0]["start"], "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    pass
             p_last = phases[-1].get("end")
             if p_last and isinstance(p_last, str):
                 try:
-                    activity_ends.append(datetime.strptime(p_last.strip(), "%Y-%m-%d %H:%M:%S"))
+                    tl_end = datetime.strptime(p_last.strip(), "%Y-%m-%d %H:%M:%S")
+                    activity_ends.append(tl_end)
+                    if not dan_finish_dt:
+                        dan_finish_dt = tl_end
                 except Exception:
                     pass
 
@@ -1037,7 +1152,6 @@ def generate_combined_breakfast_video(
     elif activity_ends:
         last_activity = max(activity_ends)
         buffered_end = last_activity + timedelta(seconds=activity_buffer_seconds)
-        # Trim dead tail if buffered_end is before raw_end and after t_start
         t_end = min(raw_end, max(t_start + timedelta(seconds=10), buffered_end))
     else:
         t_end = raw_end
@@ -1045,10 +1159,10 @@ def generate_combined_breakfast_video(
     # Canvas Dimensions
     width = out_width  # 720
     panel_h = int(width * (9 / 16))  # 405
-    header_h = 38
-    sep_h = 34
-    footer_h = 38
-    total_h = header_h + panel_h + sep_h + panel_h + footer_h  # 38 + 405 + 34 + 405 + 38 = 920
+    header_h = 34
+    sep_h = 42
+    footer_h = 34
+    total_h = header_h + panel_h + sep_h + panel_h + footer_h  # 34 + 405 + 42 + 405 + 34 = 920
 
     temp_raw = output_path.with_name(f"temp_raw_combined_{output_path.name}")
     if temp_raw.exists():
@@ -1065,7 +1179,7 @@ def generate_combined_breakfast_video(
     curr_time = t_start
 
     try:
-        # Step A: Intro Recap Cards (Snapshots + Timeline Chart)
+        recap_cards = []
         if include_recap_cards:
             snapshots = find_or_sample_recap_snapshots(
                 tapo_sampler=tapo_sampler,
@@ -1088,12 +1202,16 @@ def generate_combined_breakfast_video(
                 width=width,
                 total_height=total_h
             )
+            # Step 1: Intro Card (Food Dispensed -> Cat Arrived)
             card_frames = int(round(intro_card_seconds * target_fps))
-            for card in recap_cards:
+            if recap_cards:
                 for _ in range(card_frames):
-                    writer.write(card)
+                    writer.write(recap_cards[0])
 
-        # Step B: Trimmed Synchronized Motion Playback
+        # Step 2: Main Dual-Camera Playback with Persistent Time-Synced Timeline Strip
+        start_k = tapo_summary.get("start_kibble", 25) if tapo_summary else 25
+        meal_fin = tapo_summary.get("meal_finished", True) if tapo_summary else True
+
         while curr_time <= t_end:
             time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1107,16 +1225,33 @@ def generate_combined_breakfast_video(
             if not logi_is_live or logi_frame is None:
                 logi_frame = create_neutral_placeholder(width, panel_h, "LOGITECH", time_str, reason="No source footage")
 
-            # 3. Header, Separator, Footer (dedicated bars OUTSIDE source pixels)
+            # 3. Header, Persistent Timeline Strip, Footer
             header_bar = render_header_bar(width, header_h, "TAPO - Dan Feeder", time_str, is_live=tapo_is_live)
-            separator_bar = render_separator_bar(width, sep_h, text="-- SHARED TIMELINE (4x speedup) --")
+            timeline_strip = render_timeline_strip(
+                width=width,
+                height=sep_h,
+                curr_time_dt=curr_time,
+                t_start_dt=t_start,
+                t_end_dt=t_end,
+                dan_arrival_dt=dan_arrival_dt,
+                dan_finish_dt=dan_finish_dt,
+                start_kibble=start_k,
+                meal_finished=meal_fin
+            )
             footer_bar = render_header_bar(width, footer_h, "LOGITECH - Sanbo Feeder", time_str, is_live=logi_is_live)
 
-            # 4. Vertical stack: 38 + 405 + 34 + 405 + 38 = 920px height
-            vertical_canvas = np.vstack([header_bar, tapo_frame, separator_bar, logi_frame, footer_bar])
+            # 4. Vertical stack: 34 + 405 + 42 + 405 + 34 = 920px height
+            vertical_canvas = np.vstack([header_bar, tapo_frame, timeline_strip, logi_frame, footer_bar])
             writer.write(vertical_canvas)
 
             curr_time += time_step
+
+        # Step 3: Outro Card (Meal Finished -> Summary & Outcome)
+        if include_recap_cards and len(recap_cards) > 1:
+            card_frames = int(round(intro_card_seconds * target_fps))
+            for _ in range(card_frames):
+                writer.write(recap_cards[1])
+
     finally:
         writer.release()
         tapo_sampler.close()

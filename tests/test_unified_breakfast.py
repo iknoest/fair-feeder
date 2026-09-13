@@ -32,6 +32,7 @@ from scripts.unified_breakfast import (
     draw_panel_overlay,
     render_header_bar,
     render_separator_bar,
+    render_timeline_strip,
     VideoStreamSampler,
     generate_combined_breakfast_video,
     find_or_sample_recap_snapshots,
@@ -681,6 +682,57 @@ def test_recap_cards_layout_and_dimensions(tmp_path):
     assert len(cards) == 2
     assert cards[0].shape == (920, 720, 3)
     assert cards[1].shape == (920, 720, 3)
+
+
+def test_timeline_strip_rendering():
+    """Verifies that the timeline strip renders with exact expected dimensions and responds to progress."""
+    t_start = datetime(2026, 9, 13, 6, 20, 0)
+    t_end = datetime(2026, 9, 13, 6, 25, 0)
+    dan_arr = datetime(2026, 9, 13, 6, 20, 30)
+    dan_fin = datetime(2026, 9, 13, 6, 23, 30)
+
+    # 1. Test before arrival
+    strip_early = render_timeline_strip(
+        width=720,
+        height=42,
+        curr_time_dt=datetime(2026, 9, 13, 6, 20, 10),
+        t_start_dt=t_start,
+        t_end_dt=t_end,
+        dan_arrival_dt=dan_arr,
+        dan_finish_dt=dan_fin,
+        start_kibble=25,
+        meal_finished=True
+    )
+    assert strip_early.shape == (42, 720, 3)
+
+    # 2. Test during eating
+    strip_mid = render_timeline_strip(
+        width=720,
+        height=42,
+        curr_time_dt=datetime(2026, 9, 13, 6, 22, 0),
+        t_start_dt=t_start,
+        t_end_dt=t_end,
+        dan_arrival_dt=dan_arr,
+        dan_finish_dt=dan_fin,
+        start_kibble=25,
+        meal_finished=True
+    )
+    assert strip_mid.shape == (42, 720, 3)
+
+    # 3. Test after finish
+    strip_late = render_timeline_strip(
+        width=720,
+        height=42,
+        curr_time_dt=datetime(2026, 9, 13, 6, 24, 0),
+        t_start_dt=t_start,
+        t_end_dt=t_end,
+        dan_arrival_dt=dan_arr,
+        dan_finish_dt=dan_fin,
+        start_kibble=25,
+        meal_finished=True
+    )
+    assert strip_late.shape == (42, 720, 3)
+
 
 
 

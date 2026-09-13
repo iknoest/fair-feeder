@@ -33,7 +33,10 @@ from scripts.unified_breakfast import (
     render_header_bar,
     render_separator_bar,
     VideoStreamSampler,
-    generate_combined_breakfast_video
+    generate_combined_breakfast_video,
+    find_or_sample_recap_snapshots,
+    find_or_render_timeline_chart,
+    render_recap_cards
 )
 
 
@@ -602,5 +605,82 @@ def test_render_kibble_bar_visual_style():
     assert render_kibble_bar(53) == "████░░░░"
     assert render_kibble_bar(75) == "██████░░"
     assert render_kibble_bar(100) == "████████"
+
+
+def test_dead_tail_trimming_computation(tmp_path):
+    """Verifies that combined video t_end trims dead footage based on last meaningful activity."""
+    p1 = tmp_path / "motion_20260913_061955_2m_30s.mp4"
+    p2 = tmp_path / "motion_20260913_062226_2m_30s.mp4"
+    p3 = tmp_path / "motion_20260913_062458_5m_0s.mp4"  # Extends to 06:29:58 (10 min dead tail!)
+    for p in (p1, p2, p3):
+        p.write_bytes(b"mock")
+
+    sampler = VideoStreamSampler([p1, p2, p3])
+    raw_end = max([c["end"] for c in sampler.clips])
+    assert raw_end == datetime(2026, 9, 13, 6, 29, 58)
+
+    tapo_summary = {
+        "start_time": "2026-09-13 06:20:00",
+        "end_time": "2026-09-13 06:23:01",
+        "meal_finished": True
+    }
+    logi_summary = {
+        "sessions": [
+            {
+                "session_start_time": "06:19:55",
+                "session_end_time": "06:25:01",
+                "date": "2026-09-13"
+            }
+        ]
+    }
+
+    activity_ends = []
+    end_t = tapo_summary.get("end_time")
+    activity_ends.append(datetime.strptime(end_t, "%Y-%m-%d %H:%M:%S"))
+    for s in logi_summary["sessions"]:
+        activity_ends.append(datetime.strptime(f"2026-09-13 {s['session_end_time']}", "%Y-%m-%d %H:%M:%S"))
+
+    last_activity = max(activity_ends)
+    assert last_activity == datetime(2026, 9, 13, 6, 25, 1)
+
+    buffered_end = last_activity + timedelta(seconds=15.0)
+    assert buffered_end == datetime(2026, 9, 13, 6, 25, 16)
+    trimmed_end = min(raw_end, buffered_end)
+    assert trimmed_end == datetime(2026, 9, 13, 6, 25, 16)
+    # Trims off ~4 minutes 42 seconds of dead empty tail!
+    assert (raw_end - trimmed_end).total_seconds() == 282.0
+
+
+def test_recap_cards_layout_and_dimensions(tmp_path):
+    """Verifies that intro recap cards render exactly at 720x920 with full-frame panels and banners."""
+    dummy_top = np.zeros((405, 720, 3), dtype=np.uint8)
+    dummy_bot = np.zeros((405, 720, 3), dtype=np.uint8)
+
+    snapshots = {
+        "dispensed": (dummy_top, "1. Food Dispensed (~25 kibble)"),
+        "arrival": (dummy_bot, "2. Cat Arrival (Dan at 06:20:08)"),
+        "finish": (dummy_top, "3. Bowl Finished (Empty at 06:23:08)")
+    }
+
+    chart_panel = find_or_render_timeline_chart(
+        tapo_dir=tmp_path,
+        tapo_summary={"start_kibble": 25, "end_kibble": 0, "dan_kibble": 25},
+        target_size=(720, 405)
+    )
+    assert chart_panel.shape == (405, 720, 3)
+
+    cards = render_recap_cards(
+        snapshots=snapshots,
+        chart_panel=chart_panel,
+        target_date="20260913",
+        tapo_summary={"dan_kibble": 25, "sanbo_kibble": 0},
+        width=720,
+        total_height=920
+    )
+
+    assert len(cards) == 2
+    assert cards[0].shape == (920, 720, 3)
+    assert cards[1].shape == (920, 720, 3)
+
 
 

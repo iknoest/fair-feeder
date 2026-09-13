@@ -666,6 +666,285 @@ class VideoStreamSampler:
                 c["cap"] = None
 
 
+def find_or_sample_recap_snapshots(
+    tapo_sampler: VideoStreamSampler,
+    tapo_dir: Optional[Union[Path, str]] = None,
+    tapo_summary: Optional[Dict[str, Any]] = None,
+    tapo_timeline: Optional[Dict[str, Any]] = None,
+    target_size: Tuple[int, int] = (720, 405)
+) -> Dict[str, Tuple[Optional[np.ndarray], str]]:
+    """
+    Finds existing pre-rendered snapshots from tapo_dir or samples them from tapo_sampler.
+    Returns dict of {
+        'dispensed': (frame, label),
+        'arrival': (frame, label),
+        'finish': (frame, label)
+    }
+    """
+    w, h = target_size
+    tapo_path = Path(tapo_dir) if tapo_dir else None
+    summary = tapo_summary or {}
+    timeline = tapo_timeline or {}
+
+    out: Dict[str, Tuple[Optional[np.ndarray], str]] = {
+        "dispensed": (None, "1. Food Dispensed"),
+        "arrival": (None, "2. Cat Arrival"),
+        "finish": (None, "3. Bowl Finished")
+    }
+
+    start_k = summary.get("start_kibble")
+    dispensed_label = f"1. Food Dispensed (~{start_k} kibble)" if start_k is not None else "1. Food Dispensed"
+
+    # 1. Food Dispensed
+    dispensed_frame = None
+    if tapo_path and tapo_path.exists():
+        for cand in sorted(tapo_path.glob("*kibble_dispensed*.jpg")):
+            img = cv2.imread(str(cand))
+            if img is not None:
+                dispensed_frame = cv2.resize(img, (w, h))
+                break
+
+    if dispensed_frame is None and tapo_sampler.clips:
+        first_clip_start = tapo_sampler.clips[0]["start"]
+        f, live = tapo_sampler.get_frame_at(first_clip_start, (w, h))
+        if live and f is not None:
+            dispensed_frame = f
+
+    out["dispensed"] = (dispensed_frame, dispensed_label)
+
+    # 2. Cat Arrival
+    arrival_dt: Optional[datetime] = None
+    first_cat = "Cat"
+
+    # Check feeding phases in timeline
+    feeding_phases = timeline.get("feeding_phases", [])
+    if feeding_phases and isinstance(feeding_phases, list):
+        p0 = feeding_phases[0]
+        p0_start = p0.get("start")
+        if p0_start:
+            try:
+                arrival_dt = datetime.strptime(p0_start, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+            if p0.get("cat"):
+                first_cat = p0["cat"]
+
+    # Fallback to summary dan_first_ts / sanbo_first_ts
+    if arrival_dt is None:
+        dan_first = summary.get("dan_first_ts")
+        sanbo_first = summary.get("sanbo_first_ts")
+        candidates = []
+        if dan_first and isinstance(dan_first, str):
+            try:
+                dt = datetime.strptime(dan_first.strip(), "%Y-%m-%d %H:%M:%S")
+                candidates.append((dt, "Dan"))
+            except Exception:
+                pass
+        if sanbo_first and isinstance(sanbo_first, str):
+            try:
+                dt = datetime.strptime(sanbo_first.strip(), "%Y-%m-%d %H:%M:%S")
+                candidates.append((dt, "Sanbo"))
+            except Exception:
+                pass
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            arrival_dt, first_cat = candidates[0]
+
+    arrival_frame = None
+    arrival_label = "2. Cat Arrival"
+    if arrival_dt:
+        # Sample around arrival_dt (+3 to +8 seconds to get clear head-at-bowl frame)
+        for offset_sec in [8, 6, 4, 2, 0]:
+            sample_dt = arrival_dt + timedelta(seconds=offset_sec)
+            f, live = tapo_sampler.get_frame_at(sample_dt, (w, h))
+            if live and f is not None:
+                arrival_frame = f
+                arrival_label = f"2. Cat Arrival ({first_cat} at {arrival_dt.strftime('%H:%M:%S')})"
+                break
+
+    out["arrival"] = (arrival_frame, arrival_label)
+
+    # 3. Bowl Finished
+    finish_dt: Optional[datetime] = None
+    end_t_str = summary.get("end_time") or summary.get("end_ts")
+    if end_t_str and isinstance(end_t_str, str):
+        try:
+            finish_dt = datetime.strptime(end_t_str.strip(), "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+
+    if finish_dt is None and feeding_phases:
+        p_last = feeding_phases[-1]
+        p_end = p_last.get("end")
+        if p_end:
+            try:
+                finish_dt = datetime.strptime(p_end, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+
+    finish_frame = None
+    end_k = summary.get("end_kibble")
+    is_empty = (end_k == 0) or summary.get("meal_finished", False)
+    state_str = "Empty" if is_empty else f"{end_k} kibble left" if end_k is not None else "Final"
+    finish_label = "3. Bowl Finished"
+
+    if finish_dt:
+        # Sample slightly after feeding ends (e.g. +7s to +3s) to capture empty bowl when cat leaves
+        for offset_sec in [7, 5, 3, 0, -2]:
+            sample_dt = finish_dt + timedelta(seconds=offset_sec)
+            f, live = tapo_sampler.get_frame_at(sample_dt, (w, h))
+            if live and f is not None:
+                finish_frame = f
+                finish_label = f"3. Bowl Finished ({state_str} at {finish_dt.strftime('%H:%M:%S')})"
+                break
+
+    if finish_frame is None and tapo_sampler.clips:
+        last_clip_end = tapo_sampler.clips[-1]["end"]
+        f, live = tapo_sampler.get_frame_at(last_clip_end - timedelta(seconds=1), (w, h))
+        if live and f is not None:
+            finish_frame = f
+
+    out["finish"] = (finish_frame, finish_label)
+    return out
+
+
+def find_or_render_timeline_chart(
+    tapo_dir: Optional[Union[Path, str]] = None,
+    tapo_summary: Optional[Dict[str, Any]] = None,
+    tapo_timeline: Optional[Dict[str, Any]] = None,
+    target_size: Tuple[int, int] = (720, 405)
+) -> np.ndarray:
+    """
+    Finds existing timeline_*.jpg in tapo_dir or renders a clean dark fallback summary card.
+    """
+    w, h = target_size
+    tapo_path = Path(tapo_dir) if tapo_dir else None
+
+    if tapo_path and tapo_path.exists():
+        for cand in sorted(tapo_path.glob("*timeline*.jpg")):
+            img = cv2.imread(str(cand))
+            if img is not None:
+                # If image has top Detection Timeline text header, crop top 55px
+                ih, iw, _ = img.shape
+                cropped = img[55:, :] if ih > 100 else img
+                banner_h = 32
+                chart_h = h - banner_h
+                resized = cv2.resize(cropped, (w, chart_h))
+                banner = np.zeros((banner_h, w, 3), dtype=np.uint8)
+                banner[:] = (15, 15, 20)
+                cv2.line(banner, (0, banner_h - 1), (w, banner_h - 1), (40, 40, 50), 1)
+                cv2.putText(banner, "4. Feeding & Kibble Progression Timeline", (16, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 220, 100), 1, cv2.LINE_AA)
+                return np.vstack([banner, resized])
+
+    # Fallback dark chart
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+    img[:] = (20, 20, 24)
+    cv2.rectangle(img, (2, 2), (w - 3, h - 3), (45, 45, 55), 1)
+
+    banner_h = 32
+    cv2.rectangle(img, (0, 0), (w, banner_h), (15, 15, 20), -1)
+    cv2.line(img, (0, banner_h), (w, banner_h), (40, 40, 50), 1)
+    cv2.putText(img, "4. Feeding Progression Summary", (16, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 220, 100), 1, cv2.LINE_AA)
+
+    summary = tapo_summary or {}
+    start_k = summary.get("start_kibble", 0)
+    end_k = summary.get("end_kibble", 0)
+    dan_k = summary.get("dan_kibble", 0)
+    sanbo_k = summary.get("sanbo_kibble", 0)
+
+    stats = [
+        f"Initial Food: ~{start_k} kibble dispensed",
+        f"Total Consumed: ~{max(0, start_k - end_k)} kibble",
+        f"Dan Feeder Intake: ~{dan_k} kibble",
+        f"Sanbo Feeder Intake: ~{sanbo_k} kibble",
+        f"Bowl Outcome: {'Clean empty bowl' if (end_k == 0 or summary.get('meal_finished')) else f'{end_k} kibble remaining'}"
+    ]
+
+    for i, s in enumerate(stats):
+        cv2.putText(img, s, (30, 80 + i * 40), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (200, 200, 210), 1, cv2.LINE_AA)
+
+    return img
+
+
+def render_recap_cards(
+    snapshots: Dict[str, Tuple[Optional[np.ndarray], str]],
+    chart_panel: np.ndarray,
+    target_date: str,
+    tapo_summary: Optional[Dict[str, Any]] = None,
+    width: int = 720,
+    total_height: int = 920
+) -> List[np.ndarray]:
+    """
+    Renders 2 intro recap cards matching the 720x920 canvas layout:
+    - Card 1: Top = Food Dispensed snapshot; Bottom = Cat Arrival snapshot.
+    - Card 2: Top = Bowl Finished snapshot; Bottom = Feeding Timeline Chart panel.
+    """
+    panel_h = int(width * (9 / 16))  # 405
+    header_h = 38
+    sep_h = 34
+    footer_h = 38
+
+    clean_date = str(target_date).replace("-", "").strip()
+    formatted_date = f"{clean_date[:4]}-{clean_date[4:6]}-{clean_date[6:]}" if len(clean_date) == 8 else str(target_date)
+
+    def _make_bar(h: int, text: str, is_title: bool = False, bg: Tuple[int, int, int] = (20, 20, 24)) -> np.ndarray:
+        bar = np.zeros((h, width, 3), dtype=np.uint8)
+        bar[:] = bg
+        cv2.line(bar, (0, 0), (width, 0), (45, 45, 50), 1)
+        cv2.line(bar, (0, h - 1), (width, h - 1), (45, 45, 50), 1)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.52 if is_title else 0.45
+        color = (240, 240, 245) if is_title else (140, 140, 150)
+        (tw, _), _ = cv2.getTextSize(text, font, scale, 1)
+        tx = max(10, (width - tw) // 2)
+        ty = (h // 2) + 5
+        cv2.putText(bar, text, (tx, ty), font, scale, color, 1, cv2.LINE_AA)
+        return bar
+
+    def _apply_panel_banner(frame: Optional[np.ndarray], label: str, text_color: Tuple[int, int, int]) -> np.ndarray:
+        if frame is None:
+            p = np.zeros((panel_h, width, 3), dtype=np.uint8)
+            p[:] = (25, 25, 30)
+            cv2.putText(p, f"[{label} - Not Available]", (width // 4, panel_h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (120, 120, 130), 1, cv2.LINE_AA)
+            return p
+        out = frame.copy()
+        if out.shape[:2] != (panel_h, width):
+            out = cv2.resize(out, (width, panel_h))
+        banner_h = 32
+        cv2.rectangle(out, (0, 0), (width, banner_h), (15, 15, 20), -1)
+        cv2.line(out, (0, banner_h), (width, banner_h), (40, 40, 50), 1)
+        cv2.putText(out, label, (16, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.50, text_color, 1, cv2.LINE_AA)
+        return out
+
+    # Card 1
+    disp_frame, disp_label = snapshots.get("dispensed", (None, "1. Food Dispensed"))
+    arr_frame, arr_label = snapshots.get("arrival", (None, "2. Cat Arrival"))
+    panel1 = _apply_panel_banner(disp_frame, disp_label, (80, 240, 80))
+    panel2 = _apply_panel_banner(arr_frame, arr_label, (80, 220, 255))
+
+    c1_header = _make_bar(header_h, f"BREAKFAST RECAP - {formatted_date}", is_title=True)
+    c1_sep = _make_bar(sep_h, "-- KEY FEEDING MOMENTS --", bg=(25, 25, 30))
+    c1_footer = _make_bar(footer_h, "-- TAPO (Dan Feeder) --")
+    card1 = np.vstack([c1_header, panel1, c1_sep, panel2, c1_footer])
+
+    # Card 2
+    fin_frame, fin_label = snapshots.get("finish", (None, "3. Bowl Finished"))
+    panel3 = _apply_panel_banner(fin_frame, fin_label, (255, 180, 200))
+    panel4 = chart_panel
+    if panel4.shape[:2] != (panel_h, width):
+        panel4 = cv2.resize(panel4, (width, panel_h))
+
+    summary = tapo_summary or {}
+    dan_k = summary.get("dan_kibble", 0)
+    sanbo_k = summary.get("sanbo_kibble", 0)
+    c2_header = _make_bar(header_h, "FEEDING TIMELINE & COMPLETION", is_title=True)
+    c2_sep = _make_bar(sep_h, f"-- Dan: ~{dan_k} kibble | Sanbo: ~{sanbo_k} kibble --", bg=(25, 25, 30))
+    c2_footer = _make_bar(footer_h, "-- SESSION COMPLETE --")
+    card2 = np.vstack([c2_header, panel3, c2_sep, panel4, c2_footer])
+
+    return [card1, card2]
+
+
 def generate_combined_breakfast_video(
     tapo_clips: List[Union[Path, str]],
     logitech_clips: List[Union[Path, str]],
@@ -675,7 +954,15 @@ def generate_combined_breakfast_video(
     out_width: int = 720,
     target_fps: float = 16.0,
     start_time_override: Optional[datetime] = None,
-    end_time_override: Optional[datetime] = None
+    end_time_override: Optional[datetime] = None,
+    tapo_dir: Optional[Union[Path, str]] = None,
+    logitech_dir: Optional[Union[Path, str]] = None,
+    tapo_summary: Optional[Dict[str, Any]] = None,
+    tapo_timeline: Optional[Dict[str, Any]] = None,
+    logitech_summary: Optional[Dict[str, Any]] = None,
+    include_recap_cards: bool = True,
+    intro_card_seconds: float = 2.5,
+    activity_buffer_seconds: float = 15.0
 ) -> Path:
     """
     Renders synchronized vertical full-frame video on a shared wall-clock timeline.
@@ -686,6 +973,8 @@ def generate_combined_breakfast_video(
     - Bottom Panel (720x405): LOGITECH (Sanbo Feeder) - uncropped 16:9, ZERO overlay on source pixels!
     - Dedicated Footer (38px): LOGITECH status dot, title, timestamp
     Total Canvas: 720x920 (both even numbers, H.264/yuv420p safe).
+    Intro: 2 recap cards (snapshots + timeline chart) prepended seamlessly.
+    Trimming: Trims dead footage tail to end shortly after meaningful eating activity (+15s buffer).
     Missing intervals show clean neutral placeholder without fake frames.
     Speedup: 4x playback.
     Telegram-safe: H.264, yuv420p, +faststart, <45 MB.
@@ -707,7 +996,51 @@ def generate_combined_breakfast_video(
         raise ValueError("No valid source video clips found to build combined video")
 
     t_start = start_time_override or min(all_starts)
-    t_end = end_time_override or max(all_ends)
+    raw_end = max(all_ends)
+
+    # Determine trimmed t_end based on meaningful activity across both cameras
+    activity_ends: List[datetime] = []
+    if tapo_summary:
+        end_t = tapo_summary.get("end_time") or tapo_summary.get("end_ts")
+        if end_t and isinstance(end_t, str):
+            try:
+                activity_ends.append(datetime.strptime(end_t.strip(), "%Y-%m-%d %H:%M:%S"))
+            except Exception:
+                pass
+
+    if tapo_timeline:
+        phases = tapo_timeline.get("feeding_phases", [])
+        if phases and isinstance(phases, list):
+            p_last = phases[-1].get("end")
+            if p_last and isinstance(p_last, str):
+                try:
+                    activity_ends.append(datetime.strptime(p_last.strip(), "%Y-%m-%d %H:%M:%S"))
+                except Exception:
+                    pass
+
+    if logitech_summary:
+        sessions = logitech_summary.get("sessions", []) if "sessions" in logitech_summary else [logitech_summary]
+        for s in sessions:
+            if isinstance(s, dict):
+                s_end = s.get("session_end_time") or s.get("end_time")
+                s_date = s.get("date") or target_date
+                if s_end and isinstance(s_end, str):
+                    try:
+                        clean_d = str(s_date).replace("-", "").strip()
+                        dt_str = f"{clean_d[:4]}-{clean_d[4:6]}-{clean_d[6:]} {s_end.strip()}"
+                        activity_ends.append(datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S"))
+                    except Exception:
+                        pass
+
+    if end_time_override:
+        t_end = end_time_override
+    elif activity_ends:
+        last_activity = max(activity_ends)
+        buffered_end = last_activity + timedelta(seconds=activity_buffer_seconds)
+        # Trim dead tail if buffered_end is before raw_end and after t_start
+        t_end = min(raw_end, max(t_start + timedelta(seconds=10), buffered_end))
+    else:
+        t_end = raw_end
 
     # Canvas Dimensions
     width = out_width  # 720
@@ -732,6 +1065,35 @@ def generate_combined_breakfast_video(
     curr_time = t_start
 
     try:
+        # Step A: Intro Recap Cards (Snapshots + Timeline Chart)
+        if include_recap_cards:
+            snapshots = find_or_sample_recap_snapshots(
+                tapo_sampler=tapo_sampler,
+                tapo_dir=tapo_dir,
+                tapo_summary=tapo_summary,
+                tapo_timeline=tapo_timeline,
+                target_size=(width, panel_h)
+            )
+            chart_panel = find_or_render_timeline_chart(
+                tapo_dir=tapo_dir,
+                tapo_summary=tapo_summary,
+                tapo_timeline=tapo_timeline,
+                target_size=(width, panel_h)
+            )
+            recap_cards = render_recap_cards(
+                snapshots=snapshots,
+                chart_panel=chart_panel,
+                target_date=target_date,
+                tapo_summary=tapo_summary,
+                width=width,
+                total_height=total_h
+            )
+            card_frames = int(round(intro_card_seconds * target_fps))
+            for card in recap_cards:
+                for _ in range(card_frames):
+                    writer.write(card)
+
+        # Step B: Trimmed Synchronized Motion Playback
         while curr_time <= t_end:
             time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -808,6 +1170,7 @@ def deliver_unified_breakfast(
     preview: bool = False,
     skip_telegram: bool = False,
     force: bool = False,
+    revision: Optional[str] = None,
     drive_service: Any = None,
     folder_id: Optional[str] = None
 ) -> bool:
@@ -864,9 +1227,14 @@ def deliver_unified_breakfast(
 
     # Step 1: Preflight Check
     registry = load_delivery_registry(drive_service, folder_id, local_fallback_dir=out_dir)
-    if not force and is_breakfast_fully_delivered(registry, clean_date):
-        print(f"✅ [Preflight] Breakfast for {clean_date} already fully delivered. Skipping.")
-        return True
+    if not force:
+        if revision:
+            if is_breakfast_fully_delivered(registry, clean_date, revision=revision):
+                print(f"✅ [Preflight] Breakfast revision '{revision}' for {clean_date} already fully delivered. Skipping.")
+                return True
+        elif is_breakfast_fully_delivered(registry, clean_date):
+            print(f"✅ [Preflight] Breakfast for {clean_date} already fully delivered. Skipping.")
+            return True
 
     # Step 2: Ingest TAPO Artifacts
     tapo_summary = {}
@@ -958,6 +1326,9 @@ def deliver_unified_breakfast(
         pipeline_artifact_incomplete=pipeline_artifact_incomplete
     )
     summary_text = report["telegram_text"]
+    formatted_date = report.get("formatted_date") or (f"{clean_date[:4]}-{clean_date[4:6]}-{clean_date[6:]}" if len(clean_date) == 8 else str(clean_date))
+    if revision:
+        summary_text = summary_text.replace(f"🍳 Breakfast · {formatted_date}", f"🔄 Corrected Breakfast · {formatted_date}", 1)
     if preview:
         summary_text = f"[TEST][PREVIEW] Unified Breakfast UX · Sep-5 fixture\n\n{summary_text}"
 
@@ -971,8 +1342,8 @@ def deliver_unified_breakfast(
     base_tg = f"https://api.telegram.org/bot{bot_token}" if bot_token else None
 
     # Item 1: Summary
-    if not is_unified_item_delivered(registry, clean_date, "summary"):
-        print(f"📤 Delivering unified breakfast summary for {clean_date}...")
+    if not is_unified_item_delivered(registry, clean_date, "summary", revision=revision):
+        print(f"📤 Delivering unified breakfast summary ({revision or 'original'}) for {clean_date}...")
         sum_msg_id = None
         if base_tg and chat_id and not skip_telegram:
             resp = requests.post(f"{base_tg}/sendMessage", data={
@@ -989,15 +1360,15 @@ def deliver_unified_breakfast(
 
         record_unified_item_delivered(
             drive_service, folder_id, registry, clean_date, "summary",
-            message_id=sum_msg_id, local_fallback_dir=out_dir
+            message_id=sum_msg_id, local_fallback_dir=out_dir, revision=revision
         )
         print(f"✅ Summary delivered (message_id={sum_msg_id})")
     else:
-        print(f"ℹ️ Summary already delivered for {clean_date}. Skipping item.")
+        print(f"ℹ️ Summary ({revision or 'original'}) already delivered for {clean_date}. Skipping item.")
 
     # Item 2: Combined Video
     combined_video_path = out_dir / f"{clean_date}_combined_breakfast.mp4"
-    if not is_unified_item_delivered(registry, clean_date, "combined_video"):
+    if not is_unified_item_delivered(registry, clean_date, "combined_video", revision=revision):
         print(f"🎥 Preparing unified vertical video for {clean_date}...")
         if not combined_video_path.exists() or combined_video_path.stat().st_size == 0:
             # Check if alternate named file exists in out_dir
@@ -1021,7 +1392,12 @@ def deliver_unified_breakfast(
                     logitech_clips=logi_clips,
                     output_path=combined_video_path,
                     target_date=clean_date,
-                    speedup_factor=4.0
+                    speedup_factor=4.0,
+                    tapo_dir=tapo_dir,
+                    logitech_dir=logitech_dir,
+                    tapo_summary=tapo_summary,
+                    tapo_timeline=tapo_timeline,
+                    logitech_summary=logitech_summary
                 )
 
         # Validate video size and content
@@ -1037,7 +1413,11 @@ def deliver_unified_breakfast(
             cam_note = "TAPO top · LOGITECH (No footage)"
         else:
             cam_note = "TAPO (No footage) · LOGITECH bottom"
-        caption = f"🍳 {formatted_date} Combined Breakfast · {cam_note}"
+
+        if revision:
+            caption = f"🔄 {formatted_date} Corrected Breakfast · {cam_note}"
+        else:
+            caption = f"🍳 {formatted_date} Combined Breakfast · {cam_note}"
         if preview:
             caption = f"[TEST][PREVIEW] {caption}"
 
@@ -1061,18 +1441,19 @@ def deliver_unified_breakfast(
 
         record_unified_item_delivered(
             drive_service, folder_id, registry, clean_date, "combined_video",
-            message_id=vid_msg_id, local_fallback_dir=out_dir
+            message_id=vid_msg_id, local_fallback_dir=out_dir, revision=revision
         )
         print(f"✅ Combined video delivered (message_id={vid_msg_id})")
     else:
-        print(f"ℹ️ Combined video already delivered for {clean_date}. Skipping item.")
+        print(f"ℹ️ Combined video ({revision or 'original'}) already delivered for {clean_date}. Skipping item.")
 
     # Step 6: Commit Breakfast Completion (Fail closed!)
     committed = commit_breakfast_completion(
         drive_service, folder_id, clean_date,
         extra={"delivered_by": "unified_breakfast.py", "video": combined_video_path.name},
         required_items=["summary", "combined_video"],
-        local_fallback_dir=out_dir
+        local_fallback_dir=out_dir,
+        revision=revision
     )
     if not committed:
         print(f"❌ Failed to commit breakfast completion for {clean_date}")
@@ -1103,6 +1484,7 @@ def main():
     p_del.add_argument("--preview", action="store_true", help="Format as test preview")
     p_del.add_argument("--skip-telegram", action="store_true", help="Skip Telegram API network calls")
     p_del.add_argument("--force", action="store_true", help="Force delivery ignoring preflight")
+    p_del.add_argument("--revision", default=None, help="Explicit revision/correction identifier")
 
     args = parser.parse_args()
 
@@ -1114,7 +1496,8 @@ def main():
             out_dir=Path(args.out_dir) if args.out_dir else None,
             preview=args.preview,
             skip_telegram=args.skip_telegram,
-            force=args.force
+            force=args.force,
+            revision=args.revision
         )
         sys.exit(0 if ok else 1)
     else:

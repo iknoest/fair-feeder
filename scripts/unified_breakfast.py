@@ -1480,24 +1480,27 @@ def deliver_unified_breakfast(
     if not is_unified_item_delivered(registry, clean_date, "summary", revision=revision):
         print(f"📤 Delivering unified breakfast summary ({revision or 'original'}) for {clean_date}...")
         sum_msg_id = None
-        if base_tg and chat_id and not skip_telegram:
-            resp = requests.post(f"{base_tg}/sendMessage", data={
-                "chat_id": chat_id,
-                "text": summary_text[:4096]
-            }, timeout=30)
-            if resp.status_code != 200:
-                print(f"❌ Failed to send summary to Telegram: {resp.text}")
-                return False
-            try:
-                sum_msg_id = resp.json().get("result", {}).get("message_id")
-            except Exception:
-                pass
+        if not skip_telegram:
+            if base_tg and chat_id:
+                resp = requests.post(f"{base_tg}/sendMessage", data={
+                    "chat_id": chat_id,
+                    "text": summary_text[:4096]
+                }, timeout=30)
+                if resp.status_code != 200:
+                    print(f"❌ Failed to send summary to Telegram: {resp.text}")
+                    return False
+                try:
+                    sum_msg_id = resp.json().get("result", {}).get("message_id")
+                except Exception:
+                    pass
 
-        record_unified_item_delivered(
-            drive_service, folder_id, registry, clean_date, "summary",
-            message_id=sum_msg_id, local_fallback_dir=out_dir, revision=revision
-        )
-        print(f"✅ Summary delivered (message_id={sum_msg_id})")
+            record_unified_item_delivered(
+                drive_service, folder_id, registry, clean_date, "summary",
+                message_id=sum_msg_id, local_fallback_dir=out_dir, revision=revision
+            )
+            print(f"✅ Summary delivered (message_id={sum_msg_id})")
+        else:
+            print(f"ℹ️ [--skip-telegram] Rendered summary for {clean_date}; skipping Telegram delivery and registry mutation.")
     else:
         print(f"ℹ️ Summary ({revision or 'original'}) already delivered for {clean_date}. Skipping item.")
 
@@ -1557,44 +1560,51 @@ def deliver_unified_breakfast(
             caption = f"[TEST][PREVIEW] {caption}"
 
         vid_msg_id = None
-        if base_tg and chat_id and not skip_telegram:
-            print(f"📤 Delivering combined video ({vid_size_mb:.2f} MB) to Telegram...")
-            with open(combined_video_path, "rb") as vf:
-                resp = requests.post(
-                    f"{base_tg}/sendVideo",
-                    data={"chat_id": chat_id, "caption": caption},
-                    files={"video": (combined_video_path.name, vf, "video/mp4")},
-                    timeout=180
-                )
-            if resp.status_code != 200:
-                print(f"❌ Failed to send combined video to Telegram: {resp.text}")
-                return False
-            try:
-                vid_msg_id = resp.json().get("result", {}).get("message_id")
-            except Exception:
-                pass
+        if not skip_telegram:
+            if base_tg and chat_id:
+                print(f"📤 Delivering combined video ({vid_size_mb:.2f} MB) to Telegram...")
+                with open(combined_video_path, "rb") as vf:
+                    resp = requests.post(
+                        f"{base_tg}/sendVideo",
+                        data={"chat_id": chat_id, "caption": caption},
+                        files={"video": (combined_video_path.name, vf, "video/mp4")},
+                        timeout=180
+                    )
+                if resp.status_code != 200:
+                    print(f"❌ Failed to send combined video to Telegram: {resp.text}")
+                    return False
+                try:
+                    vid_msg_id = resp.json().get("result", {}).get("message_id")
+                except Exception:
+                    pass
 
-        record_unified_item_delivered(
-            drive_service, folder_id, registry, clean_date, "combined_video",
-            message_id=vid_msg_id, local_fallback_dir=out_dir, revision=revision
-        )
-        print(f"✅ Combined video delivered (message_id={vid_msg_id})")
+            record_unified_item_delivered(
+                drive_service, folder_id, registry, clean_date, "combined_video",
+                message_id=vid_msg_id, local_fallback_dir=out_dir, revision=revision
+            )
+            print(f"✅ Combined video delivered (message_id={vid_msg_id})")
+        else:
+            print(f"ℹ️ [--skip-telegram] Rendered combined video for {clean_date}; skipping Telegram delivery and registry mutation.")
     else:
         print(f"ℹ️ Combined video ({revision or 'original'}) already delivered for {clean_date}. Skipping item.")
 
     # Step 6: Commit Breakfast Completion (Fail closed!)
-    committed = commit_breakfast_completion(
-        drive_service, folder_id, clean_date,
-        extra={"delivered_by": "unified_breakfast.py", "video": combined_video_path.name},
-        required_items=["summary", "combined_video"],
-        local_fallback_dir=out_dir,
-        revision=revision
-    )
-    if not committed:
-        print(f"❌ Failed to commit breakfast completion for {clean_date}")
-        return False
+    if not skip_telegram:
+        committed = commit_breakfast_completion(
+            drive_service, folder_id, clean_date,
+            extra={"delivered_by": "unified_breakfast.py", "video": combined_video_path.name},
+            required_items=["summary", "combined_video"],
+            local_fallback_dir=out_dir,
+            revision=revision
+        )
+        if not committed:
+            print(f"❌ Failed to commit breakfast completion for {clean_date}")
+            return False
 
-    print(f"🎉 Breakfast for {clean_date} fully delivered and registered.")
+        print(f"🎉 Breakfast for {clean_date} fully delivered and registered.")
+    else:
+        print(f"ℹ️ [--skip-telegram] Dry-run complete for {clean_date}. Delivery registry left completely untouched.")
+
     return True
 
 

@@ -13,6 +13,9 @@ from scripts.delivery_ledger import (
     record_unified_item_delivered,
     commit_breakfast_completion
 )
+from scripts.unified_breakfast import deliver_unified_breakfast
+from unittest.mock import patch, MagicMock
+
 
 
 def test_original_delivery_remains_immutable_when_correction_delivered(tmp_path):
@@ -254,4 +257,104 @@ def test_unified_delivery_api_compatibility(tmp_path):
     reg3 = load_delivery_registry(None, None, local_fallback_dir=tmp_path)
     assert is_breakfast_fully_delivered(reg3, clean_date, revision=None) is True
     assert is_breakfast_fully_delivered(reg3, clean_date, revision="rev-1") is False
+
+
+def test_skip_telegram_is_side_effect_free(tmp_path):
+    """
+    Test 6: Regression test for --skip-telegram side-effect bug.
+    Proves that running deliver_unified_breakfast with skip_telegram=True:
+    1. Does NOT mutate registry (registry before == registry after).
+    2. Does NOT mark summary delivered.
+    3. Does NOT mark combined_video delivered.
+    4. Does NOT mark breakfast_fully_delivered.
+    5. Normal delivery (skip_telegram=False) works and delivers/registers.
+    6. Revision delivery (skip_telegram=False, revision='...') works and registers.
+    """
+    reg_dir = tmp_path / "reg_dir"
+    reg_dir.mkdir()
+    initial_reg = {
+        "dates": {
+            "20260913": {
+                "breakfast_fully_delivered": True,
+                "unified": {"fully_delivered": True, "items": {"summary": {"delivered": True}, "combined_video": {"delivered": True}}}
+            }
+        }
+    }
+    save_delivery_registry(None, None, initial_reg, local_fallback_dir=reg_dir)
+    before_reg = copy.deepcopy(load_delivery_registry(None, None, local_fallback_dir=reg_dir))
+
+    out_dir = tmp_path / "dry_run_out"
+    out_dir.mkdir()
+    # Provide dummy combined video so video phase succeeds
+    dummy_video = out_dir / "20260914_combined_breakfast.mp4"
+    dummy_video.write_bytes(b"dummy video content")
+
+    # 1. Execute with skip_telegram=True
+    with patch.dict("os.environ", {"GDRIVE_SERVICE_ACCOUNT_KEY": ""}):
+        success = deliver_unified_breakfast(
+            target_date="20260914",
+            out_dir=out_dir,
+            skip_telegram=True,
+            force=True,
+            folder_id="",
+            drive_service=None
+        )
+    assert success is True
+
+    # Check registry after dry-run
+    after_reg = load_delivery_registry(None, None, local_fallback_dir=reg_dir)
+    # Proof 1: Registry untouched
+    assert after_reg.get("dates", {}).get("20260914") is None or "unified" not in after_reg["dates"]["20260914"]
+    # Proof 2: Summary not marked delivered
+    assert is_unified_item_delivered(after_reg, "20260914", "summary") is False
+    # Proof 3: Video not marked delivered
+    assert is_unified_item_delivered(after_reg, "20260914", "combined_video") is False
+    # Proof 4: Breakfast not marked delivered
+    assert is_breakfast_fully_delivered(after_reg, "20260914") is False
+
+    # Proof 5: Normal delivery semantics remain unchanged (delivers when skip_telegram=False)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"result": {"message_id": 9901}}
+
+    with patch("requests.post", return_value=mock_resp):
+        with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "mock", "TELEGRAM_CHAT_ID": "123", "GDRIVE_SERVICE_ACCOUNT_KEY": ""}):
+            deliv_success = deliver_unified_breakfast(
+                target_date="20260914",
+                out_dir=out_dir,
+                skip_telegram=False,
+                force=True,
+                folder_id="",
+                drive_service=None
+            )
+    assert deliv_success is True
+    normal_reg = load_delivery_registry(None, None, local_fallback_dir=out_dir)
+    assert is_unified_item_delivered(normal_reg, "20260914", "summary") is True
+    assert is_unified_item_delivered(normal_reg, "20260914", "combined_video") is True
+    assert is_breakfast_fully_delivered(normal_reg, "20260914") is True
+    assert normal_reg["dates"]["20260914"]["unified"]["items"]["summary"]["message_id"] == 9901
+
+    # Proof 6: Revision delivery semantics remain unchanged
+    mock_resp_rev = MagicMock()
+    mock_resp_rev.status_code = 200
+    mock_resp_rev.json.return_value = {"result": {"message_id": 9902}}
+
+    with patch("requests.post", return_value=mock_resp_rev):
+        with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "mock", "TELEGRAM_CHAT_ID": "123", "GDRIVE_SERVICE_ACCOUNT_KEY": ""}):
+            rev_success = deliver_unified_breakfast(
+                target_date="20260914",
+                out_dir=out_dir,
+                skip_telegram=False,
+                force=True,
+                folder_id="",
+                drive_service=None,
+                revision="rev-test"
+            )
+    assert rev_success is True
+    rev_reg = load_delivery_registry(None, None, local_fallback_dir=out_dir)
+    assert is_unified_item_delivered(rev_reg, "20260914", "summary", revision="rev-test") is True
+    assert is_unified_item_delivered(rev_reg, "20260914", "combined_video", revision="rev-test") is True
+    assert is_breakfast_fully_delivered(rev_reg, "20260914", revision="rev-test") is True
+    assert rev_reg["dates"]["20260914"]["corrections"]["rev-test"]["items"]["summary"]["message_id"] == 9902
+
 

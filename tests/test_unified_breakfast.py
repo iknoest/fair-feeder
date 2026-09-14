@@ -37,8 +37,10 @@ from scripts.unified_breakfast import (
     generate_combined_breakfast_video,
     find_or_sample_recap_snapshots,
     find_or_render_timeline_chart,
-    render_recap_cards
+    render_recap_cards,
+    deliver_unified_breakfast
 )
+
 
 
 def test_registry_breakfast_completion_and_idempotency(tmp_path):
@@ -734,5 +736,33 @@ def test_timeline_strip_rendering():
     assert strip_late.shape == (42, 720, 3)
 
 
+def test_deliver_unified_breakfast_api_contract_clean_invocation(tmp_path):
+    """
+    Regression test for Sep-14 failure:
+    Ensures deliver_unified_breakfast can be called cleanly without Drive or Telegram,
+    invoking delivery_ledger functions with revision=None and revision='test' without TypeError.
+    """
+    out_dir = tmp_path / "delivery_test"
+    out_dir.mkdir()
 
+    # Call with revision=None: must not raise TypeError
+    res_none = deliver_unified_breakfast(
+        target_date="20990101",
+        out_dir=out_dir,
+        skip_telegram=True,
+        force=True,
+        folder_id=""
+    )
+    assert res_none is False
+
+    # Call with revision='test-rev': must not raise TypeError
+    res_rev = deliver_unified_breakfast(
+        target_date="20990101",
+        out_dir=out_dir,
+        skip_telegram=True,
+        force=True,
+        folder_id="",
+        revision="test-rev"
+    )
+    assert res_rev is False
 

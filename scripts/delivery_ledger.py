@@ -10,6 +10,7 @@ Ensures that partial-delivery failures resume item-by-item without sending dupli
 import io
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -22,6 +23,23 @@ except ImportError:
 
 
 DELIVERY_REGISTRY_FILENAME = "delivery_registry.json"
+
+# Load .env file if present
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_env_path = _REPO_ROOT / ".env"
+if _env_path.exists():
+    try:
+        with open(_env_path, "r", encoding="utf-8") as _ef:
+            for _line in _ef:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _v = _line.split("=", 1)
+                    _k = _k.strip()
+                    _v = _v.strip().strip("'\"")
+                    if _k not in os.environ:
+                        os.environ[_k] = _v
+    except Exception:
+        pass
 
 
 def get_ledger_filename(target_date: str, camera: str) -> str:
@@ -179,13 +197,15 @@ def is_breakfast_fully_delivered(
     arg1: Any,
     arg2: Any = None,
     target_date: Optional[str] = None,
-    local_fallback_dir: Optional[Path] = None
+    local_fallback_dir: Optional[Path] = None,
+    revision: Optional[str] = None
 ) -> bool:
     """
     Returns True if the entire breakfast for target_date is fully delivered.
     Supports two calling signatures:
-    1. is_breakfast_fully_delivered(registry_data, target_date)
-    2. is_breakfast_fully_delivered(drive_service, folder_id, target_date, local_fallback_dir=...)
+    1. is_breakfast_fully_delivered(registry_data, target_date, revision=...)
+    2. is_breakfast_fully_delivered(drive_service, folder_id, target_date, local_fallback_dir=..., revision=...)
+    If revision is provided, checks delivery of that specific revision under corrections[revision].
     """
     if isinstance(arg1, dict):
         registry_data = arg1
@@ -197,6 +217,17 @@ def is_breakfast_fully_delivered(
         registry_data = load_delivery_registry(drive_service, folder_id, local_fallback_dir=local_fallback_dir)
 
     date_info = registry_data.get("dates", {}).get(clean_date, {})
+    if revision:
+        rev_entry = date_info.get("corrections", {}).get(revision, {})
+        if rev_entry.get("fully_delivered", False):
+            return True
+        rev_items = rev_entry.get("items", {})
+        if rev_items:
+            required = ["summary", "combined_video"]
+            if all(rev_items.get(k, {}).get("delivered", False) for k in required):
+                return True
+        return False
+
     if date_info.get("breakfast_fully_delivered", False):
         return True
     unified = date_info.get("unified", {})
@@ -221,13 +252,15 @@ def is_unified_item_delivered(
     arg1: Any,
     arg2: Any,
     arg3: Optional[str] = None,
-    local_fallback_dir: Optional[Path] = None
+    local_fallback_dir: Optional[Path] = None,
+    revision: Optional[str] = None
 ) -> bool:
     """
     Checks if a unified delivery item (e.g. 'summary' or 'combined_video') is delivered.
     Supports two calling signatures:
-    1. is_unified_item_delivered(registry_data, target_date, item_key)
-    2. is_unified_item_delivered(drive_service, folder_id, target_date, item_key, local_fallback_dir=...)
+    1. is_unified_item_delivered(registry_data, target_date, item_key, revision=...)
+    2. is_unified_item_delivered(drive_service, folder_id, target_date, item_key, local_fallback_dir=..., revision=...)
+    If revision is provided, checks within corrections[revision]['items'].
     """
     if isinstance(arg1, dict):
         registry_data = arg1
@@ -243,6 +276,10 @@ def is_unified_item_delivered(
         item_key = str(local_fallback_dir) if local_fallback_dir and isinstance(local_fallback_dir, str) else ""
 
     date_info = registry_data.get("dates", {}).get(clean_date, {})
+    if revision:
+        rev_entry = date_info.get("corrections", {}).get(revision, {})
+        return bool(rev_entry.get("items", {}).get(item_key, {}).get("delivered", False))
+
     unified = date_info.get("unified", {})
     return bool(unified.get("items", {}).get(item_key, {}).get("delivered", False))
 
@@ -255,7 +292,8 @@ def record_unified_item_delivered(
     item_key: str,
     message_id: Optional[int] = None,
     extra: Optional[Dict[str, Any]] = None,
-    local_fallback_dir: Optional[Path] = None
+    local_fallback_dir: Optional[Path] = None,
+    revision: Optional[str] = None
 ) -> Optional[str]:
     """Marks a unified delivery item as delivered and commits immediately to Drive/registry."""
     clean_date = str(target_date).replace("-", "").strip()
@@ -281,7 +319,15 @@ def record_unified_item_delivered(
     if extra:
         entry.update(extra)
 
-    registry_data["dates"][clean_date]["unified"]["items"][item_key] = entry
+    date_entry = registry_data["dates"][clean_date]
+    if revision:
+        corrections = date_entry.setdefault("corrections", {})
+        rev_entry = corrections.setdefault(revision, {"items": {}})
+        rev_items = rev_entry.setdefault("items", {})
+        rev_items[item_key] = entry
+    else:
+        date_entry["unified"]["items"][item_key] = entry
+
     return save_delivery_registry(drive_service, folder_id, registry_data, local_fallback_dir=local_fallback_dir)
 
 
@@ -291,10 +337,13 @@ def commit_breakfast_completion(
     target_date: str,
     extra: Optional[Dict[str, Any]] = None,
     required_items: Optional[List[str]] = None,
-    local_fallback_dir: Optional[Path] = None
+    local_fallback_dir: Optional[Path] = None,
+    revision: Optional[str] = None
 ) -> bool:
     """
     Marks entire breakfast as completed in the registry and commits to Drive.
+    If revision is provided, records completion under corrections[revision] without
+    modifying original scheduled delivery.
     Fails closed:
     - If required items are specified (or defaults), verifies they are all delivered.
     - If drive_service and folder_id are provided and Drive persistence fails, returns False.
@@ -307,22 +356,37 @@ def commit_breakfast_completion(
         registry["dates"][clean_date] = {"cameras": {}, "unified": {"items": {}}}
 
     date_entry = registry["dates"][clean_date]
-    unified_entry = date_entry.setdefault("unified", {"items": {}})
-    unified_items = unified_entry.setdefault("items", {})
-
     reqs = required_items if required_items is not None else ["summary", "combined_video"]
-    if reqs:
-        for req in reqs:
-            if not unified_items.get(req, {}).get("delivered", False):
-                print(f"[DeliveryLedger] Cannot commit breakfast completion: required item '{req}' is not delivered.")
-                return False
 
-    date_entry["breakfast_fully_delivered"] = True
-    date_entry["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
-    unified_entry["fully_delivered"] = True
-    unified_entry["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
-    if extra:
-        date_entry.update(extra)
+    if revision:
+        corrections = date_entry.setdefault("corrections", {})
+        rev_entry = corrections.setdefault(revision, {"items": {}})
+        rev_items = rev_entry.setdefault("items", {})
+        if reqs:
+            for req in reqs:
+                if not rev_items.get(req, {}).get("delivered", False):
+                    print(f"[DeliveryLedger] Cannot commit correction '{revision}' completion: required item '{req}' is not delivered.")
+                    return False
+        rev_entry["fully_delivered"] = True
+        rev_entry["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        if extra:
+            rev_entry.update(extra)
+    else:
+        unified_entry = date_entry.setdefault("unified", {"items": {}})
+        unified_items = unified_entry.setdefault("items", {})
+
+        if reqs:
+            for req in reqs:
+                if not unified_items.get(req, {}).get("delivered", False):
+                    print(f"[DeliveryLedger] Cannot commit breakfast completion: required item '{req}' is not delivered.")
+                    return False
+
+        date_entry["breakfast_fully_delivered"] = True
+        date_entry["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        unified_entry["fully_delivered"] = True
+        unified_entry["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        if extra:
+            date_entry.update(extra)
 
     file_id = save_delivery_registry(drive_service, folder_id, registry, local_fallback_dir=local_fallback_dir)
     if drive_service and folder_id and not file_id:
@@ -587,6 +651,7 @@ def main():
     p_check.add_argument("--camera", default=None, choices=["TAPO", "LOGITECH"], help="Camera name")
     p_check.add_argument("--breakfast", action="store_true", help="Check entire breakfast delivery status")
     p_check.add_argument("--local-dir", default=None, help="Local directory fallback")
+    p_check.add_argument("--revision", default=None, help="Check revision/correction delivery status")
 
     args = parser.parse_args()
 
@@ -609,15 +674,17 @@ def main():
         local_fallback = Path(args.local_dir) if args.local_dir else None
 
         registry = load_delivery_registry(drive_service, folder_id, local_fallback_dir=local_fallback)
-        is_breakfast_done = is_breakfast_fully_delivered(registry, clean_date)
+        is_breakfast_done = is_breakfast_fully_delivered(registry, clean_date, revision=args.revision)
 
-        if args.breakfast or not args.camera:
+        if args.revision:
+            is_delivered = is_breakfast_done
+        elif args.breakfast or not args.camera:
             is_delivered = is_breakfast_done
         else:
             ledger = load_delivery_ledger(drive_service, folder_id, clean_date, args.camera, local_fallback_dir=local_fallback)
             is_delivered = is_breakfast_done or is_camera_fully_delivered(ledger)
 
-        print(f"[Preflight] date={clean_date} camera={args.camera} breakfast_done={is_breakfast_done} is_delivered={is_delivered}")
+        print(f"[Preflight] date={clean_date} camera={args.camera} revision={args.revision} breakfast_done={is_breakfast_done} is_delivered={is_delivered}")
         if is_delivered:
             print("ALREADY_DELIVERED=true")
             sys.exit(0)

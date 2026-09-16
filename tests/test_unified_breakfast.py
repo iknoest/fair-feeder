@@ -766,3 +766,223 @@ def test_deliver_unified_breakfast_api_contract_clean_invocation(tmp_path):
     )
     assert res_rev is False
 
+
+def test_multi_session_logitech_span_and_formatting():
+    """Verify that multi-session Logitech data expands global breakfast window and formats sessions clearly."""
+    tapo_summary = {
+        "start_time": "2026-09-16 06:20:00",
+        "end_time": "2026-09-16 06:21:03",
+        "start_kibble": 35,
+        "end_kibble": 0,
+        "dan_kibble": 3,
+        "sanbo_kibble": 29,
+        "dan_bowl_seconds": 5.6,
+        "sanbo_bowl_seconds": 8.4,
+        "meal_finished": True
+    }
+    logitech_summary = {
+        "date": "2026-09-16",
+        "sessions": [
+            {
+                "session_start_time": "06:19:46",
+                "session_end_time": "06:20:22",
+                "cat_identity": "Sanbo",
+                "eating_evidence": "yes",
+                "meal_status": "Finished likely",
+                "bowl_state_progression": "empty -> half",
+                "visibility": "good"
+            },
+            {
+                "session_start_time": "06:21:22",
+                "session_end_time": "06:24:33",
+                "cat_identity": "Sanbo",
+                "eating_evidence": "yes",
+                "meal_status": "Finished likely",
+                "bowl_state_progression": "empty -> low -> empty",
+                "visibility": "usable"
+            }
+        ]
+    }
+
+    report = generate_unified_breakfast_report("20260916", tapo_summary, logitech_summary)
+    text = report["telegram_text"]
+
+    # Window covers 06:19:46 to 06:24:33
+    assert "06:19:46–06:24:33" in text
+    assert "(4m 47s)" in text
+
+    # Both sessions formatted under Logitech section
+    assert "Session 1 · 06:19:46–06:20:22 (36s)" in text
+    assert "Session 2 · 06:21:22–06:24:33 (3m 11s)" in text
+    assert "↩ Sanbo returned to Sanbo feeder · 06:21:22" in text
+
+    # House section summaries
+    assert "Sanbo feeding observed (2 sessions: 06:19:46–06:20:22, 06:21:22–06:24:33)" in text
+
+
+def test_foreign_arrival_event_and_theft_observed_sep16():
+    """Verify Sep-16 foreign arrival event detection, handover story, and observed theft."""
+    tapo_summary = {
+        "date": "20260916",
+        "start_time": "2026-09-16 06:20:00",
+        "end_time": "2026-09-16 06:21:03",
+        "dan_first_ts": "2026-09-16 06:20:01",
+        "start_kibble": 35,
+        "end_kibble": 0,
+        "dan_kibble": 3,
+        "sanbo_kibble": 29,
+        "has_conflict": True,
+        "conflict_frames": 2,
+        "meal_finished": True
+    }
+    tapo_timeline = {
+        "feeding_phases": [
+            {"start": "2026-09-16 06:20:01", "end": "2026-09-16 06:20:01", "cat": "Dan"},
+            {"start": "2026-09-16 06:20:01", "end": "2026-09-16 06:20:01", "cat": "Dan"},
+            {"start": "2026-09-16 06:20:01", "end": "2026-09-16 06:20:01", "cat": "Sanbo"},
+            {"start": "2026-09-16 06:20:05", "end": "2026-09-16 06:21:00", "cat": "Sanbo"}
+        ]
+    }
+    logitech_summary = {
+        "sessions": [
+            {
+                "session_start_time": "06:19:46",
+                "session_end_time": "06:20:22",
+                "cat_identity": "Sanbo",
+                "eating_evidence": "yes"
+            },
+            {
+                "session_start_time": "06:21:22",
+                "session_end_time": "06:24:33",
+                "cat_identity": "Sanbo",
+                "eating_evidence": "yes"
+            }
+        ]
+    }
+
+    report = generate_unified_breakfast_report("20260916", tapo_summary, logitech_summary, tapo_timeline=tapo_timeline)
+    text = report["telegram_text"]
+
+    # Foreign arrival detected in TAPO section
+    assert "⚠️ Sanbo arrived at Dan feeder · 06:20:26" in text
+
+    # House narrative reflects sequence
+    assert "Dan arrived first at Dan feeder; Sanbo took over at ~06:20:26 and ate; Sanbo returned to own feeder at 06:21:22" in text
+
+    # Theft observed line
+    assert "- Theft: Theft observed: Sanbo consumed ~29 kibble at Dan feeder" in text
+
+    # Event timeline contains foreign_arrival event
+    timeline_events = report.get("events", [])
+    event_types = [e["event_type"] for e in timeline_events]
+    assert "foreign_arrival" in event_types
+    for_event = next(e for e in timeline_events if e["event_type"] == "foreign_arrival")
+    assert for_event["cat"] == "Sanbo"
+    assert for_event["timestamp"] == "06:20:26"
+
+
+def test_physical_contradiction_prevents_theft_confirmation():
+    """Verify that if Sanbo was eating at Logitech feeder during the same window, theft is NOT confirmed."""
+    tapo_summary = {
+        "start_time": "2026-09-16 06:20:00",
+        "end_time": "2026-09-16 06:21:03",
+        "start_kibble": 35,
+        "end_kibble": 0,
+        "dan_kibble": 3,
+        "sanbo_kibble": 29,
+        "meal_finished": True
+    }
+    tapo_timeline = {
+        "feeding_phases": [
+            {"start": "2026-09-16 06:20:01", "end": "2026-09-16 06:20:01", "cat": "Dan"},
+            {"start": "2026-09-16 06:20:26", "end": "2026-09-16 06:21:00", "cat": "Sanbo"}
+        ]
+    }
+    # Contradicting session: Sanbo eating at Logitech feeder from 06:20:20 to 06:20:40 (overlaps 06:20:26)
+    logitech_summary = {
+        "sessions": [
+            {
+                "session_start_time": "06:20:20",
+                "session_end_time": "06:20:40",
+                "cat_identity": "Sanbo",
+                "eating_evidence": "yes"
+            }
+        ]
+    }
+
+    report = generate_unified_breakfast_report("20260916", tapo_summary, logitech_summary, tapo_timeline=tapo_timeline)
+    text = report["telegram_text"]
+    assert "- Theft: Not confirmed" in text
+
+
+def test_recap_cards_three_panels_when_foreign_arrival():
+    """Verify render_recap_cards returns 3 distinct cards when foreign_arrival snapshot is present."""
+    fake_frame = np.zeros((405, 720, 3), dtype=np.uint8)
+    fake_chart = np.zeros((405, 720, 3), dtype=np.uint8)
+
+    snapshots_with_foreign = {
+        "dispensed": (fake_frame, "1. Food Dispensed"),
+        "arrival": (fake_frame, "2. Cat Arrival"),
+        "foreign_arrival": (fake_frame, "2b. Foreign Arrival"),
+        "finish": (fake_frame, "3. Meal Finished")
+    }
+
+    cards = render_recap_cards(
+        snapshots=snapshots_with_foreign,
+        chart_panel=fake_chart,
+        target_date="20260916",
+        tapo_summary={"dan_kibble": 3, "sanbo_kibble": 29},
+        width=720,
+        total_height=920
+    )
+
+    assert len(cards) == 3
+    for c in cards:
+        assert c.shape == (920, 720, 3)
+
+
+def test_timeline_strip_multi_session_transitions():
+    """Verify render_timeline_strip correctly labels feeding phases across cameras."""
+    t_start = datetime(2026, 9, 16, 6, 19, 46)
+    t_end = datetime(2026, 9, 16, 6, 24, 33)
+    dan_arr = datetime(2026, 9, 16, 6, 20, 1)
+    dan_fin = datetime(2026, 9, 16, 6, 21, 3)
+    for_arr = datetime(2026, 9, 16, 6, 20, 26)
+    sessions = [
+        {"session_start_time": "06:19:46", "session_end_time": "06:20:22", "cat_identity": "Sanbo"},
+        {"session_start_time": "06:21:22", "session_end_time": "06:24:33", "cat_identity": "Sanbo"}
+    ]
+
+    # Test during Dan feeding
+    strip_dan = render_timeline_strip(
+        width=720, height=42,
+        curr_time_dt=datetime(2026, 9, 16, 6, 20, 15),
+        t_start_dt=t_start, t_end_dt=t_end,
+        dan_arrival_dt=dan_arr, dan_finish_dt=dan_fin,
+        foreign_arrival_dt=for_arr,
+        logitech_sessions=sessions
+    )
+    assert strip_dan.shape == (42, 720, 3)
+
+    # Test during Sanbo eating at Dan feeder
+    strip_sanbo_dan = render_timeline_strip(
+        width=720, height=42,
+        curr_time_dt=datetime(2026, 9, 16, 6, 20, 30),
+        t_start_dt=t_start, t_end_dt=t_end,
+        dan_arrival_dt=dan_arr, dan_finish_dt=dan_fin,
+        foreign_arrival_dt=for_arr,
+        logitech_sessions=sessions
+    )
+    assert strip_sanbo_dan.shape == (42, 720, 3)
+
+    # Test during Sanbo Session 2 at Logitech feeder
+    strip_s2 = render_timeline_strip(
+        width=720, height=42,
+        curr_time_dt=datetime(2026, 9, 16, 6, 22, 0),
+        t_start_dt=t_start, t_end_dt=t_end,
+        dan_arrival_dt=dan_arr, dan_finish_dt=dan_fin,
+        foreign_arrival_dt=for_arr,
+        logitech_sessions=sessions
+    )
+    assert strip_s2.shape == (42, 720, 3)
+

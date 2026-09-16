@@ -65,6 +65,10 @@ def intervals_overlap(start1: str, end1: str, start2: str, end2: str) -> bool:
         e1 += 86400
     if e2 < s2:
         e2 += 86400
+    if e1 == s1:
+        e1 += 1
+    if e2 == s2:
+        e2 += 1
     return max(s1, s2) < min(e1, e2)
 
 
@@ -79,49 +83,57 @@ def reconcile_cross_camera_intervals(
     reconciled_tapo = [copy.deepcopy(i) for i in tapo_intervals]
     reconciled_logitech = [copy.deepcopy(i) for i in logitech_intervals]
 
-    for t_int in reconciled_tapo:
-        for l_int in reconciled_logitech:
-            if not intervals_overlap(t_int.start_timestamp, t_int.end_timestamp, l_int.start_timestamp, l_int.end_timestamp):
-                continue
+    for l_int in reconciled_logitech:
+        overlapping = [
+            t for t in reconciled_tapo
+            if intervals_overlap(t.start_timestamp, t.end_timestamp, l_int.start_timestamp, l_int.end_timestamp)
+        ]
+        if not overlapping:
+            continue
 
-            # If TAPO has conflict or is not exclusion eligible, it cannot assert physical exclusion
-            if t_int.has_conflict or not t_int.exclusion_eligible or t_int.identity_evidence_quality == "contested":
-                l_int.reconciliation_notes = "Cross-camera exclusion disabled: TAPO interval has cat identity conflict"
-                continue
+        # If any overlapping interval has conflict or is not exclusion eligible, exclusion is disabled
+        if any(t.has_conflict or not t.exclusion_eligible or t.identity_evidence_quality == "contested" for t in overlapping):
+            l_int.reconciliation_notes = "Cross-camera exclusion disabled: TAPO interval has cat identity conflict"
+            continue
 
-            # Check if TAPO has reliable identity establishing Dan in Room 1
-            tapo_is_reliable_dan = (
-                t_int.cat_presence and
-                t_int.identity.lower() == "dan" and
-                (
-                    t_int.identity_basis == "FeedingTracker accepted phase" or
-                    (t_int.identity_evidence_quality.lower() != "poor" and t_int.identity_confidence >= 0.75)
-                )
+        # Check distinct reliable identities in overlapping TAPO intervals
+        reliable_dan = any(
+            t.cat_presence and
+            t.identity.lower() == "dan" and
+            (
+                t.identity_basis == "FeedingTracker accepted phase" or
+                (t.identity_evidence_quality.lower() != "poor" and t.identity_confidence >= 0.75)
             )
-
-            # Check if TAPO has reliable identity establishing Sanbo in Room 1
-            tapo_is_reliable_sanbo = (
-                t_int.cat_presence and
-                t_int.identity.lower() == "sanbo" and
-                (
-                    t_int.identity_basis == "FeedingTracker accepted phase" or
-                    (t_int.identity_evidence_quality.lower() != "poor" and t_int.identity_confidence >= 0.75)
-                )
+            for t in overlapping
+        )
+        reliable_sanbo = any(
+            t.cat_presence and
+            t.identity.lower() == "sanbo" and
+            (
+                t.identity_basis == "FeedingTracker accepted phase" or
+                (t.identity_evidence_quality.lower() != "poor" and t.identity_confidence >= 0.75)
             )
+            for t in overlapping
+        )
 
-            if tapo_is_reliable_dan and l_int.cat_presence:
-                # Dan is in Room 1; cat in Room 2 (Logitech) cannot be Dan -> must be Sanbo
-                if l_int.identity.lower() != "sanbo":
-                    l_int.identity = "Sanbo"
-                    l_int.reconciled = True
-                    l_int.reconciliation_notes = "Physical exclusion: Dan confirmed present at Tapo feeder during overlapping interval"
+        # If TAPO contains both cats during the overlapping window, exclusion cannot assert a single identity
+        if reliable_dan and reliable_sanbo:
+            l_int.reconciliation_notes = "Cross-camera exclusion disabled: TAPO interval contains multiple cat identities (transition)"
+            continue
 
-            elif tapo_is_reliable_sanbo and l_int.cat_presence:
-                # Sanbo is in Room 1; cat in Room 2 (Logitech) cannot be Sanbo -> must be Dan
-                if l_int.identity.lower() != "dan":
-                    l_int.identity = "Dan"
-                    l_int.reconciled = True
-                    l_int.reconciliation_notes = "Physical exclusion: Sanbo confirmed present at Tapo feeder during overlapping interval"
+        if reliable_dan and l_int.cat_presence:
+            # Dan is in Room 1; cat in Room 2 (Logitech) cannot be Dan -> must be Sanbo
+            if l_int.identity.lower() != "sanbo":
+                l_int.identity = "Sanbo"
+                l_int.reconciled = True
+                l_int.reconciliation_notes = "Physical exclusion: Dan confirmed present at Tapo feeder during overlapping interval"
+
+        elif reliable_sanbo and l_int.cat_presence:
+            # Sanbo is in Room 1; cat in Room 2 (Logitech) cannot be Sanbo -> must be Dan
+            if l_int.identity.lower() != "dan":
+                l_int.identity = "Dan"
+                l_int.reconciled = True
+                l_int.reconciliation_notes = "Physical exclusion: Sanbo confirmed present at Tapo feeder during overlapping interval"
 
     return reconciled_tapo, reconciled_logitech
 

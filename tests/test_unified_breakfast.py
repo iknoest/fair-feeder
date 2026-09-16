@@ -1,6 +1,7 @@
 import sys
 import json
 import pytest
+import cv2
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -1099,7 +1100,7 @@ def test_sep16_five_image_evidence_set_with_foreign_arrival_and_return():
     assert timestamps == sorted(timestamps)
 
     assert "⚠️ Sanbo arrived at Dan feeder · 06:20:26" in evidence[2]["caption"]
-    assert "↩ Sanbo returned to Sanbo feeder · 06:21:22" in evidence[4]["caption"]
+    assert "↩ Sanbo returned to Sanbo feeder · 06:21:27" in evidence[4]["caption"]
     assert evidence[4]["camera_tag"] == "[LOGITECH] Sanbo Feeder"
 
     for e in evidence:
@@ -1132,6 +1133,129 @@ def test_missing_optional_event_does_not_invent_fake_image(tmp_path):
         target_date="20260917"
     )
     assert len(evidence) == 0
+
+
+def test_return_to_feeder_omitted_if_no_cat_visible(tmp_path):
+    """Verifies that return_to_feeder is omitted if no cat is visibly present at the feeder."""
+    tapo_dir = tmp_path / "tapo"
+    tapo_dir.mkdir()
+    logi_dir = tmp_path / "logi"
+    logi_dir.mkdir()
+
+    tapo_summary = {
+        "start_time": "2026-09-17 06:20:00",
+        "end_time": "2026-09-17 06:21:00",
+        "start_kibble": 25,
+        "end_kibble": 0,
+        "has_conflict": False,
+        "conflict_frames": 0,
+        "meal_finished": True,
+        "sanbo_kibble": 15
+    }
+    tapo_timeline = {
+        "feeding_phases": [
+            {"start": "2026-09-17 06:20:05", "end": "2026-09-17 06:20:20", "cat": "Dan"},
+            {"start": "2026-09-17 06:20:25", "end": "2026-09-17 06:20:45", "cat": "Sanbo"}
+        ]
+    }
+    logi_summary = {
+        "sessions": [
+            {"start_time": "2026-09-17 06:21:00", "cat_identity": "Sanbo"}
+        ]
+    }
+
+    # Generate mock Logitech clip that is completely static (empty bowl, no cat appears)
+    clip_l = logi_dir / "motion_20260917_062100_10s.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    vw = cv2.VideoWriter(str(clip_l), fourcc, 10.0, (160, 90))
+    for _ in range(100):
+        vw.write(np.full((90, 160, 3), 40, dtype=np.uint8))
+    vw.release()
+
+    # Generate mock Tapo clip with arrival
+    clip_t = tapo_dir / "motion_20260917_062000_50s.mp4"
+    vw_t = cv2.VideoWriter(str(clip_t), fourcc, 10.0, (160, 90))
+    for i in range(500):
+        # 0-5s: empty (10), 5s+: cat (180)
+        v = 180 if i >= 50 else 10
+        vw_t.write(np.full((90, 160, 3), v, dtype=np.uint8))
+    vw_t.release()
+
+    t_sampler = VideoStreamSampler([clip_t], is_logitech=False)
+    l_sampler = VideoStreamSampler([clip_l], is_logitech=True)
+
+    evidence = prepare_evidence_snapshots(
+        tapo_sampler=t_sampler,
+        logi_sampler=l_sampler,
+        tapo_dir=tapo_dir,
+        logitech_dir=logi_dir,
+        tapo_summary=tapo_summary,
+        tapo_timeline=tapo_timeline,
+        logitech_summary=logi_summary,
+        out_dir=tmp_path / "out",
+        target_date="20260917"
+    )
+    t_sampler.close()
+    l_sampler.close()
+
+    keys = [e["key"] for e in evidence]
+    # return_to_feeder MUST be omitted because no cat was visible at the feeder!
+    assert "return_to_feeder" not in keys
+
+
+def test_dispensed_settled_selection(tmp_path):
+    """Verifies that dispensed snapshot selects stable post-dispense settled frame before cat arrival."""
+    tapo_dir = tmp_path / "tapo"
+    tapo_dir.mkdir()
+
+    tapo_summary = {
+        "start_time": "2026-09-17 06:20:00",
+        "end_time": "2026-09-17 06:21:00",
+        "start_kibble": 30,
+        "end_kibble": 0,
+        "meal_finished": True
+    }
+    tapo_timeline = {
+        "feeding_phases": [
+            {"start": "2026-09-17 06:20:07", "end": "2026-09-17 06:20:50", "cat": "Dan"}
+        ]
+    }
+
+    # Video:
+    # sec 0-2 (frames 0-20): empty bowl (val=10)
+    # sec 2-4 (frames 20-40): dispensing kibble (val increases 10 -> 80)
+    # sec 4-6 (frames 40-60): settled kibbles in bowl, no cat (bowl val=80, upper val=10)
+    # sec 7+ (frames 70+): cat arrives (upper val=200)
+    clip_t = tapo_dir / "motion_20260917_062000_10s.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    vw_t = cv2.VideoWriter(str(clip_t), fourcc, 10.0, (160, 90))
+    for i in range(100):
+        frame = np.full((90, 160, 3), 10, dtype=np.uint8)
+        if i >= 70:
+            frame[0:50, :] = 200  # Cat arrives in upper scene
+        elif i >= 40:
+            frame[50:90, 20:80] = 80  # Settled kibble in bowl
+        elif i >= 20:
+            frame[50:90, 20:80] = int(10 + (i - 20) * 3.5)  # Dispensing / tumbling
+        vw_t.write(frame)
+    vw_t.release()
+
+    t_sampler = VideoStreamSampler([clip_t], is_logitech=False)
+
+    evidence = prepare_evidence_snapshots(
+        tapo_sampler=t_sampler,
+        tapo_dir=tapo_dir,
+        tapo_summary=tapo_summary,
+        tapo_timeline=tapo_timeline,
+        out_dir=tmp_path / "out",
+        target_date="20260917"
+    )
+    t_sampler.close()
+
+    keys = [e["key"] for e in evidence]
+    assert "dispensed" in keys
+    disp_item = next(e for e in evidence if e["key"] == "dispensed")
+    assert "Food Dispensed (~30 kibble)" in disp_item["caption"]
 
 
 def test_dynamic_video_has_no_static_recap_cards(tmp_path):

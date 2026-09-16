@@ -1359,7 +1359,10 @@ def prepare_evidence_snapshots(
                     start_k = tapo_summary.get("start_kibble")
                     k_str = f" (~{start_k} kibble)" if start_k is not None else ""
                     disp_ts = "06:19:59"
-                    if tapo_summary.get("start_time"):
+                    m = re.search(r"at\s+(\d{2}:\d{2}:\d{2})", l_disp)
+                    if m:
+                        disp_ts = m.group(1)
+                    elif tapo_summary.get("start_time"):
                         try:
                             disp_ts = datetime.strptime(str(tapo_summary["start_time"]).strip()[-8:], "%H:%M:%S").strftime("%H:%M:%S")
                         except Exception:
@@ -1470,29 +1473,58 @@ def prepare_evidence_snapshots(
                 for_cand = next((c for c in candidates if c["key"] == "foreign_arrival"), None)
                 if for_cand and s_dt >= for_cand["dt"]:
                     ret_frame = None
+                    ret_dt = s_dt
+                    ret_ts = st_clean
+
                     if logi_sampler is not None:
-                        for off_s in [0, 1, 2]:
-                            f, live = logi_sampler.get_frame_at(s_dt + timedelta(seconds=off_s), target_size)
-                            if live and f is not None:
+                        bg_f, _ = logi_sampler.get_frame_at(s_dt, target_size)
+                        bg_gray = cv2.cvtColor(bg_f, cv2.COLOR_BGR2GRAY) if bg_f is not None else None
+
+                        # Scan up to 20 seconds from session start for cat arrival at feeder
+                        for off_s in range(0, 20):
+                            cand_dt = s_dt + timedelta(seconds=off_s)
+                            f, live = logi_sampler.get_frame_at(cand_dt, target_size)
+                            if not live or f is None:
+                                continue
+
+                            if bg_gray is not None:
+                                cand_gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+                                diff = cv2.absdiff(cand_gray, bg_gray)
+                                _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+                                h_l, w_l = cand_gray.shape[:2]
+                                bowl_frac = float(np.sum(thresh[int(h_l * 0.2):int(h_l * 0.8), int(w_l * 0.25):int(w_l * 0.8)])) / 255.0 / (h_l * 0.6 * w_l * 0.55)
+                                # Hard rule: Require a cat-visible frame at the feeder
+                                if bowl_frac >= 0.15:
+                                    ret_frame = f
+                                    ret_dt = cand_dt
+                                    ret_ts = cand_dt.strftime("%H:%M:%S")
+                                    break
+                            else:
                                 ret_frame = f
-                                break
-                    if ret_frame is None and logitech_dir and Path(logitech_dir).exists():
-                        st_digits = st_clean.replace(":", "")
-                        for img_f in sorted(Path(logitech_dir).glob(f"*{st_digits}*.jpg")):
-                            loaded = cv2.imread(str(img_f))
-                            if loaded is not None:
-                                ret_frame = cv2.resize(loaded, target_size)
+                                ret_dt = cand_dt
+                                ret_ts = cand_dt.strftime("%H:%M:%S")
                                 break
 
+                    # Fallback to logitech_dir identity images if sampler unavailable
+                    if ret_frame is None and logitech_dir and Path(logitech_dir).exists():
+                        for id_f in sorted(Path(logitech_dir).glob("*identity*enhanced*.jpg")):
+                            loaded = cv2.imread(str(id_f))
+                            if loaded is not None:
+                                ret_frame = cv2.resize(loaded, target_size)
+                                ret_dt = s_dt
+                                ret_ts = st_clean
+                                break
+
+                    # Hard rule: If no cat-visible frame is found, omit the optional return_to_feeder entirely
                     if ret_frame is not None:
                         candidates.append({
-                            "dt": s_dt,
+                            "dt": ret_dt,
                             "key": "return_to_feeder",
                             "frame": ret_frame,
                             "title": f"5. {s_cat} Returned",
                             "camera_tag": "[LOGITECH] Sanbo Feeder",
-                            "ts_str": st_clean,
-                            "caption": f"↩ {s_cat} returned to {s_cat} feeder · {st_clean}"
+                            "ts_str": ret_ts,
+                            "caption": f"↩ {s_cat} returned to {s_cat} feeder · {ret_ts}"
                         })
                     break
 
@@ -1567,26 +1599,6 @@ def find_or_sample_recap_snapshots(
         "finish": (None, "3. Bowl Finished")
     }
 
-    start_k = summary.get("start_kibble")
-    dispensed_label = f"1. Food Dispensed (~{start_k} kibble)" if start_k is not None else "1. Food Dispensed"
-
-    # 1. Food Dispensed
-    dispensed_frame = None
-    if tapo_path and tapo_path.exists():
-        for cand in sorted(tapo_path.glob("*kibble_dispensed*.jpg")):
-            img = cv2.imread(str(cand))
-            if img is not None:
-                dispensed_frame = cv2.resize(img, (w, h))
-                break
-
-    if dispensed_frame is None and tapo_sampler.clips:
-        first_clip_start = tapo_sampler.clips[0]["start"]
-        f, live = tapo_sampler.get_frame_at(first_clip_start, (w, h))
-        if live and f is not None:
-            dispensed_frame = f
-
-    out["dispensed"] = (dispensed_frame, dispensed_label)
-
     # 2. Cat Arrival (Deterministic Rule: frame MUST visibly contain cat)
     arrival_dt: Optional[datetime] = None
     first_cat = "Dan"
@@ -1623,12 +1635,96 @@ def find_or_sample_recap_snapshots(
             candidates.sort(key=lambda x: x[0])
             arrival_dt, first_cat = candidates[0]
 
+    # 1. Food Dispensed (Deterministic Rule: clean settled frame post-dispense, pre-arrival)
+    dispensed_frame = None
+    disp_ts_str: Optional[str] = None
+
+    if tapo_sampler.clips:
+        first_clip_start = tapo_sampler.clips[0]["start"]
+        ref_f, ref_live = tapo_sampler.get_frame_at(first_clip_start, (w, h))
+        ref_gray = cv2.cvtColor(ref_f, cv2.COLOR_BGR2GRAY) if (ref_live and ref_f is not None) else None
+
+        max_scan_s = 20.0
+        if arrival_dt is not None and arrival_dt > first_clip_start + timedelta(seconds=1.0):
+            max_scan_s = min((arrival_dt - first_clip_start).total_seconds(), 30.0)
+
+        best_f = None
+        best_dt = first_clip_start
+        max_bowl_diff = -1.0
+
+        settled_f = None
+        settled_dt = None
+
+        prev_bowl_gray = None
+        if ref_gray is not None:
+            prev_bowl_gray = ref_gray[int(h * 0.45):int(h * 0.9), int(w * 0.1):int(w * 0.45)]
+
+        scan_steps = int(max_scan_s / 0.25)
+        for step in range(scan_steps + 1):
+            cand_dt = first_clip_start + timedelta(seconds=step * 0.25)
+            if arrival_dt is not None and arrival_dt > first_clip_start + timedelta(seconds=1.0):
+                if cand_dt >= arrival_dt - timedelta(milliseconds=200):
+                    break
+
+            f, live = tapo_sampler.get_frame_at(cand_dt, (w, h))
+            if not live or f is None:
+                continue
+
+            if ref_gray is not None:
+                cand_gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+                cand_upper = cand_gray[0:int(h * 0.55), int(w * 0.1):int(w * 0.65)]
+                cand_bowl = cand_gray[int(h * 0.45):int(h * 0.9), int(w * 0.1):int(w * 0.45)]
+
+                ref_upper = ref_gray[0:int(h * 0.55), int(w * 0.1):int(w * 0.65)]
+                ref_bowl = ref_gray[int(h * 0.45):int(h * 0.9), int(w * 0.1):int(w * 0.45)]
+
+                upper_diff = float(np.mean(cv2.absdiff(cand_upper, ref_upper)))
+                bowl_diff = float(np.mean(cv2.absdiff(cand_bowl, ref_bowl)))
+                inter_diff = float(np.mean(cv2.absdiff(cand_bowl, prev_bowl_gray))) if prev_bowl_gray is not None else 0.0
+                prev_bowl_gray = cand_bowl
+
+                # Rule: Cat must NOT be present (upper_diff <= 12.0)
+                if upper_diff <= 12.0:
+                    if bowl_diff > 2.0 and inter_diff < 1.5:
+                        settled_f = f
+                        settled_dt = cand_dt
+                    if bowl_diff >= max_bowl_diff:
+                        max_bowl_diff = bowl_diff
+                        best_f = f
+                        best_dt = cand_dt
+                else:
+                    break
+            else:
+                best_f = f
+                best_dt = cand_dt
+
+        if settled_f is not None:
+            dispensed_frame = settled_f
+            disp_ts_str = settled_dt.strftime("%H:%M:%S")
+        elif best_f is not None and max_bowl_diff > 0.5:
+            dispensed_frame = best_f
+            disp_ts_str = best_dt.strftime("%H:%M:%S")
+        elif ref_f is not None:
+            dispensed_frame = ref_f
+            disp_ts_str = first_clip_start.strftime("%H:%M:%S")
+
+    if dispensed_frame is None and tapo_path and tapo_path.exists():
+        for cand in sorted(tapo_path.glob("*kibble_dispensed*.jpg")):
+            img = cv2.imread(str(cand))
+            if img is not None:
+                dispensed_frame = cv2.resize(img, (w, h))
+                break
+
+    start_k = summary.get("start_kibble")
+    k_suffix = f" (~{start_k} kibble)" if start_k is not None else ""
+    ts_suffix = f" at {disp_ts_str}" if disp_ts_str else ""
+    dispensed_label = f"1. Food Dispensed{k_suffix}{ts_suffix}"
+    out["dispensed"] = (dispensed_frame, dispensed_label)
+
+    # 2. Cat Arrival Search Window
     arrival_frame = None
     arrival_label = "2. Cat Arrival"
 
-    # Search window for clear cat arrival frame
-    # A genuine cat arrival frame has significant foreground difference in the upper scene (cat body/head)
-    # compared to the clean pre-arrival empty scene
     if tapo_sampler.clips:
         ref_dt = tapo_sampler.clips[0]["start"]
         ref_f, ref_live = tapo_sampler.get_frame_at(ref_dt, (w, h))
@@ -1649,8 +1745,7 @@ def find_or_sample_recap_snapshots(
             if ref_gray is not None:
                 cand_gray = cv2.cvtColor(cand_f, cv2.COLOR_BGR2GRAY)
                 diff = cv2.absdiff(cand_gray, ref_gray)
-                # Upper scene where cat body appears: y: 0-300, x: 100-500
-                upper_diff = float(np.mean(diff[0:300, 100:500]))
+                upper_diff = float(np.mean(diff[0:int(h * 0.55), int(w * 0.1):int(w * 0.65)]))
                 if upper_diff > 12.0:  # Confirmed cat body/head in frame
                     best_f = cand_f
                     best_dt = s_dt

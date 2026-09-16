@@ -38,6 +38,8 @@ from scripts.unified_breakfast import (
     find_or_sample_recap_snapshots,
     find_or_render_timeline_chart,
     render_recap_cards,
+    prepare_evidence_snapshots,
+    add_compact_banner,
     deliver_unified_breakfast
 )
 
@@ -985,4 +987,221 @@ def test_timeline_strip_multi_session_transitions():
         logitech_sessions=sessions
     )
     assert strip_s2.shape == (42, 720, 3)
+
+
+def test_normal_three_image_evidence_set(tmp_path):
+    """
+    Verifies that for an ordinary uncontested breakfast:
+    - Evidence album has exactly 3 images: Food Dispensed, Cat Arrival, Meal Finished
+    - No fake foreign arrival or return images are created
+    - All 3 images are written to out_dir with compact banner
+    """
+    import cv2
+    tapo_dir = tmp_path / "tapo"
+    tapo_dir.mkdir()
+    disp_img = np.full((720, 1280, 3), 100, dtype=np.uint8)
+    cv2.imwrite(str(tapo_dir / "motion_20260915_062000_kibble_dispensed.jpg"), disp_img)
+
+    tapo_summary = {
+        "start_time": "2026-09-15 06:19:50",
+        "end_time": "2026-09-15 06:21:10",
+        "dan_first_ts": "2026-09-15 06:20:00",
+        "start_kibble": 28,
+        "end_kibble": 0,
+        "meal_finished": True
+    }
+    tapo_timeline = {
+        "feeding_phases": [
+            {"start": "2026-09-15 06:20:00", "end": "2026-09-15 06:21:05", "cat": "Dan"}
+        ]
+    }
+    clip_p = tmp_path / "motion_20260915_061950_1m_30s.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    w = cv2.VideoWriter(str(clip_p), fourcc, 10.0, (160, 90))
+    for i in range(900):
+        # Frame 0-99: empty (10), 100-699: cat eating (200), 700+: empty finished (50)
+        val = 50 if i >= 700 else (200 if i >= 100 else 10)
+        w.write(np.full((90, 160, 3), val, dtype=np.uint8))
+    w.release()
+
+    sampler = VideoStreamSampler([clip_p], is_logitech=False)
+    out_dir = tmp_path / "out"
+
+    evidence = prepare_evidence_snapshots(
+        tapo_sampler=sampler,
+        tapo_dir=tapo_dir,
+        tapo_summary=tapo_summary,
+        tapo_timeline=tapo_timeline,
+        out_dir=out_dir,
+        target_date="20260915"
+    )
+    sampler.close()
+
+    assert len(evidence) == 3
+    keys = [e["key"] for e in evidence]
+    assert keys == ["dispensed", "arrival", "finish"]
+
+    for e in evidence:
+        assert e["image_path"].exists()
+        assert e["caption"] != ""
+        assert "Dan feeder" in e["caption"]
+
+    assert "Food Dispensed (~28 kibble)" in evidence[0]["caption"]
+    assert "Dan arrived at Dan feeder" in evidence[1]["caption"]
+    assert "Meal Finished (empty bowl)" in evidence[2]["caption"]
+
+
+def test_sep16_five_image_evidence_set_with_foreign_arrival_and_return():
+    """
+    Verifies that for Sep-16 natural replay evidence:
+    - Exactly 5 evidence snapshots are generated in chronological order:
+      1. Food Dispensed (06:19:59)
+      2. Dan Arrival (06:20:01 / 06:20:13)
+      3. Foreign Arrival - Sanbo (06:20:26)
+      4. Meal Finished (06:21:03)
+      5. Return to Own Feeder - Sanbo (06:21:22)
+    - Each image contains concise caption with event, cat, feeder, timestamp.
+    """
+    tapo_dir = Path("scratch/replay_evidence/20260916/tapo-evidence-20260916")
+    logi_dir = Path("scratch/replay_evidence/20260916/logitech-evidence-20260916")
+    if not tapo_dir.exists() or not logi_dir.exists():
+        pytest.skip("Sep-16 evidence not available locally")
+
+    tapo_clips = sorted(tapo_dir.glob("motion_*.mp4"))
+    logi_clips = sorted(logi_dir.glob("motion_*.mp4"))
+    tapo_sum = json.loads((tapo_dir / "tapo_summary_20260916.json").read_text())
+    tapo_tl = json.loads((tapo_dir / "tapo_timeline_20260916.json").read_text())
+    logi_sum = json.loads((logi_dir / "logitech_vlm_shadow_summary_20260916.json").read_text())
+
+    tapo_sampler = VideoStreamSampler(tapo_clips, is_logitech=False)
+    logi_sampler = VideoStreamSampler(logi_clips, is_logitech=True)
+    out_dir = Path("/tmp/test_evidence_sep16")
+
+    evidence = prepare_evidence_snapshots(
+        tapo_sampler=tapo_sampler,
+        logi_sampler=logi_sampler,
+        tapo_dir=tapo_dir,
+        logitech_dir=logi_dir,
+        tapo_summary=tapo_sum,
+        tapo_timeline=tapo_tl,
+        logitech_summary=logi_sum,
+        out_dir=out_dir,
+        target_date="20260916"
+    )
+    tapo_sampler.close()
+    logi_sampler.close()
+
+    assert len(evidence) == 5
+    keys = [e["key"] for e in evidence]
+    assert keys == ["dispensed", "arrival", "foreign_arrival", "finish", "return_to_feeder"]
+
+    timestamps = [e["timestamp"] for e in evidence]
+    assert timestamps == sorted(timestamps)
+
+    assert "⚠️ Sanbo arrived at Dan feeder · 06:20:26" in evidence[2]["caption"]
+    assert "↩ Sanbo returned to Sanbo feeder · 06:21:22" in evidence[4]["caption"]
+    assert evidence[4]["camera_tag"] == "[LOGITECH] Sanbo Feeder"
+
+    for e in evidence:
+        assert e["image_path"].exists()
+
+
+def test_missing_optional_event_does_not_invent_fake_image(tmp_path):
+    """Verifies that missing optional events (no foreign cat, no return) do NOT invent fake images."""
+    tapo_summary = {
+        "start_time": "2026-09-17 06:20:00",
+        "end_time": "2026-09-17 06:21:00",
+        "dan_first_ts": "2026-09-17 06:20:05",
+        "start_kibble": 20,
+        "end_kibble": 0,
+        "has_conflict": False,
+        "conflict_frames": 0,
+        "meal_finished": True
+    }
+    tapo_timeline = {
+        "feeding_phases": [{"start": "2026-09-17 06:20:05", "end": "2026-09-17 06:21:00", "cat": "Dan"}]
+    }
+
+    evidence = prepare_evidence_snapshots(
+        tapo_sampler=None,
+        logi_sampler=None,
+        tapo_dir=tmp_path,
+        tapo_summary=tapo_summary,
+        tapo_timeline=tapo_timeline,
+        out_dir=tmp_path,
+        target_date="20260917"
+    )
+    assert len(evidence) == 0
+
+
+def test_dynamic_video_has_no_static_recap_cards(tmp_path):
+    """Verifies that generate_combined_breakfast_video with include_recap_cards=False writes only dynamic frames."""
+    import cv2
+    t_clip = tmp_path / "motion_20260918_062000_10s.mp4"
+    l_clip = tmp_path / "motion_20260918_062000_10s_logi.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+
+    for cp in [t_clip, l_clip]:
+        vw = cv2.VideoWriter(str(cp), fourcc, 10.0, (320, 180))
+        for i in range(100):
+            vw.write(np.full((180, 320, 3), (i * 2) % 256, dtype=np.uint8))
+        vw.release()
+
+    out_v = tmp_path / "out_dynamic.mp4"
+    res_p = generate_combined_breakfast_video(
+        tapo_clips=[t_clip],
+        logitech_clips=[l_clip],
+        output_path=out_v,
+        target_date="20260918",
+        speedup_factor=4.0,
+        out_width=320,
+        target_fps=16.0,
+        include_recap_cards=False,
+        activity_buffer_seconds=0.0
+    )
+
+    cap = cv2.VideoCapture(str(res_p))
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+
+    duration = frame_count / fps
+    assert duration <= 4.0
+
+
+def test_deliver_unified_breakfast_item_level_delivery_and_skip_telegram(tmp_path):
+    """
+    Verifies deliver_unified_breakfast with --skip-telegram:
+    - Prepares evidence images in out_dir
+    - Does NOT mutate delivery registry
+    - Exactly-once semantics for summary -> evidence_album -> combined_video
+    """
+    import cv2
+    from scripts.delivery_ledger import load_delivery_registry, is_breakfast_fully_delivered
+
+    out_dir = tmp_path / "out_delivery"
+    out_dir.mkdir()
+    tapo_dir = tmp_path / "tapo_dir"
+    tapo_dir.mkdir()
+
+    # Create small synthetic clip in tapo_dir
+    c_p = tapo_dir / "motion_20260919_062000_10s.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    w = cv2.VideoWriter(str(c_p), fourcc, 10.0, (160, 90))
+    for _ in range(30):
+        w.write(np.zeros((90, 160, 3), dtype=np.uint8))
+    w.release()
+
+    ok = deliver_unified_breakfast(
+        target_date="20260919",
+        tapo_dir=tapo_dir,
+        out_dir=out_dir,
+        skip_telegram=True
+    )
+    assert ok is True
+
+    reg = load_delivery_registry(None, None, local_fallback_dir=out_dir)
+    assert is_breakfast_fully_delivered(reg, "20260919") is False
+
+
 

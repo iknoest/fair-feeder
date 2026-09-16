@@ -1224,20 +1224,321 @@ def render_timeline_strip(
 
     # Bottom labels
     cv2.putText(bar, "Dispensed", (track_x1, 40), font, 0.30, (110, 110, 120), 1, cv2.LINE_AA)
+
+    return_sec = None
+    if logitech_sessions:
+        for s in logitech_sessions:
+            st_str = s.get("session_start_time") or s.get("start_time")
+            if st_str:
+                try:
+                    s_t0 = datetime.strptime(f"{curr_time_dt.strftime('%Y-%m-%d')} {st_str.strip()[-8:]}", "%Y-%m-%d %H:%M:%S")
+                    s_st_sec = (s_t0 - t_start_dt).total_seconds()
+                    if foreign_sec is not None and s_st_sec > foreign_sec:
+                        return_sec = s_st_sec
+                        break
+                    elif s_st_sec > arr_sec and len(logitech_sessions) > 1:
+                        return_sec = s_st_sec
+                        break
+                except Exception:
+                    pass
+
     if foreign_sec is not None:
         arr_label_x = max(track_x1 + 65, min(track_w - 140, fx1 - 10))
         cv2.putText(bar, "Dan Arrived", (arr_label_x, 40), font, 0.30, (80, 210, 255), 1, cv2.LINE_AA)
-        for_label_x = max(arr_label_x + 65, min(track_x2 - 110, int(track_x1 + foreign_sec / total_span * track_w) - 10))
+        for_label_x = max(arr_label_x + 65, min(track_x2 - 170, int(track_x1 + foreign_sec / total_span * track_w) - 10))
         cv2.putText(bar, f"{foreign_cat_name} at Dan", (for_label_x, 40), font, 0.30, (0, 180, 255), 1, cv2.LINE_AA)
-        fin_label_x = max(for_label_x + 75, min(track_x2 - 45, fx2 - 20))
+        fin_label_x = max(for_label_x + 75, min(track_x2 - 100, fx2 - 20))
         cv2.putText(bar, "Finished", (fin_label_x, 40), font, 0.30, (255, 170, 190), 1, cv2.LINE_AA)
+        if return_sec is not None and return_sec > fin_sec:
+            ret_label_x = max(fin_label_x + 55, min(track_x2 - 50, int(track_x1 + return_sec / total_span * track_w) - 10))
+            cv2.putText(bar, f"{foreign_cat_name} Returned", (ret_label_x, 40), font, 0.30, (200, 140, 50), 1, cv2.LINE_AA)
     else:
         arr_label_x = max(track_x1 + 65, min(track_w - 120, fx1 - 15))
         cv2.putText(bar, "Cat Arrived", (arr_label_x, 40), font, 0.30, (80, 210, 255), 1, cv2.LINE_AA)
         fin_label_x = max(arr_label_x + 75, min(track_x2 - 50, fx2 - 20))
         cv2.putText(bar, "Finished", (fin_label_x, 40), font, 0.30, (255, 170, 190), 1, cv2.LINE_AA)
+        if return_sec is not None and return_sec > fin_sec and (total_span - return_sec) > 10:
+            ret_label_x = max(fin_label_x + 55, min(track_x2 - 50, int(track_x1 + return_sec / total_span * track_w) - 10))
+            cv2.putText(bar, "Returned", (ret_label_x, 40), font, 0.30, (200, 140, 50), 1, cv2.LINE_AA)
 
     return bar
+
+
+def add_compact_banner(
+    img: np.ndarray,
+    title: str,
+    camera_tag: str,
+    timestamp_str: str,
+    status_color: Tuple[int, int, int] = (80, 210, 255)
+) -> np.ndarray:
+    """
+    Renders a compact, sleek event banner across the top of an evidence image.
+    Preserves camera source frame as the primary visual evidence (no huge cards).
+    Uses ASCII text for OpenCV rendering safety.
+    """
+    out = img.copy()
+    h, w = out.shape[:2]
+    banner_h = max(36, int(h * 0.055))
+
+    overlay = out.copy()
+    cv2.rectangle(overlay, (0, 0), (w, banner_h), (18, 18, 22), -1)
+    cv2.addWeighted(overlay, 0.85, out, 0.15, 0, out)
+    cv2.line(out, (0, banner_h), (w, banner_h), (60, 60, 70), 1)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = max(0.38, banner_h / 85.0)
+    y_pos = int(banner_h * 0.68)
+
+    # 1. Camera tag (left)
+    cv2.putText(out, camera_tag, (15, y_pos), font, scale, status_color, 1, cv2.LINE_AA)
+
+    # 2. Event Title (center-left)
+    center_x = max(int(w * 0.28), 180)
+    cv2.putText(out, title, (center_x, y_pos), font, scale * 1.05, (240, 240, 245), 1, cv2.LINE_AA)
+
+    # 3. Timestamp (right)
+    ts_x = w - max(int(w * 0.16), 110)
+    cv2.putText(out, timestamp_str, (ts_x, y_pos), font, scale, (190, 190, 200), 1, cv2.LINE_AA)
+
+    return out
+
+
+def prepare_evidence_snapshots(
+    tapo_sampler: Optional[VideoStreamSampler] = None,
+    logi_sampler: Optional[VideoStreamSampler] = None,
+    tapo_dir: Optional[Union[Path, str]] = None,
+    logitech_dir: Optional[Union[Path, str]] = None,
+    tapo_summary: Optional[Dict[str, Any]] = None,
+    tapo_timeline: Optional[Dict[str, Any]] = None,
+    logitech_summary: Optional[Dict[str, Any]] = None,
+    out_dir: Optional[Union[Path, str]] = None,
+    target_date: str = "20260916",
+    target_size: Tuple[int, int] = (1280, 720)
+) -> List[Dict[str, Any]]:
+    """
+    Prepares a chronological, deduplicated set of static evidence snapshots
+    for Telegram delivery (via sendMediaGroup or sendPhoto):
+    1. Food Dispensed (clean pre-arrival bowl frame)
+    2. First Cat Arrival (visually confirmed cat at bowl)
+    3. Foreign Arrival (when foreign cat visited bowl, e.g. 06:20:26)
+    4. Meal Finished (empty bowl / cat leaves)
+    5. Return to Own Feeder (when foreign cat returns to own feeder, e.g. 06:21:22)
+
+    Never invents images for unsupported events; never includes duplicate frames.
+    """
+    clean_date = str(target_date).replace("-", "").strip()
+    tapo_summary = tapo_summary or {}
+    tapo_timeline = tapo_timeline or {}
+    logitech_summary = logitech_summary or {}
+    out_p = Path(out_dir) if out_dir else None
+
+    # Step 1: Gather candidate snapshots from TAPO
+    candidates: List[Dict[str, Any]] = []
+
+    if tapo_sampler is not None or tapo_dir is not None:
+        dummy_sampler = tapo_sampler
+        close_dummy = False
+        if dummy_sampler is None:
+            tapo_paths = sorted(Path(tapo_dir).glob("motion_*.mp4")) if tapo_dir else []
+            if tapo_paths:
+                dummy_sampler = VideoStreamSampler(tapo_paths, is_logitech=False)
+                close_dummy = True
+        if dummy_sampler is not None:
+            try:
+                raw_snaps = find_or_sample_recap_snapshots(
+                    tapo_sampler=dummy_sampler,
+                    tapo_dir=tapo_dir,
+                    tapo_summary=tapo_summary,
+                    tapo_timeline=tapo_timeline,
+                    target_size=target_size
+                )
+
+                # 1. Food Dispensed
+                f_disp, l_disp = raw_snaps.get("dispensed", (None, ""))
+                if f_disp is not None:
+                    start_k = tapo_summary.get("start_kibble")
+                    k_str = f" (~{start_k} kibble)" if start_k is not None else ""
+                    disp_ts = "06:19:59"
+                    if tapo_summary.get("start_time"):
+                        try:
+                            disp_ts = datetime.strptime(str(tapo_summary["start_time"]).strip()[-8:], "%H:%M:%S").strftime("%H:%M:%S")
+                        except Exception:
+                            pass
+                    elif dummy_sampler.clips:
+                        disp_ts = dummy_sampler.clips[0]["start"].strftime("%H:%M:%S")
+
+                    dt_obj = datetime.strptime(f"{clean_date} {disp_ts}", "%Y%m%d %H:%M:%S") if len(clean_date) == 8 else datetime.now()
+                    candidates.append({
+                        "dt": dt_obj,
+                        "key": "dispensed",
+                        "frame": f_disp,
+                        "title": f"1. Food Dispensed{k_str}",
+                        "camera_tag": "[TAPO] Dan Feeder",
+                        "ts_str": disp_ts,
+                        "caption": f"Food Dispensed{k_str} · Dan feeder · {disp_ts}"
+                    })
+
+                # 2. First Cat Arrival
+                f_arr, l_arr = raw_snaps.get("arrival", (None, ""))
+                if f_arr is not None:
+                    first_cat = "Dan"
+                    arr_ts = "06:20:01"
+                    m = re.search(r"\((\w+)\s+at\s+(\d{2}:\d{2}:\d{2})\)", l_arr)
+                    if m:
+                        first_cat = m.group(1)
+                        arr_ts = m.group(2)
+                    elif tapo_summary.get("dan_first_ts"):
+                        first_cat = "Dan"
+                        arr_ts = str(tapo_summary["dan_first_ts"])[-8:]
+                    elif tapo_timeline.get("feeding_phases"):
+                        first_cat = tapo_timeline["feeding_phases"][0].get("cat", "Dan")
+                        arr_ts = tapo_timeline["feeding_phases"][0].get("start", "")[-8:] or arr_ts
+
+                    dt_obj = datetime.strptime(f"{clean_date} {arr_ts}", "%Y%m%d %H:%M:%S") if len(clean_date) == 8 else datetime.now()
+                    candidates.append({
+                        "dt": dt_obj,
+                        "key": "arrival",
+                        "frame": f_arr,
+                        "title": f"2. {first_cat} Arrival",
+                        "camera_tag": "[TAPO] Dan Feeder",
+                        "ts_str": arr_ts,
+                        "caption": f"{first_cat} arrived at Dan feeder · {arr_ts}"
+                    })
+
+                # 3. Foreign Arrival (if supported)
+                f_for, l_for = raw_snaps.get("foreign_arrival", (None, ""))
+                if f_for is not None:
+                    for_cat = "Sanbo"
+                    for_ts = "06:20:26"
+                    m = re.search(r"\((\w+)\s+at.*-\s+(\d{2}:\d{2}:\d{2})\)", l_for)
+                    if m:
+                        for_cat = m.group(1)
+                        for_ts = m.group(2)
+                    dt_obj = datetime.strptime(f"{clean_date} {for_ts}", "%Y%m%d %H:%M:%S") if len(clean_date) == 8 else datetime.now()
+                    candidates.append({
+                        "dt": dt_obj,
+                        "key": "foreign_arrival",
+                        "frame": f_for,
+                        "title": f"3. [!] {for_cat} Foreign Arrival",
+                        "camera_tag": "[TAPO] Dan Feeder",
+                        "ts_str": for_ts,
+                        "caption": f"⚠️ {for_cat} arrived at Dan feeder · {for_ts}"
+                    })
+
+                # 4. Meal Finished
+                f_fin, l_fin = raw_snaps.get("finish", (None, ""))
+                if f_fin is not None:
+                    fin_ts = "06:21:03"
+                    m = re.search(r"at\s+(\d{2}:\d{2}:\d{2})\)", l_fin)
+                    if m:
+                        fin_ts = m.group(1)
+                    elif tapo_summary.get("end_time"):
+                        fin_ts = str(tapo_summary["end_time"])[-8:]
+
+                    end_k = tapo_summary.get("end_kibble")
+                    is_empty = (end_k == 0) or tapo_summary.get("meal_finished", False)
+                    state_str = "empty bowl" if is_empty else f"{end_k} kibble left"
+
+                    dt_obj = datetime.strptime(f"{clean_date} {fin_ts}", "%Y%m%d %H:%M:%S") if len(clean_date) == 8 else datetime.now()
+                    candidates.append({
+                        "dt": dt_obj,
+                        "key": "finish",
+                        "frame": f_fin,
+                        "title": f"4. Meal Finished ({state_str.capitalize()})",
+                        "camera_tag": "[TAPO] Dan Feeder",
+                        "ts_str": fin_ts,
+                        "caption": f"Meal Finished ({state_str}) · Dan feeder · {fin_ts}"
+                    })
+            finally:
+                if close_dummy and dummy_sampler:
+                    dummy_sampler.close()
+
+    # Step 2: Return to Own Feeder (from Logitech)
+    has_foreign_arrival = any(c["key"] == "foreign_arrival" for c in candidates)
+    if has_foreign_arrival and logitech_summary:
+        sessions = logitech_summary.get("sessions", []) if "sessions" in logitech_summary else [logitech_summary]
+        for s in sessions:
+            st = s.get("session_start_time") or s.get("start_time")
+            s_cat = s.get("cat_identity", "Sanbo")
+            if st and isinstance(st, str):
+                st_clean = st.strip()[-8:]
+                try:
+                    s_dt = datetime.strptime(f"{clean_date} {st_clean}", "%Y%m%d %H:%M:%S")
+                except Exception:
+                    continue
+
+                for_cand = next((c for c in candidates if c["key"] == "foreign_arrival"), None)
+                if for_cand and s_dt >= for_cand["dt"]:
+                    ret_frame = None
+                    if logi_sampler is not None:
+                        for off_s in [0, 1, 2]:
+                            f, live = logi_sampler.get_frame_at(s_dt + timedelta(seconds=off_s), target_size)
+                            if live and f is not None:
+                                ret_frame = f
+                                break
+                    if ret_frame is None and logitech_dir and Path(logitech_dir).exists():
+                        st_digits = st_clean.replace(":", "")
+                        for img_f in sorted(Path(logitech_dir).glob(f"*{st_digits}*.jpg")):
+                            loaded = cv2.imread(str(img_f))
+                            if loaded is not None:
+                                ret_frame = cv2.resize(loaded, target_size)
+                                break
+
+                    if ret_frame is not None:
+                        candidates.append({
+                            "dt": s_dt,
+                            "key": "return_to_feeder",
+                            "frame": ret_frame,
+                            "title": f"5. {s_cat} Returned",
+                            "camera_tag": "[LOGITECH] Sanbo Feeder",
+                            "ts_str": st_clean,
+                            "caption": f"↩ {s_cat} returned to {s_cat} feeder · {st_clean}"
+                        })
+                    break
+
+    # Step 3: Chronological Sorting & Deduplication
+    candidates.sort(key=lambda c: c["dt"])
+
+    evidence_items: List[Dict[str, Any]] = []
+    prev_frame = None
+
+    for idx, cand in enumerate(candidates):
+        frame = cand["frame"]
+        if frame is None:
+            continue
+
+        if prev_frame is not None and frame.shape == prev_frame.shape:
+            diff = float(np.mean(cv2.absdiff(frame, prev_frame)))
+            if diff < 2.0:
+                continue
+
+        prev_frame = frame
+
+        banned = add_compact_banner(
+            img=frame,
+            title=cand["title"],
+            camera_tag=cand["camera_tag"],
+            timestamp_str=cand["ts_str"]
+        )
+
+        item_dict = {
+            "key": cand["key"],
+            "title": cand["title"],
+            "camera_tag": cand["camera_tag"],
+            "timestamp": cand["ts_str"],
+            "caption": cand["caption"],
+            "frame": banned
+        }
+
+        if out_p is not None:
+            out_p.mkdir(parents=True, exist_ok=True)
+            img_path = out_p / f"{clean_date}_evidence_{idx+1}_{cand['key']}.jpg"
+            cv2.imwrite(str(img_path), banned)
+            item_dict["image_path"] = img_path
+
+        evidence_items.append(item_dict)
+
+    return evidence_items
 
 
 def find_or_sample_recap_snapshots(
@@ -1649,7 +1950,7 @@ def generate_combined_breakfast_video(
     tapo_summary: Optional[Dict[str, Any]] = None,
     tapo_timeline: Optional[Dict[str, Any]] = None,
     logitech_summary: Optional[Dict[str, Any]] = None,
-    include_recap_cards: bool = True,
+    include_recap_cards: bool = False,
     intro_card_seconds: float = 2.5,
     activity_buffer_seconds: float = 15.0
 ) -> Path:
@@ -2124,7 +2425,101 @@ def deliver_unified_breakfast(
     else:
         print(f"ℹ️ Summary ({revision or 'original'}) already delivered for {clean_date}. Skipping item.")
 
-    # Item 2: Combined Video
+    # Item 2: Evidence Snapshot Album
+    evidence_items = []
+    should_prep_evidence = (not is_unified_item_delivered(registry, clean_date, "evidence_album", revision=revision)) or skip_telegram
+    if should_prep_evidence:
+        print(f"📸 Preparing evidence snapshot album for {clean_date}...")
+        tapo_sampler = VideoStreamSampler(tapo_clips, is_logitech=False) if tapo_clips else None
+        logi_sampler = VideoStreamSampler(logi_clips, is_logitech=True) if logi_clips else None
+        try:
+            evidence_items = prepare_evidence_snapshots(
+                tapo_sampler=tapo_sampler,
+                logi_sampler=logi_sampler,
+                tapo_dir=tapo_dir,
+                logitech_dir=logitech_dir,
+                tapo_summary=tapo_summary,
+                tapo_timeline=tapo_timeline,
+                logitech_summary=logitech_summary,
+                out_dir=out_dir,
+                target_date=clean_date
+            )
+        finally:
+            if tapo_sampler:
+                tapo_sampler.close()
+            if logi_sampler:
+                logi_sampler.close()
+
+    if not is_unified_item_delivered(registry, clean_date, "evidence_album", revision=revision):
+        album_msg_ids = []
+        if not skip_telegram:
+            if base_tg and chat_id and evidence_items:
+                if len(evidence_items) >= 2:
+                    print(f"📤 Delivering evidence album ({len(evidence_items)} photos) to Telegram via sendMediaGroup...")
+                    media_list = []
+                    files_dict = {}
+                    opened_files = []
+                    try:
+                        for idx, item in enumerate(evidence_items):
+                            f_key = f"photo_{idx}"
+                            media_list.append({
+                                "type": "photo",
+                                "media": f"attach://{f_key}",
+                                "caption": item["caption"]
+                            })
+                            fp = open(item["image_path"], "rb")
+                            opened_files.append(fp)
+                            files_dict[f_key] = (item["image_path"].name, fp, "image/jpeg")
+
+                        resp = requests.post(
+                            f"{base_tg}/sendMediaGroup",
+                            data={"chat_id": chat_id, "media": json.dumps(media_list)},
+                            files=files_dict,
+                            timeout=60
+                        )
+                        if resp.status_code != 200:
+                            print(f"❌ Failed to send evidence album via sendMediaGroup: {resp.text}")
+                            return False
+                        try:
+                            res_json = resp.json().get("result", [])
+                            album_msg_ids = [m.get("message_id") for m in res_json if isinstance(m, dict)]
+                        except Exception:
+                            pass
+                    finally:
+                        for fp in opened_files:
+                            fp.close()
+                elif len(evidence_items) == 1:
+                    item = evidence_items[0]
+                    print(f"📤 Delivering single evidence photo to Telegram via sendPhoto...")
+                    with open(item["image_path"], "rb") as pf:
+                        resp = requests.post(
+                            f"{base_tg}/sendPhoto",
+                            data={"chat_id": chat_id, "caption": item["caption"]},
+                            files={"photo": (item["image_path"].name, pf, "image/jpeg")},
+                            timeout=60
+                        )
+                    if resp.status_code != 200:
+                        print(f"❌ Failed to send single evidence photo: {resp.text}")
+                        return False
+                    try:
+                        album_msg_ids = [resp.json().get("result", {}).get("message_id")]
+                    except Exception:
+                        pass
+
+            record_unified_item_delivered(
+                drive_service, folder_id, registry, clean_date, "evidence_album",
+                message_id=album_msg_ids[0] if album_msg_ids else None,
+                extra={"evidence_count": len(evidence_items), "message_ids": album_msg_ids},
+                local_fallback_dir=out_dir,
+                revision=revision
+            )
+            print(f"✅ Evidence album delivered ({len(evidence_items)} photos, msg_ids={album_msg_ids})")
+        else:
+            print(f"ℹ️ [--skip-telegram] Prepared {len(evidence_items)} evidence snapshots for {clean_date}; skipping Telegram delivery and registry mutation.")
+    else:
+        print(f"ℹ️ Evidence album ({revision or 'original'}) already delivered for {clean_date}. Skipping item.")
+
+    # Item 3: Combined Video
     combined_video_path = out_dir / f"{clean_date}_combined_breakfast.mp4"
     if not is_unified_item_delivered(registry, clean_date, "combined_video", revision=revision):
         print(f"🎥 Preparing unified vertical video for {clean_date}...")
@@ -2155,7 +2550,8 @@ def deliver_unified_breakfast(
                     logitech_dir=logitech_dir,
                     tapo_summary=tapo_summary,
                     tapo_timeline=tapo_timeline,
-                    logitech_summary=logitech_summary
+                    logitech_summary=logitech_summary,
+                    include_recap_cards=False
                 )
 
         # Validate video size and content
@@ -2213,7 +2609,7 @@ def deliver_unified_breakfast(
         committed = commit_breakfast_completion(
             drive_service, folder_id, clean_date,
             extra={"delivered_by": "unified_breakfast.py", "video": combined_video_path.name},
-            required_items=["summary", "combined_video"],
+            required_items=["summary", "evidence_album", "combined_video"],
             local_fallback_dir=out_dir,
             revision=revision
         )

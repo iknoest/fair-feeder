@@ -223,7 +223,10 @@ def is_breakfast_fully_delivered(
             return True
         rev_items = rev_entry.get("items", {})
         if rev_items:
-            required = ["summary", "combined_video"]
+            if "evidence_album" in rev_items:
+                required = ["summary", "evidence_album", "combined_video"]
+            else:
+                required = ["summary", "combined_video"]
             if all(rev_items.get(k, {}).get("delivered", False) for k in required):
                 return True
         return False
@@ -237,7 +240,10 @@ def is_breakfast_fully_delivered(
     # Track unified items: summary alone must NOT mark breakfast complete!
     unified_items = unified.get("items", {})
     if unified_items:
-        required_unified = ["summary", "combined_video"]
+        if "evidence_album" in unified_items:
+            required_unified = ["summary", "evidence_album", "combined_video"]
+        else:
+            required_unified = ["summary", "combined_video"]
         if all(unified_items.get(k, {}).get("delivered", False) for k in required_unified):
             return True
 
@@ -356,17 +362,21 @@ def commit_breakfast_completion(
         registry["dates"][clean_date] = {"cameras": {}, "unified": {"items": {}}}
 
     date_entry = registry["dates"][clean_date]
-    reqs = required_items if required_items is not None else ["summary", "combined_video"]
-
     if revision:
         corrections = date_entry.setdefault("corrections", {})
         rev_entry = corrections.setdefault(revision, {"items": {}})
         rev_items = rev_entry.setdefault("items", {})
-        if reqs:
-            for req in reqs:
-                if not rev_items.get(req, {}).get("delivered", False):
-                    print(f"[DeliveryLedger] Cannot commit correction '{revision}' completion: required item '{req}' is not delivered.")
-                    return False
+        if required_items is not None:
+            reqs = required_items
+        elif "evidence_album" in rev_items:
+            reqs = ["summary", "evidence_album", "combined_video"]
+        else:
+            reqs = ["summary", "combined_video"]
+
+        for req in reqs:
+            if not rev_items.get(req, {}).get("delivered", False):
+                print(f"[DeliveryLedger] Cannot commit correction '{revision}' completion: required item '{req}' is not delivered.")
+                return False
         rev_entry["fully_delivered"] = True
         rev_entry["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
         if extra:
@@ -375,11 +385,17 @@ def commit_breakfast_completion(
         unified_entry = date_entry.setdefault("unified", {"items": {}})
         unified_items = unified_entry.setdefault("items", {})
 
-        if reqs:
-            for req in reqs:
-                if not unified_items.get(req, {}).get("delivered", False):
-                    print(f"[DeliveryLedger] Cannot commit breakfast completion: required item '{req}' is not delivered.")
-                    return False
+        if required_items is not None:
+            reqs = required_items
+        elif "evidence_album" in unified_items:
+            reqs = ["summary", "evidence_album", "combined_video"]
+        else:
+            reqs = ["summary", "combined_video"]
+
+        for req in reqs:
+            if not unified_items.get(req, {}).get("delivered", False):
+                print(f"[DeliveryLedger] Cannot commit breakfast completion: required item '{req}' is not delivered.")
+                return False
 
         date_entry["breakfast_fully_delivered"] = True
         date_entry["completed_at_utc"] = datetime.now(timezone.utc).isoformat()

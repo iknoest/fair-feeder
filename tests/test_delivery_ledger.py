@@ -79,3 +79,103 @@ def test_durable_artifact_save_and_load(tmp_path):
 
     loaded = load_durable_artifact(None, None, "tapo_timeline_20260901.json", local_fallback_dir=tmp_path)
     assert loaded == payload
+
+
+def test_evidence_album_partial_delivery_and_retry(tmp_path):
+    """
+    Verifies that evidence_album is tracked as a required delivery item:
+    1. summary alone -> not fully delivered
+    2. summary + evidence_album -> not fully delivered
+    3. summary + evidence_album + combined_video -> fully delivered
+    4. retry sends nothing twice
+    """
+    from scripts.delivery_ledger import (
+        init_registry_data,
+        record_unified_item_delivered,
+        is_breakfast_fully_delivered,
+        is_unified_item_delivered,
+        commit_breakfast_completion
+    )
+    registry = init_registry_data()
+    date = "20260916"
+
+    # Initially not delivered
+    assert not is_breakfast_fully_delivered(registry, date)
+
+    # 1. Summary delivered
+    record_unified_item_delivered(None, "dummy_folder", registry, date, "summary", local_fallback_dir=tmp_path)
+    assert is_unified_item_delivered(registry, date, "summary") is True
+    assert is_unified_item_delivered(registry, date, "evidence_album") is False
+    assert is_unified_item_delivered(registry, date, "combined_video") is False
+    assert not is_breakfast_fully_delivered(registry, date)
+
+    # Committing completion should fail-closed because evidence_album and combined_video are missing
+    committed = commit_breakfast_completion(
+        None, "dummy_folder", date,
+        required_items=["summary", "evidence_album", "combined_video"],
+        local_fallback_dir=tmp_path
+    )
+    assert committed is False
+    assert not is_breakfast_fully_delivered(registry, date)
+
+    # 2. Evidence album delivered
+    record_unified_item_delivered(
+        None, "dummy_folder", registry, date, "evidence_album",
+        extra={"evidence_count": 5}, local_fallback_dir=tmp_path
+    )
+    assert is_unified_item_delivered(registry, date, "evidence_album") is True
+    assert is_unified_item_delivered(registry, date, "combined_video") is False
+    assert not is_breakfast_fully_delivered(registry, date)
+
+    # Committing completion should still fail-closed because combined_video is missing
+    committed = commit_breakfast_completion(
+        None, "dummy_folder", date,
+        required_items=["summary", "evidence_album", "combined_video"],
+        local_fallback_dir=tmp_path
+    )
+    assert committed is False
+
+    # 3. Combined video delivered
+    record_unified_item_delivered(None, "dummy_folder", registry, date, "combined_video", local_fallback_dir=tmp_path)
+    assert is_unified_item_delivered(registry, date, "combined_video") is True
+
+    # Now completion succeeds
+    committed = commit_breakfast_completion(
+        None, "dummy_folder", date,
+        required_items=["summary", "evidence_album", "combined_video"],
+        local_fallback_dir=tmp_path
+    )
+    assert committed is True
+    assert is_breakfast_fully_delivered(registry, date)
+
+
+def test_evidence_album_revision_tracking(tmp_path):
+    """Verifies that evidence_album is supported under explicit revision/correction identifiers."""
+    from scripts.delivery_ledger import (
+        init_registry_data,
+        record_unified_item_delivered,
+        is_breakfast_fully_delivered,
+        is_unified_item_delivered,
+        commit_breakfast_completion
+    )
+    registry = init_registry_data()
+    date = "20260916"
+    rev = "correction-album-1"
+
+    assert not is_breakfast_fully_delivered(registry, date, revision=rev)
+
+    record_unified_item_delivered(None, "dummy_folder", registry, date, "summary", revision=rev, local_fallback_dir=tmp_path)
+    record_unified_item_delivered(None, "dummy_folder", registry, date, "evidence_album", revision=rev, local_fallback_dir=tmp_path)
+    assert not is_breakfast_fully_delivered(registry, date, revision=rev)
+
+    record_unified_item_delivered(None, "dummy_folder", registry, date, "combined_video", revision=rev, local_fallback_dir=tmp_path)
+    committed = commit_breakfast_completion(
+        None, "dummy_folder", date,
+        required_items=["summary", "evidence_album", "combined_video"],
+        revision=rev, local_fallback_dir=tmp_path
+    )
+    assert committed is True
+    assert is_breakfast_fully_delivered(registry, date, revision=rev)
+    # Original scheduled date entry remains unaffected
+    assert not is_breakfast_fully_delivered(registry, date, revision=None)
+

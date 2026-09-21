@@ -1,35 +1,14 @@
-# Documentation Policy
+# Documentation policy
 
-## File Roles
+AGENTS.md is the shared project contract and task router. CLAUDE.md imports it;
+Antigravity and Codex read it directly. Add tool-specific text only for an actual
+capability or configuration difference, never a copied domain invariant.
 
-- `AGENTS.md` - compact canonical agent bootstrap and reference index.
-- `CLAUDE.md` - compact Claude bootstrap and reference index.
-- `docs/agent/*` - progressive-disclosure operational knowledge.
-- `tasks/lessons.md` - generalized anti-patterns and lessons.
-- `tasks/todo.md` - task state.
-- `README.md` - user-facing behavior and project overview.
+Detailed procedures live in docs/agent/*. Task state belongs to tasks/todo.md;
+lessons belong to tasks/lessons.md; user behavior belongs to README.md. Update a
+file only when its role changed. Do not require parallel edits to all trackers.
 
-## When Documenting a Lesson, Decision, or Fix
-
-Check all of these in the same change:
-
-- `AGENTS.md`, if it changes how agents should work.
-- `CLAUDE.md`, if it changes Claude bootstrap behavior.
-- `docs/agent/*`, if it is detailed operational context.
-- `tasks/lessons.md`, if it is a reusable anti-pattern or lesson.
-- `tasks/todo.md`, if task state changed.
-- `README.md`, if user-facing behavior changed.
-
-Do not update only one tracking file without checking the others.
-
-## Context Budget Rule
-
-Root files should contain routing and invariants, not the full runbook. Put large
-domain sections in focused files under `docs/agent/` and reference them from the
-root index.
-
-## Backup Policy
-
-For major root-context rewrites, back up `AGENTS.md` and `CLAUDE.md` under
-`backup/` first. `backup/` is local-only and must not be pushed to GitHub.
-
+Keep active instructions free of session history, tool-version snapshots and test
+counts. Preserve useful domain gotchas in the relevant focused runbook. Major
+bootstrap rewrites retain pre-change copies under local-only backup/; these are
+historical and must not be pushed or read as current policy.

@@ -1328,4 +1328,107 @@ def test_deliver_unified_breakfast_item_level_delivery_and_skip_telegram(tmp_pat
     assert is_breakfast_fully_delivered(reg, "20260919") is False
 
 
+def test_sep20_natural_foreign_arrival_album_recovery():
+    """
+    Verifies that for Sep-20 natural production evidence:
+    - Text reports Sanbo arrived at Dan feeder at 06:20:01
+    - Events contains foreign_arrival at 06:20:01
+    - Evidence snapshots include foreign_arrival snapshot
+    - The foreign_arrival snapshot is grounded in the primary meal session (06:20:01),
+      NOT sampled from the 06:24:22 background clip.
+    """
+    tapo_dir = Path("scratch/replay_evidence/20260920/tapo-evidence-20260920")
+    logi_dir = Path("scratch/replay_evidence/20260920/logitech-evidence-20260920")
+    if not tapo_dir.exists() or not logi_dir.exists():
+        pytest.skip("Sep-20 evidence not available locally")
+
+    tapo_clips = sorted(tapo_dir.glob("motion_*.mp4"))
+    logi_clips = sorted(logi_dir.glob("motion_*.mp4"))
+    tapo_sum = json.loads((tapo_dir / "tapo_summary_20260920.json").read_text())
+    tapo_tl = json.loads((tapo_dir / "tapo_timeline_20260920.json").read_text())
+    logi_sum = json.loads((logi_dir / "logitech_vlm_session_summary.json").read_text())
+
+    # Step 1: Verify single event truth in report
+    report = generate_unified_breakfast_report("20260920", tapo_sum, logi_sum, tapo_timeline=tapo_tl)
+    assert "⚠️ Sanbo arrived at Dan feeder · 06:20:01" in report["telegram_text"]
+    for_ev = next((e for e in report["events"] if e["event_type"] == "foreign_arrival"), None)
+    assert for_ev is not None
+    assert for_ev["timestamp"] == "06:20:01"
+    assert for_ev["cat"] == "Sanbo"
+
+    # Step 2: Verify snapshots include foreign arrival grounded around 06:20:01
+    tapo_sampler = VideoStreamSampler(tapo_clips, is_logitech=False, start_time_override=datetime(2026, 9, 20, 6, 20, 0))
+    logi_sampler = VideoStreamSampler(logi_clips, is_logitech=True)
+    out_dir = Path("/tmp/test_evidence_sep20")
+
+    evidence = prepare_evidence_snapshots(
+        tapo_sampler=tapo_sampler,
+        logi_sampler=logi_sampler,
+        tapo_dir=tapo_dir,
+        logitech_dir=logi_dir,
+        tapo_summary=tapo_sum,
+        tapo_timeline=tapo_tl,
+        logitech_summary=logi_sum,
+        out_dir=out_dir,
+        target_date="20260920",
+        events=report["events"]
+    )
+    tapo_sampler.close()
+    logi_sampler.close()
+
+    keys = [e["key"] for e in evidence]
+    assert "foreign_arrival" in keys
+    for_snap = next(e for e in evidence if e["key"] == "foreign_arrival")
+    assert "Sanbo arrived at Dan feeder" in for_snap["caption"]
+    # Crucial regression test: must be from primary session around 06:20:01, NOT 06:24:22
+    assert "06:24:" not in for_snap["caption"]
+    assert "06:20:" in for_snap["caption"]
+
+
+def test_sep21_natural_foreign_arrival_album_recovery():
+    """
+    Verifies that for Sep-21 natural production evidence:
+    - Text reports Sanbo arrived at Dan feeder at 06:20:02
+    - Evidence snapshots include foreign_arrival snapshot (recovering pre-rendered feeding_merged_0_sanbo_arrival.jpg)
+    - Snapshots contain dispensed, arrival, foreign_arrival, finish, and return_to_feeder
+    """
+    tapo_dir = Path("scratch/replay_evidence/20260921/tapo-evidence-20260921")
+    logi_dir = Path("scratch/replay_evidence/20260921/logitech-evidence-20260921")
+    if not tapo_dir.exists() or not logi_dir.exists():
+        pytest.skip("Sep-21 evidence not available locally")
+
+    tapo_clips = sorted(tapo_dir.glob("motion_*.mp4"))
+    logi_clips = sorted(logi_dir.glob("motion_*.mp4"))
+    tapo_sum = json.loads((tapo_dir / "tapo_summary_20260921.json").read_text())
+    tapo_tl = json.loads((tapo_dir / "tapo_timeline_20260921.json").read_text())
+    logi_sum = json.loads((logi_dir / "logitech_vlm_session_summary.json").read_text())
+
+    report = generate_unified_breakfast_report("20260921", tapo_sum, logi_sum, tapo_timeline=tapo_tl)
+    assert "⚠️ Sanbo arrived at Dan feeder · 06:20:02" in report["telegram_text"]
+
+    tapo_sampler = VideoStreamSampler(tapo_clips, is_logitech=False, start_time_override=datetime(2026, 9, 21, 6, 20, 0))
+    logi_sampler = VideoStreamSampler(logi_clips, is_logitech=True)
+    out_dir = Path("/tmp/test_evidence_sep21")
+
+    evidence = prepare_evidence_snapshots(
+        tapo_sampler=tapo_sampler,
+        logi_sampler=logi_sampler,
+        tapo_dir=tapo_dir,
+        logitech_dir=logi_dir,
+        tapo_summary=tapo_sum,
+        tapo_timeline=tapo_tl,
+        logitech_summary=logi_sum,
+        out_dir=out_dir,
+        target_date="20260921",
+        events=report["events"]
+    )
+    tapo_sampler.close()
+    logi_sampler.close()
+
+    keys = [e["key"] for e in evidence]
+    assert "foreign_arrival" in keys
+    for_snap = next(e for e in evidence if e["key"] == "foreign_arrival")
+    assert "Sanbo arrived at Dan feeder · 06:20:02" in for_snap["caption"]
+
+
 

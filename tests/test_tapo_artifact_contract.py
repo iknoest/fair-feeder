@@ -6,7 +6,7 @@ Ensures:
 1. Fail-closed producer validation (scripts/validate_tapo_artifact.py).
 2. Fail-safe consumer integrity distinction (scripts/unified_breakfast.py).
 3. End-to-end evidence artifact bundle packaging and consumption across the CI job boundary.
-4. Sep-8 production replay validation proving Dan attribution and video recovery.
+4. Sep-8 historical model evidence transport regression proving lossless preservation of recorded model output (~24 Dan / ~10 Sanbo / 71% / 29% + conflict metadata) and video recovery across the CI boundary.
 """
 
 import json
@@ -137,13 +137,16 @@ def test_pre_fix_artifact_fails_assertions(tmp_path, capsys):
     assert "⚠️ TAPO model attribution: pipeline artifact incomplete" in report["telegram_text"]
 
 
-# ── Test 2: Repaired Artifact Bundle Succeeds Across Boundary ─────────────────
+# ── Test 2: Synthetic Artifact Bundle Boundary Transfer ────────────────────────
 
-def test_repaired_artifact_bundle_succeeds(tmp_path):
+def test_synthetic_artifact_bundle_boundary_transfer(tmp_path):
     """
-    Verifies that when summary, timeline, and source feeding clips are staged into
-    the artifact bundle, validation passes and consumer fully recovers Dan attribution
-    and dual-panel combined video.
+    Synthetic contract test: verifies that when summary, timeline, and source feeding
+    clips are staged into the artifact bundle, validation passes and consumer fully
+    recovers attribution and dual-panel combined video across the GHA boundary.
+
+    NOTE: This test uses synthetic fixture values solely to verify pipeline transport
+    mechanics and does not claim to represent historical or physical ground truth.
     """
     date = "20260908"
     producer_stage_dir = tmp_path / "producer_output"
@@ -361,55 +364,85 @@ def test_validate_tapo_artifact_cli(tmp_path):
     assert "TAPO evidence artifact bundle validated" in res_pass.stdout
 
 
-# ── Test 8: Sep-8 Production Evidence Replay ──────────────────────────────────
+# ── Test 8: Sep-8 Historical Model Evidence Transport Regression ──────────────
 
-def test_sep8_production_evidence_replay(tmp_path):
+def test_sep8_historical_model_evidence_transport(tmp_path):
     """
-    Full end-to-end replay of the Sep-8 production event through the repaired artifact contract.
-    Proves that:
+    Regression transport test using actual recorded Sep-8 production model outputs.
+
+    PURPOSE & SCOPE:
+    Proves lossless transport of recorded production model outputs across the CI
+    producer -> artifact -> consumer boundary:
     1. Staging summary, timeline, and source clip in /tmp/output/ satisfies the contract.
     2. Consumer receives complete evidence and eliminates the false 'No source footage' state.
-    3. House report accurately attributes Dan eating at Dan feeder and Sanbo at Sanbo feeder.
+    3. House report truthfully reflects the recorded production model outputs:
+       - Dan ~24 kibble (71%), Sanbo ~10 kibble (29%), meal finished
+       - 7 conflict frames flagged, marking TAPO attribution as contested
+       - Sanbo feeding observed at Sanbo feeder
     4. Combined video is composited with live TAPO and Logitech streams.
+
+    IMPORTANT SEMANTIC BOUNDARY:
+    - This test verifies transport integrity of model outputs, NOT physical correctness
+      of those outputs.
+    - Ava's visual inspection confirmed that Dan did not eat 100% of the food, proving
+      the previous synthetic 100% test claim was unrepresentative of the real footage.
+    - Neither Ava's visual observation nor the model's 71/29 split are treated as a
+      physical ground-truth value oracle; rather, the recorded model numbers are used
+      as a regression baseline to verify lossless pipeline transport.
     """
     date = "20260908"
     gha_producer_output = tmp_path / "gha_runner_tmp_output"
     gha_producer_output.mkdir()
 
-    # Sep-8 TAPO Analysis Results (from morning_report.ipynb)
+    # Sep-8 Recorded Production Model Outputs (from morning_report.ipynb Job 101948457341)
     tapo_summary = {
         "date": date,
         "camera": "TAPO",
-        "start_time": "06:20:03",
-        "end_time": "06:21:40",
-        "start_kibble": 30,
-        "end_kibble": 2,
-        "dan_kibble": 28,
-        "sanbo_kibble": 0,
-        "dan_percent": 100,
-        "sanbo_percent": 0,
-        "dan_bowl_seconds": 97.0,
-        "dan_first_arrival": "06:20:03",
+        "start_time": "06:20:00",
+        "end_time": "06:22:03",
+        "start_kibble": 34,
+        "end_kibble": 0,
+        "dan_kibble": 24,
+        "sanbo_kibble": 10,
+        "dan_percent": 71,
+        "sanbo_percent": 29,
+        "dan_bowl_seconds": 141.0,
+        "sanbo_bowl_seconds": 22.0,
+        "dan_first_arrival": "06:20:00",
+        "sanbo_first_arrival": "06:22:00",
         "meal_finished": True,
-        "has_conflict": False,
-        "conflict_frames": 0
+        "has_conflict": True,
+        "conflict_frames": 7
     }
     (gha_producer_output / f"tapo_summary_{date}.json").write_text(json.dumps(tapo_summary, indent=2), encoding="utf-8")
 
+    # Timeline feeding phases matching the Sep-8 production timeline
     tapo_timeline = {
         "date": date,
         "camera": "TAPO",
-        "generated_at_utc": "2026-09-08T06:30:00+00:00",
+        "generated_at_utc": "2026-09-08T05:45:32+00:00",
         "feeding_phases": [
             {
-                "start": "06:20:03",
-                "end": "06:21:40",
+                "start": "2026-09-08 06:20:00",
+                "end": "2026-09-08 06:21:05",
                 "cat": "Dan",
-                "confidence": 0.96,
-                "dan_bowl_seconds": 97.0,
+                "dan_bowl_seconds": 87.08,
                 "sanbo_bowl_seconds": 0.0,
                 "conflict_frames": 0,
-                "has_conflict": False
+                "has_conflict": False,
+                "exclusion_eligible": True,
+                "confidence": 0.95
+            },
+            {
+                "start": "2026-09-08 06:21:05",
+                "end": "2026-09-08 06:22:02",
+                "cat": "Sanbo",
+                "dan_bowl_seconds": 0.0,
+                "sanbo_bowl_seconds": 11.5,
+                "conflict_frames": 7,
+                "has_conflict": True,
+                "exclusion_eligible": False,
+                "confidence": 0.60
             }
         ]
     }
@@ -474,14 +507,18 @@ def test_sep8_production_evidence_replay(tmp_path):
     # Dan feeder outcome
     assert "Dan feeder" in msg
     assert "Finished ✅" in msg
-    # TAPO model attribution with bar
-    assert "TAPO model attribution" in msg
+    assert "~34 kibble consumed" in msg
+    # TAPO model attribution with bar & conflict warning
+    assert "TAPO model attribution — contested" in msg
     assert "Dan" in msg
-    assert "100%" in msg
-    assert "(~28)" in msg
+    assert "71%" in msg
+    assert "(~24)" in msg
+    assert "Sanbo" in msg
+    assert "29%" in msg
+    assert "(~10)" in msg
+    assert "7 conflict frames" in msg
     assert "Sanbo feeder: Sanbo feeding observed" in msg
     # Physical reconciliation
-    assert "Dan and Sanbo identities consistent with camera attribution" in msg
     assert "Theft: Not confirmed" in msg
     # Neither camera degraded
     assert "No source footage" not in msg

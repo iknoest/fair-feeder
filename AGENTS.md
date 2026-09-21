@@ -5,7 +5,9 @@ Tapo C210 IR camera, a Logitech C925e USB camera, YOLOv11, Tapo timestamp OCR,
 Google Drive, GitHub Actions, and Telegram reports to determine whether Dan ate
 enough and whether Sanbo stole food.
 
-This file is the compact bootstrap. Load the detailed docs below only when the
+Read `/Users/ava/Projects/agent-os/DEFAULTS.md` for shared defaults.
+
+This file is the shared compact bootstrap for Codex, Claude and Antigravity. Load the detailed docs below only when the
 task needs them.
 
 ## Document Reference Index
@@ -94,6 +96,17 @@ task needs them.
   unrelated work, committed, and pushed to `main` when safe.
 - If a push would include destructive history changes, credentials, or unrelated
   user work, stop and ask first.
+
+## Environment and state
+
+Use the current project's `.venv/bin/python` for Python checks. Historical Windows
+safe.directory, PowerShell and Anaconda commands are not this Mac's defaults.
+Read `.github/workflows/` and the relevant runbook for actual scheduler settings;
+do not preserve a second cron configuration in an agent-specific file.
+
+`tasks/todo.md` carries task state; `tasks/lessons.md` carries historical lessons.
+Consult the latest relevant entries, not all history. The dated acceptance notes
+above describe evidence categories; recheck current results for changed behavior.
 
 ## Communication
 

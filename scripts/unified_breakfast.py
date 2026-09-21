@@ -226,12 +226,25 @@ def extract_normalized_event_timeline(
             s_seen = summary.get("sanbo_first_ts") or summary.get("sanbo_first_arrival")
             if s_seen:
                 foreign_ts = str(s_seen).strip()[-8:]
-            elif clean_date == "20260916":
-                foreign_ts = "06:20:26"
+
+    # Cross-camera timing reconciliation with Logitech sessions
+    if foreign_arrival_detected and foreign_ts and logitech_summary:
+        logi_sessions = logitech_summary.get("sessions", []) if "sessions" in logitech_summary else [logitech_summary]
+        if len(logi_sessions) >= 2 and sanbo_k and sanbo_k >= 20:
+            s0 = logi_sessions[0]
+            s0_cat = s0.get("visual_cat_identity") if (s0.get("reconciled_by_cross_camera") and s0.get("visual_cat_identity")) else s0.get("cat_identity")
+            if s0_cat == foreign_cat and str(s0.get("eating_evidence")).lower() in ("yes", "true", "eating", "observed"):
+                s_et = s0.get("session_end_time") or s0.get("end_time")
+                if s_et:
+                    s_et_clean = str(s_et).strip()[-8:]
+                    if foreign_ts < s_et_clean:
+                        try:
+                            dep_dt = datetime.strptime(s_et_clean, "%H:%M:%S")
+                            foreign_ts = (dep_dt + timedelta(seconds=4)).strftime("%H:%M:%S")
+                        except Exception:
+                            pass
 
     if foreign_arrival_detected:
-        if clean_date == "20260916" and (not foreign_ts or foreign_ts < "06:20:20"):
-            foreign_ts = "06:20:26"
         if not foreign_ts:
             tapo_path = Path(tapo_dir) if tapo_dir else None
             if tapo_path and tapo_path.exists():
@@ -242,7 +255,7 @@ def extract_normalized_event_timeline(
                             pkl_data = pickle.load(pf)
                         for fr in pkl_data.get("frames", []):
                             for d in fr.get("detections", []):
-                                if d.get("class_name") == foreign_cat and d.get("conf", 0) >= 0.80:
+                                if d.get("class_name") == foreign_cat and d.get("conf", 0) >= 0.70:
                                     foreign_ts = str(fr.get("timestamp", "")).strip()[-8:]
                                     break
                             if foreign_ts:
@@ -250,7 +263,7 @@ def extract_normalized_event_timeline(
                     except Exception:
                         pass
         if not foreign_ts and tapo_start:
-            foreign_ts = "06:20:26"
+            foreign_ts = str(tapo_start).strip()[-8:]
 
         if foreign_ts:
             events.append({
@@ -364,6 +377,14 @@ def generate_unified_breakfast_report(
         logitech_sessions = [copy.deepcopy(logitech_session)]
     else:
         logitech_sessions = []
+
+    # Normalized event timeline is the single source of truth for text, album, and video
+    events = extract_normalized_event_timeline(
+        target_date=clean_date,
+        tapo_summary=tapo_summary,
+        tapo_timeline=tapo_timeline,
+        logitech_summary=logitech_container
+    )
 
     # 2. Timeline Window Span (strictly from evidence across ALL sessions and TAPO)
     tapo_start = tapo_summary.get("start_time") or tapo_summary.get("start_ts")
@@ -490,34 +511,16 @@ def generate_unified_breakfast_report(
         has_identity_conflict
     )
 
-    # Detect foreign cat arrival at Dan feeder
+    # Detect foreign cat arrival at Dan feeder directly from normalized event timeline
     foreign_arrival_detected = False
     foreign_cat = "Sanbo"
     foreign_arrival_time = None
 
-    if conflict_frames <= 15:
-        if tapo_timeline and "feeding_phases" in tapo_timeline:
-            for ph in tapo_timeline["feeding_phases"]:
-                ph_cat = ph.get("cat", "")
-                if ph_cat and ph_cat.lower() == "sanbo":
-                    foreign_arrival_detected = True
-                    foreign_cat = "Sanbo"
-                    ph_st = ph.get("start", "")
-                    if ph_st:
-                        foreign_arrival_time = ph_st.strip()[-8:]
-                    break
-
-        if not foreign_arrival_detected and sanbo_kibble is not None and sanbo_kibble >= 5:
-            s_first = tapo_summary.get("sanbo_first_ts") or tapo_summary.get("sanbo_first_arrival")
-            if s_first:
-                foreign_arrival_detected = True
-                foreign_arrival_time = str(s_first).strip()[-8:]
-            elif dan_seen and clean_date == "20260916":
-                foreign_arrival_detected = True
-                foreign_arrival_time = "06:20:26"
-
-    if foreign_arrival_detected and clean_date == "20260916" and (not foreign_arrival_time or foreign_arrival_time < "06:20:20"):
-        foreign_arrival_time = "06:20:26"
+    for_ev = next((e for e in events if e.get("event_type") == "foreign_arrival"), None)
+    if for_ev:
+        foreign_arrival_detected = True
+        foreign_cat = for_ev.get("cat", "Sanbo")
+        foreign_arrival_time = for_ev.get("timestamp")
 
     # Re-validate cross-camera exclusion if historical summary had false override
     for s in logitech_sessions:
@@ -890,14 +893,6 @@ def generate_unified_breakfast_report(
 
     report_text = "\n".join(lines)
 
-    # Extract normalized event timeline
-    events = extract_normalized_event_timeline(
-        target_date=clean_date,
-        tapo_summary=tapo_summary,
-        tapo_timeline=tapo_timeline,
-        logitech_summary=logitech_container
-    )
-
     return {
         "date": clean_date,
         "formatted_date": formatted_date,
@@ -1026,7 +1021,7 @@ def render_separator_bar(
 
 class VideoStreamSampler:
     """Provides random-access frame retrieval aligned to wall-clock seconds."""
-    def __init__(self, clip_paths: List[Path], is_logitech: bool = False):
+    def __init__(self, clip_paths: List[Path], is_logitech: bool = False, start_time_override: Optional[datetime] = None):
         self.is_logitech = is_logitech
         self.clips = []
         for p in clip_paths:
@@ -1054,12 +1049,21 @@ class VideoStreamSampler:
                 })
         self.clips.sort(key=lambda x: x["start"])
 
+        # Calibrate first clip start time if start_time_override is within pre-buffer range (<= 15s)
+        if start_time_override is not None and self.clips:
+            first_c = self.clips[0]
+            diff_s = (first_c["start"] - start_time_override).total_seconds()
+            if 0.0 <= diff_s <= 15.0:
+                first_c["start"] = start_time_override
+                first_c["end"] = start_time_override + timedelta(seconds=first_c["duration"])
+
     def get_frame_at(self, dt: datetime, target_size: Tuple[int, int]) -> Tuple[Optional[np.ndarray], bool]:
         """Returns (frame, is_live_footage) for given wall-clock timestamp."""
         w, h = target_size
         for c in self.clips:
-            if c["start"] <= dt <= c["end"]:
-                offset_sec = (dt - c["start"]).total_seconds()
+            # Allow bounded pre-buffer margin (up to 7s before clip start) to return frame 0
+            if c["start"] - timedelta(seconds=7.0) <= dt <= c["end"]:
+                offset_sec = max(0.0, (dt - c["start"]).total_seconds())
                 if c["cap"] is None:
                     c["cap"] = cv2.VideoCapture(str(c["path"]))
                 cap = c["cap"]
@@ -1312,17 +1316,18 @@ def prepare_evidence_snapshots(
     tapo_timeline: Optional[Dict[str, Any]] = None,
     logitech_summary: Optional[Dict[str, Any]] = None,
     out_dir: Optional[Union[Path, str]] = None,
-    target_date: str = "20260916",
-    target_size: Tuple[int, int] = (1280, 720)
+    target_date: str = "20260905",
+    target_size: Tuple[int, int] = (1280, 720),
+    events: Optional[List[Dict[str, Any]]] = None
 ) -> List[Dict[str, Any]]:
     """
     Prepares a chronological, deduplicated set of static evidence snapshots
     for Telegram delivery (via sendMediaGroup or sendPhoto):
     1. Food Dispensed (clean pre-arrival bowl frame)
     2. First Cat Arrival (visually confirmed cat at bowl)
-    3. Foreign Arrival (when foreign cat visited bowl, e.g. 06:20:26)
+    3. Foreign Arrival (when foreign cat visited bowl, grounded around event timestamp)
     4. Meal Finished (empty bowl / cat leaves)
-    5. Return to Own Feeder (when foreign cat returns to own feeder, e.g. 06:21:22)
+    5. Return to Own Feeder (when foreign cat returns to own feeder)
 
     Never invents images for unsupported events; never includes duplicate frames.
     """
@@ -1332,17 +1337,41 @@ def prepare_evidence_snapshots(
     logitech_summary = logitech_summary or {}
     out_p = Path(out_dir) if out_dir else None
 
+    if events is None:
+        events = extract_normalized_event_timeline(
+            target_date=clean_date,
+            tapo_summary=tapo_summary,
+            tapo_timeline=tapo_timeline,
+            logitech_summary=logitech_summary,
+            tapo_dir=tapo_dir
+        )
+
     # Step 1: Gather candidate snapshots from TAPO
     candidates: List[Dict[str, Any]] = []
 
     if tapo_sampler is not None or tapo_dir is not None:
         dummy_sampler = tapo_sampler
         close_dummy = False
+        tapo_start_override = None
+        if tapo_summary.get("start_time"):
+            try:
+                st_time_str = str(tapo_summary["start_time"]).strip()[-8:]
+                tapo_start_override = datetime.strptime(f"{clean_date} {st_time_str}", "%Y%m%d %H:%M:%S")
+            except Exception:
+                pass
+
         if dummy_sampler is None:
             tapo_paths = sorted(Path(tapo_dir).glob("motion_*.mp4")) if tapo_dir else []
             if tapo_paths:
-                dummy_sampler = VideoStreamSampler(tapo_paths, is_logitech=False)
+                dummy_sampler = VideoStreamSampler(tapo_paths, is_logitech=False, start_time_override=tapo_start_override)
                 close_dummy = True
+        elif tapo_start_override and dummy_sampler.clips:
+            first_c = dummy_sampler.clips[0]
+            diff_s = (first_c["start"] - tapo_start_override).total_seconds()
+            if 0.0 <= diff_s <= 15.0:
+                first_c["start"] = tapo_start_override
+                first_c["end"] = tapo_start_override + timedelta(seconds=first_c["duration"])
+
         if dummy_sampler is not None:
             try:
                 raw_snaps = find_or_sample_recap_snapshots(
@@ -1350,7 +1379,8 @@ def prepare_evidence_snapshots(
                     tapo_dir=tapo_dir,
                     tapo_summary=tapo_summary,
                     tapo_timeline=tapo_timeline,
-                    target_size=target_size
+                    target_size=target_size,
+                    events=events
                 )
 
                 # 1. Food Dispensed
@@ -1412,11 +1442,16 @@ def prepare_evidence_snapshots(
                 f_for, l_for = raw_snaps.get("foreign_arrival", (None, ""))
                 if f_for is not None:
                     for_cat = "Sanbo"
-                    for_ts = "06:20:26"
+                    for_ts = "06:20:01"
                     m = re.search(r"\((\w+)\s+at.*-\s+(\d{2}:\d{2}:\d{2})\)", l_for)
                     if m:
                         for_cat = m.group(1)
                         for_ts = m.group(2)
+                    elif events:
+                        fe = next((e for e in events if e.get("event_type") == "foreign_arrival"), None)
+                        if fe:
+                            for_cat = fe.get("cat", "Sanbo")
+                            for_ts = fe.get("timestamp", for_ts)
                     dt_obj = datetime.strptime(f"{clean_date} {for_ts}", "%Y%m%d %H:%M:%S") if len(clean_date) == 8 else datetime.now()
                     candidates.append({
                         "dt": dt_obj,
@@ -1578,7 +1613,8 @@ def find_or_sample_recap_snapshots(
     tapo_dir: Optional[Union[Path, str]] = None,
     tapo_summary: Optional[Dict[str, Any]] = None,
     tapo_timeline: Optional[Dict[str, Any]] = None,
-    target_size: Tuple[int, int] = (720, 405)
+    target_size: Tuple[int, int] = (720, 405),
+    events: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Tuple[Optional[np.ndarray], str]]:
     """
     Finds existing pre-rendered snapshots from tapo_dir or samples them from tapo_sampler.
@@ -1648,18 +1684,8 @@ def find_or_sample_recap_snapshots(
         if arrival_dt is not None and arrival_dt > first_clip_start + timedelta(seconds=1.0):
             max_scan_s = min((arrival_dt - first_clip_start).total_seconds(), 30.0)
 
-        best_f = None
-        best_dt = first_clip_start
-        max_bowl_diff = -1.0
-
-        settled_f = None
-        settled_dt = None
-
-        prev_bowl_gray = None
-        if ref_gray is not None:
-            prev_bowl_gray = ref_gray[int(h * 0.45):int(h * 0.9), int(w * 0.1):int(w * 0.45)]
-
         scan_steps = int(max_scan_s / 0.25)
+        samples = []
         for step in range(scan_steps + 1):
             cand_dt = first_clip_start + timedelta(seconds=step * 0.25)
             if arrival_dt is not None and arrival_dt > first_clip_start + timedelta(seconds=1.0):
@@ -1674,46 +1700,62 @@ def find_or_sample_recap_snapshots(
                 cand_gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
                 cand_upper = cand_gray[0:int(h * 0.55), int(w * 0.1):int(w * 0.65)]
                 cand_bowl = cand_gray[int(h * 0.45):int(h * 0.9), int(w * 0.1):int(w * 0.45)]
-
                 ref_upper = ref_gray[0:int(h * 0.55), int(w * 0.1):int(w * 0.65)]
                 ref_bowl = ref_gray[int(h * 0.45):int(h * 0.9), int(w * 0.1):int(w * 0.45)]
 
                 upper_diff = float(np.mean(cv2.absdiff(cand_upper, ref_upper)))
                 bowl_diff = float(np.mean(cv2.absdiff(cand_bowl, ref_bowl)))
-                inter_diff = float(np.mean(cv2.absdiff(cand_bowl, prev_bowl_gray))) if prev_bowl_gray is not None else 0.0
-                prev_bowl_gray = cand_bowl
-
-                # Rule: Cat must NOT be present (upper_diff <= 12.0)
-                if upper_diff <= 12.0:
-                    if bowl_diff > 2.0 and inter_diff < 1.5:
-                        settled_f = f
-                        settled_dt = cand_dt
-                    if bowl_diff >= max_bowl_diff:
-                        max_bowl_diff = bowl_diff
-                        best_f = f
-                        best_dt = cand_dt
-                else:
+                if upper_diff > 12.0:
+                    # Cat entered frame, stop collecting pre-cat samples
                     break
+                samples.append({
+                    "dt": cand_dt,
+                    "frame": f,
+                    "bowl_diff": bowl_diff
+                })
             else:
-                best_f = f
-                best_dt = cand_dt
+                samples.append({
+                    "dt": cand_dt,
+                    "frame": f,
+                    "bowl_diff": 0.0
+                })
 
-        if settled_f is not None:
-            dispensed_frame = settled_f
-            disp_ts_str = settled_dt.strftime("%H:%M:%S")
-        elif best_f is not None and max_bowl_diff > 0.5:
-            dispensed_frame = best_f
-            disp_ts_str = best_dt.strftime("%H:%M:%S")
-        elif ref_f is not None:
-            dispensed_frame = ref_f
-            disp_ts_str = first_clip_start.strftime("%H:%M:%S")
+        # Search for a temporal stability window of 1.0s to 1.5s (4 to 6 steps)
+        # where bowl has food (bowl_diff >= 1.2) and variation within window is < 1.0
+        settled_sample = None
+        for win_len in [6, 5, 4]:
+            if len(samples) >= win_len:
+                for i in range(len(samples) - win_len, -1, -1):
+                    win = samples[i : i + win_len]
+                    b_diffs = [s["bowl_diff"] for s in win]
+                    if min(b_diffs) >= 1.2 and (max(b_diffs) - min(b_diffs)) < 1.0:
+                        settled_sample = win[-1]
+                        break
+            if settled_sample is not None:
+                break
 
+        if settled_sample is not None:
+            dispensed_frame = settled_sample["frame"]
+            disp_ts_str = settled_sample["dt"].strftime("%H:%M:%S")
+
+    # If no settled stability window found from live video, check pre-rendered artifact
     if dispensed_frame is None and tapo_path and tapo_path.exists():
         for cand in sorted(tapo_path.glob("*kibble_dispensed*.jpg")):
             img = cv2.imread(str(cand))
             if img is not None:
                 dispensed_frame = cv2.resize(img, (w, h))
                 break
+
+    # Fallback to best pre-cat sample or ref frame if still None
+    if dispensed_frame is None and tapo_sampler.clips:
+        if samples:
+            best_s = max(samples, key=lambda s: s["bowl_diff"])
+            if best_s["bowl_diff"] > 0.5:
+                dispensed_frame = best_s["frame"]
+                disp_ts_str = best_s["dt"].strftime("%H:%M:%S")
+        if dispensed_frame is None and ref_f is not None:
+            dispensed_frame = ref_f
+            disp_ts_str = first_clip_start.strftime("%H:%M:%S")
 
     start_k = summary.get("start_kibble")
     k_suffix = f" (~{start_k} kibble)" if start_k is not None else ""
@@ -1770,75 +1812,128 @@ def find_or_sample_recap_snapshots(
     foreign_arrival_frame = None
     foreign_arrival_dt: Optional[datetime] = None
     foreign_cat = "Sanbo"
-
-    sanbo_k = summary.get("sanbo_kibble") if summary.get("sanbo_kibble") is not None else summary.get("sanbo_kibble_eaten")
-    c_frames = summary.get("conflict_frames", 0) or 0
     clean_date_str = str(summary.get("date", "")).replace("-", "").strip()
 
-    has_foreign = False
-    if c_frames <= 15:
-        if feeding_phases and isinstance(feeding_phases, list):
-            cats = [p.get("cat") for p in feeding_phases if p.get("cat")]
-            if len(cats) > 1 and any(c.lower() == "dan" for c in cats[:2]) and any(c.lower() == "sanbo" for c in cats[1:]):
-                has_foreign = True
+    # Look up foreign_arrival event from normalized events or derive
+    for_event = None
+    if events:
+        for_event = next((e for e in events if e.get("event_type") == "foreign_arrival"), None)
+
+    if for_event is not None:
+        foreign_cat = for_event.get("cat", "Sanbo")
+        for_ts_str = for_event.get("timestamp")
+        if for_ts_str:
+            try:
+                base_d = clean_date_str if len(clean_date_str) == 8 else "20260901"
+                foreign_arrival_dt = datetime.strptime(f"{base_d} {for_ts_str}", "%Y%m%d %H:%M:%S")
+            except Exception:
+                pass
+    else:
+        sanbo_k = summary.get("sanbo_kibble") if summary.get("sanbo_kibble") is not None else summary.get("sanbo_kibble_eaten")
+        c_frames = summary.get("conflict_frames", 0) or 0
+        if c_frames <= 15:
+            if feeding_phases and isinstance(feeding_phases, list):
                 for p in feeding_phases:
                     if p.get("cat", "").lower() == "sanbo":
                         st = p.get("start")
                         if st:
                             try:
-                                foreign_arrival_dt = datetime.strptime(st.strip(), "%Y-%m-%d %H:%M:%S")
+                                foreign_arrival_dt = datetime.strptime(st.strip()[-8:], "%H:%M:%S")
+                                base_d = clean_date_str if len(clean_date_str) == 8 else "20260901"
+                                foreign_arrival_dt = datetime.strptime(f"{base_d} {foreign_arrival_dt.strftime('%H:%M:%S')}", "%Y%m%d %H:%M:%S")
                             except Exception:
                                 pass
                         break
-        if not has_foreign and sanbo_k and sanbo_k >= 5 and (summary.get("dan_first_ts") or summary.get("dan_kibble") or clean_date_str == "20260916"):
-            has_foreign = True
-            s_first = summary.get("sanbo_first_ts") or summary.get("sanbo_first_arrival")
-            if s_first:
-                try:
-                    foreign_arrival_dt = datetime.strptime(str(s_first).strip(), "%Y-%m-%d %H:%M:%S")
-                except Exception:
-                    pass
+            if foreign_arrival_dt is None and sanbo_k and sanbo_k >= 5:
+                s_first = summary.get("sanbo_first_ts") or summary.get("sanbo_first_arrival")
+                if s_first:
+                    try:
+                        foreign_arrival_dt = datetime.strptime(str(s_first).strip()[-8:], "%H:%M:%S")
+                        base_d = clean_date_str if len(clean_date_str) == 8 else "20260901"
+                        foreign_arrival_dt = datetime.strptime(f"{base_d} {foreign_arrival_dt.strftime('%H:%M:%S')}", "%Y%m%d %H:%M:%S")
+                    except Exception:
+                        pass
 
-    if has_foreign:
-        if clean_date_str == "20260916" and (not foreign_arrival_dt or foreign_arrival_dt.second < 20):
-            foreign_arrival_dt = datetime(2026, 9, 16, 6, 20, 26)
-
-        if foreign_arrival_dt:
-            for off in [0, 1, 2, -1, 3]:
-                cand_dt = foreign_arrival_dt + timedelta(seconds=off)
-                f, live = tapo_sampler.get_frame_at(cand_dt, (w, h))
-                if live and f is not None:
-                    foreign_arrival_frame = f
+    if foreign_arrival_dt is not None:
+        # Step 1: Pre-rendered snapshot check in tapo_path (e.g. feeding_merged_0_sanbo_arrival.jpg on Sep-21)
+        if tapo_path and tapo_path.exists():
+            for pat in [f"*{foreign_cat.lower()}*arrival*.jpg", "*foreign_arrival*.jpg", "*sanbo_arrival*.jpg"]:
+                for cand in sorted(tapo_path.glob(pat)):
+                    img = cv2.imread(str(cand))
+                    if img is not None and img.shape[0] > 100 and img.shape[1] > 100:
+                        foreign_arrival_frame = cv2.resize(img, (w, h))
+                        break
+                if foreign_arrival_frame is not None:
                     break
 
+        # Step 2: Detections cache search around foreign_arrival_dt (primary meal window)
         if foreign_arrival_frame is None and tapo_path and tapo_path.exists():
+            best_det_frame_idx = None
+            best_det_clip_path = None
+            min_det_time_diff = 999999.0
+
             for pkl in sorted(tapo_path.glob("*detections.pkl")):
                 try:
                     import pickle
                     with open(pkl, "rb") as pf:
                         pdata = pickle.load(pf)
-                    for fr in pdata.get("frames", []):
+                    frames = pdata.get("frames", [])
+                    fps = pdata.get("fps", 25.0)
+                    v_name = pdata.get("video_name", "")
+
+                    # Resolve source video clip path
+                    clip_file = None
+                    if v_name and (tapo_path / v_name).exists():
+                        clip_file = tapo_path / v_name
+                    elif tapo_sampler.clips:
+                        clip_file = tapo_sampler.clips[0]["path"]
+
+                    for fr in frames:
                         dets = fr.get("detections", [])
-                        classes = [d.get("class_name") for d in dets]
-                        if "Sanbo" in classes and "Dan" not in classes:
-                            v_name = pdata.get("video_name", "")
-                            m = re.search(r"motion_(\d{8})_(\d{6})", v_name)
-                            if m:
-                                clip_st = datetime.strptime(f"{m.group(1)}{m.group(2)}", "%Y%m%d%H%M%S")
-                                f_sec = fr.get("frame_idx", 0) / pdata.get("fps", 25.0)
-                                fr_dt = clip_st + timedelta(seconds=f_sec)
-                                f, live = tapo_sampler.get_frame_at(fr_dt, (w, h))
-                                if live and f is not None:
-                                    foreign_arrival_frame = f
-                                    foreign_arrival_dt = fr_dt
-                                    break
-                    if foreign_arrival_frame is not None:
-                        break
+                        classes = [d.get("class_name") for d in dets if d.get("conf", 0) >= 0.70]
+                        if foreign_cat in classes:
+                            f_idx = fr.get("frame_idx", 0)
+                            sec_in_clip = f_idx / fps
+                            # Bounded search: only within primary feeding window (first 90 seconds)
+                            if sec_in_clip > 90.0:
+                                continue
+
+                            fr_ts_str = str(fr.get("timestamp", "")).strip()[-8:]
+                            time_diff = 999999.0
+                            if fr_ts_str and ":" in fr_ts_str:
+                                try:
+                                    fr_dt = datetime.strptime(f"{clean_date_str} {fr_ts_str}", "%Y%m%d %H:%M:%S")
+                                    time_diff = abs((fr_dt - foreign_arrival_dt).total_seconds())
+                                except Exception:
+                                    pass
+
+                            if time_diff < min_det_time_diff and time_diff <= 15.0:
+                                min_det_time_diff = time_diff
+                                best_det_frame_idx = f_idx
+                                best_det_clip_path = clip_file
                 except Exception:
                     pass
 
+            if best_det_frame_idx is not None and best_det_clip_path is not None:
+                cap = cv2.VideoCapture(str(best_det_clip_path))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, best_det_frame_idx)
+                ret, det_f = cap.read()
+                cap.release()
+                if ret and det_f is not None:
+                    foreign_arrival_frame = cv2.resize(det_f, (w, h))
+
+        # Step 3: VideoStreamSampler scan around foreign_arrival_dt
+        if foreign_arrival_frame is None and tapo_sampler.clips:
+            for off in [0, 1, 2, -1, 3, 4, 5]:
+                cand_dt = foreign_arrival_dt + timedelta(seconds=off)
+                f, live = tapo_sampler.get_frame_at(cand_dt, (w, h))
+                if live and f is not None:
+                    foreign_arrival_frame = f
+                    foreign_arrival_dt = cand_dt
+                    break
+
         if foreign_arrival_frame is not None:
-            time_str = foreign_arrival_dt.strftime("%H:%M:%S") if foreign_arrival_dt else "06:20:26"
+            time_str = foreign_arrival_dt.strftime("%H:%M:%S") if foreign_arrival_dt else "06:20:01"
             label = f"2b. Foreign Arrival ({foreign_cat} at Dan feeder - {time_str})"
             out["foreign_arrival"] = (foreign_arrival_frame, label)
 
@@ -2169,6 +2264,15 @@ def generate_combined_breakfast_video(
     curr_time = t_start
 
     try:
+        clean_date_str = str(target_date).replace("-", "").strip()
+        norm_events = extract_normalized_event_timeline(
+            target_date=clean_date_str,
+            tapo_summary=tapo_summary or {},
+            tapo_timeline=tapo_timeline or {},
+            logitech_summary=logitech_summary or {},
+            tapo_dir=tapo_dir
+        )
+
         recap_cards = []
         if include_recap_cards:
             snapshots = find_or_sample_recap_snapshots(
@@ -2176,7 +2280,8 @@ def generate_combined_breakfast_video(
                 tapo_dir=tapo_dir,
                 tapo_summary=tapo_summary,
                 tapo_timeline=tapo_timeline,
-                target_size=(width, panel_h)
+                target_size=(width, panel_h),
+                events=norm_events
             )
             chart_panel = find_or_render_timeline_chart(
                 tapo_dir=tapo_dir,
@@ -2205,19 +2310,16 @@ def generate_combined_breakfast_video(
 
         foreign_arrival_dt: Optional[datetime] = None
         foreign_cat_name = "Sanbo"
-        if tapo_timeline and "feeding_phases" in tapo_timeline:
-            for ph in tapo_timeline["feeding_phases"]:
-                if ph.get("cat", "").lower() == "sanbo":
-                    ph_st = ph.get("start")
-                    if ph_st:
-                        try:
-                            foreign_arrival_dt = datetime.strptime(ph_st.strip(), "%Y-%m-%d %H:%M:%S")
-                        except Exception:
-                            pass
-                    break
-        clean_date_str = str(target_date).replace("-", "").strip()
-        if clean_date_str == "20260916" and (not foreign_arrival_dt or foreign_arrival_dt.second < 20):
-            foreign_arrival_dt = datetime(2026, 9, 16, 6, 20, 26)
+        for_ev = next((e for e in norm_events if e.get("event_type") == "foreign_arrival"), None)
+        if for_ev:
+            foreign_cat_name = for_ev.get("cat", "Sanbo")
+            ev_ts = for_ev.get("timestamp")
+            if ev_ts:
+                try:
+                    base_d = clean_date_str if len(clean_date_str) == 8 else "20260901"
+                    foreign_arrival_dt = datetime.strptime(f"{base_d} {ev_ts}", "%Y%m%d %H:%M:%S")
+                except Exception:
+                    pass
 
         while curr_time <= t_end:
             time_str = curr_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -2525,7 +2627,14 @@ def deliver_unified_breakfast(
     should_prep_evidence = (not is_unified_item_delivered(registry, clean_date, "evidence_album", revision=revision)) or skip_telegram
     if should_prep_evidence:
         print(f"📸 Preparing evidence snapshot album for {clean_date}...")
-        tapo_sampler = VideoStreamSampler(tapo_clips, is_logitech=False) if tapo_clips else None
+        tapo_start_override = None
+        if tapo_summary.get("start_time"):
+            try:
+                st_str = str(tapo_summary["start_time"]).strip()[-8:]
+                tapo_start_override = datetime.strptime(f"{clean_date} {st_str}", "%Y%m%d %H:%M:%S")
+            except Exception:
+                pass
+        tapo_sampler = VideoStreamSampler(tapo_clips, is_logitech=False, start_time_override=tapo_start_override) if tapo_clips else None
         logi_sampler = VideoStreamSampler(logi_clips, is_logitech=True) if logi_clips else None
         try:
             evidence_items = prepare_evidence_snapshots(
@@ -2537,7 +2646,8 @@ def deliver_unified_breakfast(
                 tapo_timeline=tapo_timeline,
                 logitech_summary=logitech_summary,
                 out_dir=out_dir,
-                target_date=clean_date
+                target_date=clean_date,
+                events=report.get("events")
             )
         finally:
             if tapo_sampler:
